@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+
+import sys
+import argparse
+import json
+import operator
+import terminaltables
+from typing import Dict, List
+
+from lib_testbed.generic.util.base_tool import BaseTool
+from lib_testbed.generic.util.base_tool import ClientPodTool
+from lib_testbed.generic.rpower.rpowerlib import PowerControllerLib
+
+
+class RpowerTool(ClientPodTool):
+    @staticmethod
+    def modify_initial_args(args):
+        BaseTool.modify_initial_args(args)
+
+    def arg_parser(self, args):
+        self.modify_initial_args(args)
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument('-D', '--debug', action="store_true", help="Enable debug logs")
+        parser.add_argument('-j', '--json', action="store_true", help="Set output type: json")
+        if len(args[1:]) == 2:
+            self.add_name_cmd_arguments(parser)
+        else:
+            self.add_cmd_arguments(parser)
+        self.parser_help = f"{parser.format_help()}\n\nAvailable methods:\n"
+        parsed_args = parser.parse_args(args[1:])
+        if getattr(parsed_args, 'name', None):
+            parsed_args.cmd_args.append(parsed_args.name)
+        return parsed_args
+
+    @staticmethod
+    def format_output(cmd, response, obj, json_output):
+        if cmd in ['help']:
+            print(response)
+            return response
+
+        if not response:
+            return
+
+        table_to_print = []
+        if json_output:
+            print(json.dumps(response, indent=2))
+        elif isinstance(response, dict):
+            for device_name, output in response.items():
+                output.insert(0, device_name)
+                table_to_print.append(output)
+            table_to_print = sorted(table_to_print, key=operator.itemgetter(0))
+            table_to_print.insert(0, ['NAME', '$?', 'STDOUT', 'STDERR'])
+            print(terminaltables.DoubleTable(table_to_print).table)
+        else:
+            raise Exception('Can not parse response from the rpower')
+
+    def get_tool_help(self, cmd, verbose=True, prefix='', not_callable=False):
+        return super().get_tool_help(cmd, verbose, "{0} {{<device_name>[,...] | all | pods | clients}} {1}",
+                                     not_callable=False)
+
+    def get_command_list(self, parsed_args):
+        config = self.get_config()
+        skip_init = True if parsed_args.cmd == 'help' else False
+        self.tool = PowerControllerLib(config, skip_init=skip_init)
+
+        commands = self.map_commands_to_methods(self.tool)
+
+        return commands, self.tool
+
+    @property
+    def command_list(self) -> List:
+        cmd_list = ['status', 'on', 'off', 'cycle', 'model', 'version', 'help']
+
+        return cmd_list
+
+    def map_commands_to_methods(self, tool) -> Dict:
+        exceptional_methods = {}
+        mapped_commands = {}
+        for command in self.command_list:
+
+            if command in exceptional_methods.keys():
+                mapped_commands[command] = getattr(tool, exceptional_methods[command])
+            elif "-" in command:
+                mapped_commands[command] = getattr(tool, command.replace('-', '_'))
+            elif "help" in command:
+                mapped_commands[command] = self.get_tool_help_str
+            else:
+                mapped_commands[command] = getattr(tool, command)
+
+        return mapped_commands
+
+
+def main(args):
+    rpower_tool = RpowerTool(args)
+    rpower_tool.execute()
+    exit(0)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

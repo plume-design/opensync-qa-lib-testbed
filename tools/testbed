@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+import sys
+from typing import Dict
+
+from lib_testbed.generic.util.base_tool import TestBedTool
+
+
+class TestBed(TestBedTool):
+    def get_command_list(self, parsed_args):
+        self.tool = self
+        commands = self.map_commands_to_objects(self.tool)
+        return commands, self.tool
+
+    @property
+    def map_commands_to_method_names(self) -> Dict:
+        commands = {'tools': 'tb_tools_list',
+                    'help': 'get_tool_help_str'}
+        return commands
+
+
+def main(args):
+    tb_tool = TestBed(args)
+    tb_tool.execute()
+    exit(0)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

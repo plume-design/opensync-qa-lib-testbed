@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+import sys
+import re
+import traceback
+import argparse
+
+from lib_testbed.generic.util.logger import log
+from lib_testbed.generic.util.base_tool import ClientPodTool
+from lib_testbed.generic.pod.pod import Pods
+
+
+class PodTool(ClientPodTool):
+    def get_command_list(self, parsed_args: argparse.Namespace):
+        """Returns list of commands and a reference to pod lib.
+        Sets the property self.tool which holds a reference to the
+        pod lib tool."""
+        config = self.get_config()
+        kwargs = {'config': config, 'multi_obj': True}
+        names = self.get_nicknames(parsed_args)
+        if names:
+            kwargs['nicknames'] = names
+        try:
+            pods_obj = Pods(**kwargs)
+            pods_api = pods_obj.resolve_obj(**kwargs)
+            pod_lib = pods_api.lib
+            self.tool = pods_api.lib.tool
+        except Exception as e:
+            if self.debug:
+                traceback.print_exc(limit=2, file=sys.stdout)
+            if re.compile(r"name: .* not found in config").match(str(e)) or \
+                    re.compile(r"No device found matching requested criteria.*").match(str(e)):
+                log.error("Unexpected pod name: {}! First parameter should be pod name specifier".format(
+                    kwargs['nicknames']))
+                exit(1)
+            raise
+
+        commands = self.map_commands_to_objects(self.tool)
+
+        return commands, pod_lib
+
+    @property
+    def map_commands_to_method_names(self) -> dict:
+        """Property defines a dict mapping commands into class
+        functions.
+        """
+        commands = {'list': 'list',
+                    'run': 'run',
+                    'version': 'version',
+                    'uptime': 'uptime',
+                    'upgrade': 'upgrade',
+                    'put-file': 'put_file',
+                    'get-file': 'get_file',
+                    'deploy': 'deploy',
+                    'reboot': 'reboot',
+                    'wait': 'wait_available',
+                    'restart': 'restart',
+                    'ping': 'ping',
+                    'ping-check': 'ping_check',
+                    'check': 'check',
+                    'enable': 'enable',
+                    'disable': 'disable',
+                    'info': 'info',
+                    'model': 'get_model',
+                    'role': 'role',
+                    'bssid': 'bssid',
+                    'recover': 'recover',
+                    'serial': 'get_serial_number',
+                    'sanity': 'sanity',
+                    'ssh': 'ssh',
+                    'get-crash': 'get_crash',
+                    'get-logs': 'get_logs',
+                    'connected': 'connected',
+                    'get-table': 'get_ovsh_table_tool',
+                    'get-ips': 'get_ips',
+                    'start-wps': 'start_wps_session',
+                    'set-region': 'set_region',
+                    'get-region': 'get_region',
+                    'trigger-radar': 'trigger_radar',
+                    'simulate-clients': 'simulate_clients',
+                    'local-mqtt-broker': 'local_mqtt_broker',
+                    'get-radio-temp': 'get_radio_temperatures',
+                    'get-wano-config': 'get_wano_config',
+                    'set-wano-config': 'set_wano_config',
+                    'list-builds': 'list_builds',
+                    'fused': 'is_fuse_burned',
+                    'help': 'get_tool_help_str'}
+
+        return commands
+
+
+def main(args):
+    """Main entry point function triggering the pod tool execution"""
+    pod_tool = PodTool(args)
+    pod_tool.execute()
+    exit(0)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

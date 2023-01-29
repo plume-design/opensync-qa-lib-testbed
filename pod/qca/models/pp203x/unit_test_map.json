@@ -1,0 +1,62 @@
+{
+  "4.2.0": {
+    "proj-name": "build_caesar_v4.2.0",
+    "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "4.2.1": {
+    "proj-name": "build_caesar_v4.2.1",
+    "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "4.4.0": {
+    "proj-name": "build_caesar_v4.4.0",
+    "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.1.0": {
+    "proj-name": "build_caesar_v5.1.0",
+    "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.1.1": {
+    "proj-name": "build_caesar_v5.1.1",
+    "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.1.2": {
+    "proj-name": "build_caesar_v5.1.2",
+    "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.2.0": {
+    "proj-name": "build_caesar_v5.2.0",
+    "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.3.0": {
+    "proj-name": "build_caesar_v5.3.0",
+    "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.3.1": {
+    "proj-name": "build_caesar_v5.3.1",
+    "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "master": {
+    "proj-name": "build_caesar_master",
+    "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  }
+}

@@ -1,0 +1,171 @@
+#!/bin/sh -ae
+
+export DOCKER_TAG=${DOCKER_TAG:-'trident'}
+RUN_DOCKER_TAG="${DOCKER_TAG}"
+SKIP_DOCKER_START=${SKIP_DOCKER_START:-}
+DOCKER_SKIP_FULL=${DOCKER_SKIP_FULL:-}
+DOCKER_HOSTNAME=${DOCKER_HOSTNAME:-"$(hostname)-docker"}
+
+if [ -z "${OPENSYNC_ROOT}" ]; then
+    echo Missing env OPENSYNC_ROOT >&2
+    exit 1
+fi
+if [ -z "${DOCKER_ROOT}" ]; then
+    echo Missing env DOCKER_ROOT >&2
+    exit 1
+fi
+
+. "${DOCKER_ROOT}/docker-shell-utils.sh"
+
+if [ -t 1 -a -t 0 ]; then
+    TTY="--interactive --tty"
+fi
+
+if [ -z "${LOUD_DOCKER_BUILD}" ]; then
+    QUIET_BUILD="--quiet"
+else
+    QUIET_BUILD=""
+fi
+
+if [ "$(uname)" = "Darwin" ]; then
+    # MacOS
+    _USER=''
+    _FLOCK=''
+    _TIMEZONE="-e TZ=$(readlink /etc/localtime | sed 's#/var/db/timezone/zoneinfo/##')"
+    # workaround for storing pyCharm preferences
+    _MOUNT_ROOT='-v/var/root/.ssh:/var/root/.ssh'
+    [[ -f /usr/X11/bin/xhost ]] && \
+        (socat TCP-LISTEN:6000,reuseaddr,fork UNIX-CLIENT:\"$DISPLAY\" &) && \
+        IP=$(/sbin/ifconfig en0 | grep inet | awk '$1=="inet" {print $2}') && \
+        /usr/X11/bin/xhost + $IP && \
+        DISPLAY=$IP:0 || \
+    echo "Install xquartz for X11 support"
+else
+    # Linux
+    _USER="--user $(id -u):$(id -g)"
+    _MOUNT_ROOT=''
+    _FLOCK_W_ARG=$(flock 2>&1 | grep -qF -- -w && printf "%s" "-w 3600" || echo)
+    _FLOCK="flock $_FLOCK_W_ARG -x 9"
+    if [ -n "$TZ" ]; then
+        _TIMEZONE="-e TZ=$TZ"
+    elif [ -f /etc/timezone ]; then
+        _TIMEZONE="-e TZ=$(cat /etc/timezone)"
+    else
+        _TIMEZONE="-v /etc/localtime:/etc/localtime"
+    fi
+fi
+
+TMP_AUTOMATION_DIR="/tmp/automation-user-$(id -u)/"
+mkdir -p "${TMP_AUTOMATION_DIR}"
+
+# Skip adding tmp user dir for single / first user for backwards compatibility
+if [ $(find "/tmp" -maxdepth 1 -type d -path "/tmp/automation-user-*" 2>/dev/null | wc -w) = "1" ]; then
+    TMP_AUTOMATION_DIR="/tmp/automation"
+fi
+
+mkdir -p "${TMP_AUTOMATION_DIR}/allure-results" "${TMP_AUTOMATION_DIR}/.local"
+chmod -R 777 "${TMP_AUTOMATION_DIR}" || true
+
+(
+    echo grabbing docker build lock ... >&2
+    $_FLOCK
+    cd "$DOCKER_ROOT"
+    echo building docker $DOCKER_TAG ... >&2
+    # First build base docker file to get latest TRIDENT image
+    docker build $QUIET_BUILD --network=host --tag "$DOCKER_TAG-base" . -f Dockerfile.base >&2
+    # Build docker file according to architecture of machine
+    if [ -z `uname -a | grep -io armv7l` ]; then
+        # install pip-packages after building Dockerfile.full
+        # Dockerfile.pip_x86-64 is pointed to tag from building Dockerfile.full
+        # and this is reason why we need two Dockerfiles for install pip packages
+        if [ "${DOCKER_SKIP_FULL}" != "true" ]; then
+            docker build $QUIET_BUILD --network=host --tag "$DOCKER_TAG-full-base" --build-arg PARENT_IMAGE="${DOCKER_TAG}-base" . -f Dockerfile.full >&2
+            docker build $QUIET_BUILD --network=host --tag "$DOCKER_TAG-full" --build-arg PARENT_IMAGE="${DOCKER_TAG}-full-base" . -f Dockerfile.pip_x86-64 >&2
+        else
+            docker build $QUIET_BUILD --network=host --tag "$DOCKER_TAG" --build-arg PARENT_IMAGE="${DOCKER_TAG}-base" . -f Dockerfile.pip_x86-64 >&2
+        fi
+    else
+        # install pip-packages after building Dockerfile.base
+        docker build $QUIET_BUILD --network=host --tag "$DOCKER_TAG" --build-arg PARENT_IMAGE="${DOCKER_TAG}-base" . -f Dockerfile.pip_arm >&2
+    fi
+
+) 9>"/tmp/dockrun_$(id -u)_lockfile"
+
+if [ -z `uname -a | grep -io armv7l` ] && [ "${DOCKER_SKIP_FULL}" != "true" ]; then
+    RUN_DOCKER_TAG="${DOCKER_TAG}-full"
+fi
+
+# Set the name for the container to have the possibility to kill it in Jenkins
+DOCKER_CONTAINER_NAME_OPT=''
+if [ -n "${JOB_BASE_NAME}" ] && [ -z "${PR_CHECK}" ]; then
+    DOCKER_CONTAINER_NAME_OPT="--name $(get_container_name_for_jenkins_job)"
+fi
+
+SSHARGS=
+if [ -e "$SSH_AUTH_SOCK" ]; then
+    SSHARGS="-eSSH_AUTH_SOCK -v"$SSH_AUTH_SOCK:$SSH_AUTH_SOCK""
+fi
+
+_MOUNT_CUR_DIR=
+if [ "$OPENSYNC_ROOT" != "$(pwd)" ]; then
+    _MOUNT_CUR_DIR="-v$(pwd):$(pwd)"
+fi
+
+if [ -n "${SKIP_DOCKER_START}" ]; then
+    return 0
+fi
+
+sig='INT HUP KILL TERM EXIT QUIT'
+id=
+cleanup() { r=$?; trap - $sig; test -z $id || docker kill $id; exit $r; }
+trap cleanup $sig
+id=$(docker create \
+        --rm \
+        --hostname $DOCKER_HOSTNAME $DOCKER_NAME \
+        --init \
+        $TTY \
+        --tmpfs=/tmp:exec \
+        --net host \
+        --env debian_chroot=DOCKER:"$RUN_DOCKER_TAG" \
+        --env HOME="$HOME" \
+        --env TERM \
+        --env JOB_NAME \
+        --env BUILD_NUMBER \
+        --env BUILD_URL \
+        --env CLOUD_SMOKE_USER \
+        --env CLOUD_SMOKE_PASS \
+        --env OPENSYNC_ROOT \
+        --env DISPLAY=$DISPLAY \
+        --env QT_X11_NO_MITSHM=1 \
+        --workdir "$(pwd)" \
+        -v/"$OPENSYNC_ROOT":"$OPENSYNC_ROOT"\
+        -v/etc/passwd:/etc/passwd \
+        -v/etc/group:/etc/group \
+        -v$HOME:$HOME \
+        -v"${TMP_AUTOMATION_DIR}/.local":"$HOME/.local" \
+        -v"${TMP_AUTOMATION_DIR}/allure-results":/tmp/allure-results \
+        -v"${TMP_AUTOMATION_DIR}":/tmp/automation \
+        -v/tmp/.X11-unix:/tmp/.X11-unix \
+        -v/dev/shm:/dev/shm \
+        --shm-size 1G \
+        $_MOUNT_CUR_DIR \
+        $_MOUNT_ROOT \
+        $_USER \
+        $_TIMEZONE \
+        $DOCKER_OPTS \
+        $SSHARGS \
+        $DOCKER_CONTAINER_NAME_OPT \
+        "$RUN_DOCKER_TAG" \
+        sh -c '
+            export PYTHONDONTWRITEBYTECODE=true
+            export PYTHONPATH="$OPENSYNC_ROOT:$PYTHONPATH"
+            export PYTHON_PATH="$OPENSYNC_ROOT:$PYTHON_PATH"
+            export PATH="$OPENSYNC_ROOT/tools:$PATH"
+            export SHELL=/bin/bash
+            exec "$@"' - "$@")
+set +e
+
+docker start -ai $id
+r=$?
+id=
+exit $r

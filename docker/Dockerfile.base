@@ -1,0 +1,75 @@
+FROM ubuntu:22.04
+ENV PATH /usr/local/bin:$PATH
+ENV LC_ALL C.UTF-8
+ENV LANG C.UTF-8
+ENV DEBIAN_FRONTEND noninteractive
+# Install required packages
+RUN DEBIAN_FRONTEND=noninteractive apt update && apt install -y tshark
+RUN apt update && apt install -y  \
+    python3-pip \
+    apt-utils \
+    git-core \
+    iputils-ping \
+    traceroute \
+    telnet \
+    wget \
+    curl \
+    vim \
+    bsdmainutils \
+    zip \
+    expect \
+    sshpass \
+    pkg-config \
+    libfreetype6-dev \
+    libpq-dev \
+    libxml2-dev \
+    libxslt-dev \
+    nano \
+    xterm \
+    texlive-latex-extra \
+    texlive-pictures \
+    biber \
+    bash-completion \
+    libsnappy-dev \
+    python3-tk \
+    protobuf-compiler \
+    libjpeg8-dev \
+    libffi-dev \
+    libssl-dev \
+    cargo \
+    udev
+
+# Set default python as python3
+RUN ln /usr/bin/python3.10 /usr/bin/python
+
+# Update pip
+RUN pip install --upgrade pip
+
+# -- Install allure
+RUN wget https://repo.maven.apache.org/maven2/io/qameta/allure/allure-commandline/2.10.0/allure-commandline-2.10.0.zip
+RUN unzip allure-*.zip && rm allure-*.zip && mv allure-* allure && mv allure /opt/
+ENV ALLURE_GEN_FILE=/opt/allure/bin/allure-gen
+COPY allure-gen ${ALLURE_GEN_FILE}
+RUN chmod a+x ${ALLURE_GEN_FILE}
+ENV ALLURE_SHOW_FILE=/opt/allure/bin/allure-show
+COPY allure-show ${ALLURE_SHOW_FILE}
+RUN chmod a+x ${ALLURE_SHOW_FILE}
+ENV PATH="/opt/allure/bin:${PATH}"
+
+# -- Install flake8-check script
+ENV FLAKE8_CHECK_FILE=/usr/bin/flake8-check
+COPY flake8-check ${FLAKE8_CHECK_FILE}
+RUN chmod a+x ${FLAKE8_CHECK_FILE}
+
+RUN mkdir -p /plume
+
+# -- Matplotlib stuff
+ENV MPLBACKEND=Agg
+RUN export MPLBACKEND
+
+# -- Install pipenv
+ENV SETUPTOOLS_USE_DISTUTILS=stdlib
+RUN pip3 install setuptools==63.2.0 setuptools-scm pipenv==2022.6.7
+
+# -- Adding autocomplete to pset command
+COPY pset /etc/bash_completion.d/

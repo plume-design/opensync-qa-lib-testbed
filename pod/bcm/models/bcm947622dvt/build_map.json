@@ -1,0 +1,72 @@
+{
+  "short-name": "BCM947622DVT",
+  "s3-bucket": "",
+  "fn-regex": "bcm947622GW.*_nand_fs_image_256_pureubi_5.02L.07p2",
+  "4.2.0": {
+    "proj-name": "build_BCM947622DVT_v4.2.0",
+    "fn-prefix": "bcm947622GW+NOCMS+OPENSYNC+IMPL71_nand_fs_image_256_puresqubi_5.02L.07p2",
+    "encryption": false,
+    "img-suffix": "w"
+  },
+  "4.4.0": {
+    "proj-name": "build_BCM947622DVT_v4.4.0",
+    "fn-prefix": "bcm947622GW+ARMGCC53+SPU+IMPL71+NOCMS+OPENSYNC_nand_fs_image_256_pureubi_5.02L.07p2",
+    "encryption": false,
+    "img-suffix": "w"
+  },
+  "5.1.0": {
+    "proj-name": "build_BCM947622DVT_v5.1.0",
+    "fn-prefix": "bcm947622GW+ARMGCC53+SPU+IMPL71+NOCMS+OPENSYNC_nand_fs_image_256_pureubi_5.02L.07p2",
+    "encryption": false,
+    "img-suffix": "w"
+  },
+  "5.1.1": {
+    "proj-name": "build_BCM947622DVT_v5.1.1",
+    "fn-prefix": "bcm947622GW+ARMGCC53+SPU+IMPL71+NOCMS+OPENSYNC_nand_fs_image_256_pureubi_5.02L.07p2",
+    "encryption": false,
+    "img-suffix": "w"
+  },
+  "5.1.2": {
+    "proj-name": "build_BCM947622DVT_v5.1.2",
+    "fn-prefix": "bcm947622GW+ARMGCC53+SPU+IMPL71+NOCMS+OPENSYNC_nand_fs_image_256_pureubi_5.02L.07p2",
+    "encryption": false,
+    "img-suffix": "w"
+  },
+  "5.2.0": {
+    "proj-name": "build_BCM947622DVT_v5.2.0",
+    "fn-prefix": "bcm947622GW+ARMGCC53+SPU+IMPL71+NOCMS+OPENSYNC_nand_fs_image_256_pureubi_5.02L.07p2",
+    "encryption": false,
+    "img-suffix": "w"
+  },
+  "5.3.0": {
+    "proj-name": "build_BCM947622DVT_v5.3.0",
+    "fn-prefix": "bcm947622GW+ARMGCC53+SPU+IMPL71+NOCMS+OPENSYNC_nand_fs_image_256_pureubi_5.02L.07p2",
+    "encryption": false,
+    "img-suffix": "w"
+  },
+  "5.3.1": {
+    "proj-name": "build_BCM947622DVT_v5.3.1",
+    "fn-prefix": "bcm947622GW+ARMGCC53+SPU+IMPL71+NOCMS+OPENSYNC_nand_fs_image_256_pureubi_5.02L.07p2",
+    "encryption": false,
+    "img-suffix": "w"
+  },
+  "master": {
+    "proj-name": "build_BCM947622DVT_master",
+    "fn-regex": "bcm947622GW.*_nand_fs_image_256_puresqubi_5.02L.07p2",
+    "encryption": false,
+    "img-suffix": "w"
+  },
+  "SDK542_master": {
+    "proj-name": "build_BCM947622DVT_SDK542_master",
+    "fn-regex": "BCM947622DVT_nand256_ubifs_update",
+    "encryption": false,
+    "img-suffix": "pkgtb"
+  },
+  "build_device_featurebranch": {
+    "proj-name": "build_device_featurebranch",
+    "fn-regex": "bcm947622GW.*_nand_fs_image_256_puresqubi_5.02L.07p2",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  }
+}

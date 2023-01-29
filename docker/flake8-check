@@ -1,0 +1,3 @@
+#!/bin/bash
+
+git diff HEAD~20 | flake8 --format="$OPENSYNC_ROOT/%(path)s:%(row)d: [%(code)s] %(text)s" --diff

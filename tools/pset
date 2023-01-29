@@ -1,0 +1,155 @@
+#!/bin/bash
+
+OPENSYNC_ROOT=$(dirname "$(dirname "$(dirname "$(dirname "$(realpath "$0")")")")")
+#echo "OPENSYNC_ROOT=$OPENSYNC_ROOT"
+
+export PATH=$OPENSYNC_ROOT/tools:$OPENSYNC_ROOT/lib_testbed/generic/tools:$PATH
+export PYTHONPATH=$OPENSYNC_ROOT:$OPENSYNC_ROOT/lib_testbed/generic/tools:$PYTHONPATH
+
+
+PROMPT='
+  cyan=$(tput setaf 6)
+  green=$(tput setaf 2)
+  blue=$(tput setaf 4)
+  bold=$(tput bold)
+  reset=$(tput sgr0)
+  PS1="\[$bold\]\[$cyan\][$OPENSYNC_TESTBED]\[$green\]\u@\h:\[$blue\]\w\[$reset\]\$ "
+'
+show_tools()
+{
+    echo
+    source_dir="$(dirname ${BASH_SOURCE[0]})"
+    python ${source_dir}/testbed tools
+    echo
+}
+
+list_testbeds()
+{
+    local test_beds=$(for i in $OPENSYNC_ROOT/config/locations/*; do echo $(basename $i) | sed -e 's/.yaml//g'; done)
+    echo
+    echo "========================="
+    echo "== Configured testbeds =="
+    echo "========================="
+    echo
+    echo "$test_beds" | ( tty <&1 >/dev/null && column || cat )
+    echo
+}
+
+prun()
+{
+    if [[ -n "$OPENSYNC_TESTBED" ]]; then
+        echo "OPENSYNC_TESTBED=$OPENSYNC_TESTBED"
+        if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+            show_tools
+            echo "Testbed environment is running in a sub-shell. To leave it, use 'exit'."
+            echo; echo
+            exit
+        else
+            echo
+            echo "OPENSYNC_TESTBED is set, please first deactivate with 'exit'!"
+            echo
+            exit 1
+        fi
+    fi
+
+    if [[ -e /.dockerenv ]]; then
+        if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+            list_testbeds && show_tools
+
+            echo "Most of the tools require a testbed to be selected via the 'pset' command. To select a testbed, run:"
+            echo "    $0 <testbed_name>"
+            echo "A testbed environment runs in a sub-shell. To leave it, use:"
+            echo "    exit"
+            echo "To run a single command on a testbed, use:"
+            echo "    $0 <testbed_name> <command> [<parameters>]"
+            echo; echo
+
+            exit
+        fi
+
+        if [[ -f $OPENSYNC_ROOT/config/locations/$1.yaml ]]; then
+            export OPENSYNC_TESTBED=$1
+            if [[ -z ${PROMPT_COMMAND} ]]; then
+                export PROMPT_COMMAND=${PROMPT}
+            else
+                export debian_chroot="testbed:$OPENSYNC_TESTBED"
+            fi
+            shift
+            reserve . get >&2
+            if [[ $# -eq 0 ]]; then
+                show_tools >&2
+            fi
+            if [[ $# -eq 0 ]]; then
+                set -- "${SHELL:-/bin/bash}"
+            fi
+            exec "$@"
+        else
+            echo "Configuration for location $1 not found."
+            return 1
+        fi
+
+        return
+    fi
+
+    if [[ -e "$OPENSYNC_ROOT/Pipfile.lock" ]]; then
+        if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+            list_testbeds && show_tools
+
+            echo "To activate the lib-testbed python environment, run:"
+            echo "    $0 pipenv"
+            echo "To deactivate the lib-testbed python environment, use:"
+            echo "   exit"
+            echo "Other examples:"
+            echo "    $0 pipenv ptopo --location-id ..."
+            echo "    $0 slotent pod pod3 ssh"
+            echo "    $0 slotent python test_cases/python/onboarding/node_health.py"
+            echo; echo
+
+            exit
+        fi
+
+        if [[ "$1" == "pipenv" ]]; then
+            echo "Activating pipenv..."
+            shift
+            cd $OPENSYNC_ROOT
+            if [[ $# -eq 0 ]]; then
+                export PROMPT_COMMAND=${PROMPT}
+                pipenv shell
+            else
+                pipenv shell "$@; exit"
+            fi
+            cd - > /dev/null
+        elif [[ "$1" == "exit" ]]; then
+            echo "Deactivating virtenv..."
+            unset OPENSYNC_TESTBED
+            exit
+        elif [[ -f $OPENSYNC_ROOT/config/locations/$1.yaml ]]; then
+            export OPENSYNC_TESTBED=$1
+            echo "Activating pipenv for $OPENSYNC_TESTBED"
+            shift
+            cd $OPENSYNC_ROOT
+            if [[ $# -eq 0 ]]; then
+                export PROMPT_COMMAND=${PROMPT}
+                pipenv shell "reserve . get && testbed tools"
+            else
+                pipenv shell "$@; exit"
+            fi
+            cd - > /dev/null
+        else
+            echo "Configuration for location $1 not found."
+            return 1
+        fi
+
+        return
+    fi
+
+    echo
+    echo "The environment (docker/pipenv) is not set up correctly."
+    echo "Use the supplied docker image for the correct environment."
+    echo
+    echo "For further details, see $OPENSYNC_ROOT/README.md"
+    echo
+    return 1
+}
+
+prun "$@"

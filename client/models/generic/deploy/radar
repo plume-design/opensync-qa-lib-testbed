@@ -1,0 +1,165 @@
+#!/usr/bin/env python2
+# version: 1.0.3
+# # Install next packages. They includes only python2 libraries.
+# sudo apt install gnuradio gr-osmosdr rtl-sdr hackrf
+#
+# # Add udev roule to file /etc/udev/rules.d/53-hackrf.rules
+# ATTR{idVendor}=="1d50", ATTR{idProduct}=="6089", SYMLINK+="hackrf-one-%k", MODE="660", GROUP="plugdev"
+#
+# # Add current user to plugdev group
+# sudo usermod -a -G plugdev <user name>
+#
+# # Test if HackFR device is present
+# hackrf_info
+
+import os
+import sys
+import time
+import argparse
+import osmosdr
+import pmt
+from gnuradio import blocks
+from gnuradio import gr
+
+
+# Available channels and frequencies
+channels = {
+    44:  5220000000,
+    52:  5260000000,
+    56:  5280000000,
+    60:  5300000000,
+    64:  5320000000,
+    100: 5500000000,
+    104: 5520000000,
+    108: 5540000000,
+    112: 5560000000,
+    116: 5580000000,
+    120: 5600000000,
+    124: 5620000000,
+    128: 5640000000,
+    132: 5660000000,
+    136: 5680000000,
+    140: 5700000000,
+    157: 5785000000
+}
+
+# Available vectors
+vectors = {
+    "us": [
+        [1] * 15 + [0] * 250,
+        [1] * 1 + [0] * 1428,
+        [1] * 1 + [0] * 1000,
+        [1] * 5 + [0] * 200,
+        [1] * 8 + [0] * 350
+    ],
+    "eu": [
+        [1] * 3 + [0] * 1667,
+        [1] * 8 + [0] * 1111,
+        [1] * 8 + [0] * 317,
+        [1] * 25 + [0] * 333,
+        [1] * 1 + [0] * 2857,
+        [1] * 1 + [0] * 1250,
+    ]
+}
+
+
+def parse_cli():
+    """Parse command line arguments
+    Returns (dict): {<argument>: <value>}
+    """
+    parser = argparse.ArgumentParser(description='DFS radar simulation using HackRf One device.',
+                                     argument_default=argparse.SUPPRESS,
+                                     formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument("cmd", help="Select what to do: \n"
+                                    "hwstatus   Check if HackRF is installed and connected \n"
+                                    "pulse      Generate radar pulse with HackRF radio")
+    parser.add_argument("-c", "--channel", type=int, default=60,
+                        help="Select channel \n"
+                             "(52, 56, 60, 64, 100, 104, 108, 112, \n"
+                             "116, 120, 124, 128, 132, 136, 140)")
+    parser.add_argument("-r", "--region", type=str, default="us",
+                        help="Select vector region (eu or us)")
+    parser.add_argument("-v", "--vector", type=int, default=1,
+                        help="Select vector ID\n"
+                        "US:\n"
+                        "  1: [1] * 15 + [0] * 250\n"
+                        "  2: [1] * 1 + [0] * 1428\n"
+                        "  3: [1] * 1 + [0] * 1000\n"
+                        "  4: [1] * 5 + [0] * 200\n"
+                        "  5: [1] * 8 + [0] * 350\n"
+                        "EU:\n"
+                        "  1: [1] * 3 + [0] * 1667\n"
+                        "  2: [1] * 8 + [0] * 1111\n"
+                        "  3: [1] * 8 + [0] * 317\n"
+                        "  4: [1] * 25 + [0] * 333\n"
+                        "  5: [1] * 1 + [0] * 2857\n"
+                        "  6: [1] * 1 + [0] * 1250")
+    parser.add_argument("-t", "--transmit-time", type=int, default=30, help="Set transmit time")
+    return vars(parser.parse_args())
+
+
+class RadarSim(gr.top_block):
+    def __init__(self):
+        """DFS radar simulation using HackRf One device."""
+        gr.top_block.__init__(self, "Top Block")
+
+    def configure(self, frequency, vector_id):
+        """Configure HackRF One
+        Args:
+            frequency (int): Tx frequency in Hz
+            vector_id (list): Vector ID
+        """
+        # Osmocom Sink
+        self.osmosdr_sink_0 = osmosdr.sink(args="numchan=" + str(1) + " " + "")
+        self.osmosdr_sink_0.set_time_source('gpsdo', 0)
+        self.osmosdr_sink_0.set_sample_rate(1 * 1000 * 1000)  # 1 MHz
+        self.osmosdr_sink_0.set_center_freq(frequency, 0)
+        self.osmosdr_sink_0.set_freq_corr(0, 0)
+        self.osmosdr_sink_0.set_gain(10, 0)
+        self.osmosdr_sink_0.set_if_gain(40, 0)
+        self.osmosdr_sink_0.set_bb_gain(20, 0)
+        self.osmosdr_sink_0.set_antenna("", 0)
+        self.osmosdr_sink_0.set_bandwidth(20 * 1000 * 1000, 0)  # 20MHz
+        # Vector Source
+        self.blocks_vector_source_x_0 = blocks.vector_source_c(vector_id, True, 1, [])
+        # Message Strobe
+        self.blocks_message_strobe_0 = blocks.message_strobe(pmt.intern("TEST"), 1000)
+        # Copy
+        self.blocks_copy_0 = blocks.copy(gr.sizeof_gr_complex * 1)
+        self.blocks_copy_0.set_enabled(False)
+        # Connections
+        self.connect((self.blocks_copy_0, 0), (self.osmosdr_sink_0, 0))
+        self.connect((self.blocks_vector_source_x_0, 0), (self.blocks_copy_0, 0))
+
+    def transmit(self, enable):
+        """Start or stop transmitting
+        Args:
+            enable (bool): Start transmitting if True, otherwise stop transmitting.
+        """
+        self.blocks_copy_0.set_enabled(enable)
+        if enable:
+            self.start()
+            print("Start transmitting...")
+        else:
+            self.stop()
+            self.wait()
+            print("Stop transmitting...")
+
+
+if __name__ == '__main__':
+    args = parse_cli()
+    if args['cmd'] == 'hwstatus':
+        os.system('hackrf_info')
+        sys.exit(0)
+    print("Selected configuration:")
+    print(f"  - Channel  : {args['channel']}")
+    print(f"  - Region   : {args['region']}")
+    print(f"  - Vector ID: {args['vector']}")
+    print(f"  - Transmit : {args['transmit_time']} s")
+
+    rs = RadarSim()
+    rs.configure(frequency=channels[args["channel"]],
+                 vector_id=vectors[args["region"]][args["vector"]])
+    rs.transmit(True)
+    time.sleep(args["transmit_time"])
+    rs.transmit(False)

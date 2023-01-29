@@ -1,0 +1,10 @@
+#!/bin/bash
+
+. /tb.conf
+
+if [ ! -f $0.$os ]; then
+    echo "Error: $os OS not supported"
+    exit 1
+fi
+
+exec $0.$os "$@"

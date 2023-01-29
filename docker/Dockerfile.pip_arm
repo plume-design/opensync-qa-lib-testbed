@@ -1,0 +1,8 @@
+ARG PARENT_IMAGE=""
+FROM $PARENT_IMAGE:latest
+
+# -- Adding Pipfiles
+COPY Pipfile Pipfile.lock ./
+
+# -- Install Pipfile dependencies:
+RUN set -x && pipenv install --deploy --system --ignore-pipfile

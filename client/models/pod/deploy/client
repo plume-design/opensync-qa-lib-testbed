@@ -1,0 +1,38 @@
+#!/bin/sh /etc/rc.common
+
+START=20
+#STOP=20
+
+SERVICE_DAEMONIZE=0
+SERVICE_WRITE_PID=0
+SERVICE_USE_PID=0
+
+NAME=client
+PIDCOUNT=0
+
+
+start() {
+    if [ -e /etc/rc.d/S961manager ]; then
+        rm /etc/rc.d/S961manager
+    fi
+    /etc/init.d/wpd stop
+    /etc/init.d/manager stop
+    /etc/init.d/healthcheck stop
+    /etc/init.d/wpd disable
+    /etc/init.d/manager disable
+    /etc/init.d/healthcheck disable
+    /etc/init.d/debugnet start
+    /etc/init.d/dropbear start
+}
+
+stop() {
+    if [ -e /etc/rc.d/S961manager ]; then
+        rm /etc/rc.d/S961manager
+    fi
+    /etc/init.d/healthcheck enable
+    /etc/init.d/manager enable
+    /etc/init.d/wpd enable
+    /etc/init.d/healthcheck start
+    /etc/init.d/manager start
+    /etc/init.d/wpd start
+}

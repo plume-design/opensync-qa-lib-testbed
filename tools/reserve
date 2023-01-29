@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+import sys
+import os
+import re
+import argparse
+import traceback
+import operator
+import terminaltables
+import queue
+from fnmatch import fnmatch
+from threading import Thread
+
+from lib_testbed.generic.util.logger import log
+from lib_testbed.generic.util import config
+from lib_testbed.generic.util.base_tool import BaseTool
+from lib_testbed.generic.util.reservelib import ReserveLib
+
+
+class ReserveTool(BaseTool):
+    @staticmethod
+    def modify_initial_args(args):
+        if len(args) == 1:
+            args.extend(['example', 'help'])
+            return
+        for i, arg in enumerate(args):
+            if i == 0:
+                continue
+            if arg in ['-h', '--help'] and (i == 1 or args[i - 1].startswith("-")):
+                args[i] = 'example'
+                args.append('help')
+                break
+
+    def arg_parser(self, args):
+        self.modify_initial_args(args)
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument('-D', '--debug', action="store_true", help="Enable debug logs")
+        parser.add_argument('-j', '--json', action="store_true", help="Set output type: json")
+        parser.add_argument('-f', '--force', action="store_true", help="Force reservation")
+        parser.add_argument('-m', '--message', type=str, help="Add message denoting reason for TB reservation")
+        self.add_name_cmd_arguments(parser)
+        self.parser_help = f"{parser.format_help()}\n\nAvailable methods:\n"
+        parsed_args = parser.parse_args(args[1:])
+        if parsed_args.debug:
+            args.remove('-D')
+        return parsed_args
+
+    # we need that to parse args for reserve tool to get the Tb name in the initial phase
+    @staticmethod
+    def static_arg_parser(args):
+        ReserveTool.modify_initial_args(args)
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument('-D', '--debug', action="store_true", help="Enable debug logs")
+        parser.add_argument('-j', '--json', action="store_true", help="Set output type: json")
+        parser.add_argument('-f', '--force', action="store_true", help="Force reservation")
+        parser.add_argument('-m', '--message', type=str, help="Add message denoting reason for TB reservation")
+        ReserveTool.add_name_cmd_arguments(parser)
+        parsed_args = parser.parse_args(args[1:])
+        return parsed_args
+
+    @staticmethod
+    def get_config(name):
+        tb_path = config.find_location_file(name)
+        tb_config = config.load_tb_config(tb_path, skip_deployment=True)
+        tb_config['location_file'] = tb_path
+        return tb_config
+
+    @staticmethod
+    def format_output(cmd, response, obj, json_output):
+        if cmd in ['help']:
+            print(response)
+            return
+        return response
+
+    def get_tool_help(self, cmd, verbose=True, prefix='', not_callable=False):
+        return super().get_tool_help(cmd, verbose, prefix="{0} {{tb_name[,...] | . | tb* | all}} {1}",
+                                     not_callable=False)
+
+    def check_if_help_on_method_is_called(self):
+        pass
+
+    def get_command_list(self, parsed_args):
+        kwargs = {'config': self.tb_config, 'json': self.json_output}
+        try:
+            reservelib = ReserveLib(**kwargs)
+        except Exception as e:
+            if self.debug:
+                traceback.print_exc(limit=2, file=sys.stdout)
+            if re.compile(r"name: .* not found in config").match(str(e)):
+                log.error(f"Unexpected client name: '{kwargs['nicknames']}'\n"
+                          f"First parameter should be client name specifier")
+                exit(1)
+            raise
+        commands = {'set': reservelib.reserve_test_bed,
+                    'get': reservelib.get_reservation_status,
+                    'free': reservelib.unreserve,
+                    'hist-clear': reservelib.clear_reservation_history,
+                    'stats': reservelib.usage_statistics,
+                    'help': self.get_tool_help_str}
+        return commands, reservelib
+
+
+def main(args):
+    # testbeds to be excluded are listed in _testbed_reserve_exclude.txt
+    loc_dir = os.path.join(config.get_config_dir(), config.LOCATIONS_DIR)
+    all_loc_list = os.listdir(os.path.join(config.get_config_dir(), config.LOCATIONS_DIR))
+    file_exclusions = set()
+    try:
+        with open(os.path.join(loc_dir, "_testbed_reserve_exclude.txt")) as exclude_list:
+            for excluded_tb in exclude_list.readlines():
+                for tb_name in all_loc_list:
+                    if fnmatch(tb_name, excluded_tb.strip()):
+                        file_exclusions.add(tb_name)
+    except FileNotFoundError:
+        pass
+
+    reslib = ReserveTool(args, ReserveTool.get_config('example'))
+    parsed_args = reslib.arg_parser(args)
+
+    # handle '.' as a tb name
+    if parsed_args.name == '.':
+        if not os.environ.get('OPENSYNC_TESTBED'):
+            log.error("Use 'pset' to specify OPENSYNC_TESTBED")
+            exit(3)
+        setattr(parsed_args, 'name', os.environ.get('OPENSYNC_TESTBED'))
+
+    # special-case 'all' as a wildcard tb name
+    elif parsed_args.name == 'all':
+        setattr(parsed_args, 'name', '*')
+
+    # handle wildcards (*, ?, [seq], [!seq]) in tb name
+    if '*' in parsed_args.name or '?' in parsed_args.name or ('[' in parsed_args.name and ']' in parsed_args.name):
+        testbeds = []
+        n_hidden = 0
+        n_excluded = 0
+        for loc_file in all_loc_list:
+            if not loc_file.endswith('.yaml'):
+                # typically .swp and .swo files, log all here, skip (and count) later
+                log.debug(f"Found a non-yaml file: {loc_file}")
+            tb = loc_file.replace('.yaml', '')
+            if not fnmatch(tb, parsed_args.name):
+                continue  # no match
+            if not loc_file.endswith('.yaml'):
+                continue  # skip non-yaml files
+            if loc_file.startswith('.'):
+                log.debug(f"Skipping a hidden file: {tb}")
+                n_hidden += 1
+                continue  # skip hidden files
+            if loc_file.startswith('_'):  # skip files starting with _ as that are not testbed files
+                continue
+            if loc_file in file_exclusions:
+                if (parsed_args.cmd not in ['get', 'stats']) or ('**' not in parsed_args.name):  # allow get and stats
+                    n_excluded += 1
+                    continue
+            testbeds.append(tb)
+        if not testbeds:
+            log.error('No testbeds found')
+        if n_hidden > 0:
+            log.info(f"{n_hidden} hidden testbeds excluded from processing")
+        if n_excluded > 0:
+            log.info(f"{n_excluded} restricted testbeds excluded from processing")
+            if parsed_args.cmd in {'get', 'stats'}:
+                log.info("Hint: Use a double '**' to include restricted testbeds for 'get' and 'stats' commands")
+        if not testbeds:
+            exit(3)
+        setattr(parsed_args, 'name', ','.join(testbeds))
+
+    que = queue.Queue()
+    threads_list = []
+    for tb in parsed_args.name.split(','):
+        tb_config = ReserveTool.get_config(tb)
+        tb_config.update(vars(parsed_args))
+        new_args = [args[0], tb.strip(), parsed_args.cmd]
+        if parsed_args.cmd_args:
+            new_args.extend(parsed_args.cmd_args)
+        client_tool = ReserveTool(new_args, tb_config)
+        t = Thread(target=lambda q: q.put(client_tool.execute()), args=(que,))
+        t.start()
+        threads_list.append(t)
+
+    # Join all the threads
+    for t in threads_list:
+        t.join()
+
+    result = {}
+    out_table = []
+    while not que.empty():
+        result = que.get()
+        if not result:
+            continue
+        out_table.append(list(result.values()))
+
+    if out_table:
+        table = sorted(out_table, key=operator.itemgetter(0))
+        title = list(result.keys())
+        table.insert(0, title)
+        print(terminaltables.DoubleTable(table).table)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

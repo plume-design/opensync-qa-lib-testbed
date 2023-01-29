@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import sys
+
+from lib_testbed.generic.util.sanity.sanity import Sanity
+
+
+def parse_cli():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--dir', '-d', help='Directory with logs to analyze', type=str,
+                        action='store', default=os.getcwd())
+    parser.add_argument('--file', '-f', help='Ovsdb json dump file',
+                        type=argparse.FileType('r'))
+    parser.add_argument('--simple-out', '-so', help='Print output without colors',
+                        action="store_true", default=False)
+    return parser
+
+
+def validate_config(config):
+    if config.dir:
+        if not os.path.isdir(config.dir):
+            print('usage: sanity [--dir DIR] [--file FILE]')
+            print(f'sanity: error: directory "{config.dir}" does not exist')
+            sys.exit(22)  # EINVAL
+        if config.dir[-1] != '/':
+            config.dir += '/'
+
+
+def is_print_help():
+    print_help = False
+    if 'help' in sys.argv:
+        sys.argv.remove('help')
+        print_help = True
+    return print_help
+
+
+def print_help():
+    parser.print_help()
+    exit(0)
+
+
+if __name__ == "__main__":
+    print_help = is_print_help()
+    parser = parse_cli()
+    args = parser.parse_args()
+    if print_help:
+        parser.print_help()
+        exit(0)
+    validate_config(args)
+    vargs = vars(args)
+    if 'simple_out' in vargs and vargs['simple_out'] is True:
+        outstyle = 'simple'
+    else:
+        outstyle = 'full'
+    santool = Sanity(outstyle=outstyle)
+    if args.file:
+        print(f'Sanity check for: {args.file.name}')
+        ev = santool.sanity_single(args.file)
+    else:
+        print(f'Sanity check for: {args.dir}')
+        ev = santool.sanity_location(args.dir)
+    sys.exit(int(not ev['ret']))

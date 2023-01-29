@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+
+import sys
+import inspect
+import traceback
+import terminaltables
+import operator
+import logging
+
+from lib_testbed.generic.util import config
+from lib_testbed.generic.util import opensyncexception
+from lib_testbed.generic.util.ssh import parallelssh
+from lib_testbed.generic.switch.generic.switch_tool_generic import SwitchToolGeneric
+
+HELP_DOC_OFFSET = 60
+LOGGER_NAME = "automation"
+
+switch_commands = {}
+_debug = False
+
+
+def print_help():
+    for fcn in list(switch_commands.keys()):
+        print(get_fcn_help(fcn))
+
+
+def get_fcn_help(command, verbose=True):
+    fcn = switch_commands[command]
+    arg_spec = inspect.getfullargspec(fcn)
+    if "self" in arg_spec.args:
+        arg_spec.args.remove("self")
+    result = "switch"
+    if "port_names" in arg_spec.args:
+        result += " {<port_name>[,...] | all}"
+    if 'pod_name' in arg_spec.args:
+        result += " <pod_name>"
+
+    result += " %s " % command
+    result += " ".join(["<%s>" % a for a in arg_spec.args if a != "port_names" and a != "pod_name"])
+
+    if inspect.getdoc(fcn) is not None and verbose:
+        result += " " * \
+            (HELP_DOC_OFFSET - len(result)) + "\t" + inspect.getdoc(fcn)
+    return result
+
+
+def format_output(output):
+    table = []
+    for node, value in output.items():
+        table.append([node, value[0], value[1], value[2]])
+    table = sorted(table, key=operator.itemgetter(0))
+    table.insert(0, ['NAME', '$?', 'STDOUT', 'STDERR'])
+    return table
+
+
+if __name__ == "__main__":
+    fargs = " ".join(sys.argv[1:]).replace(" ,", ",").replace(", ", ",")
+    args = fargs.split(' ')
+    for arg in args:
+        if arg == '-D':
+            _debug = True
+            args.remove(arg)
+
+    if args[0] in ['status', 'info']:
+        args.insert(0, 'all')
+
+    logger = logging.getLogger(LOGGER_NAME)
+    if not _debug:
+        logger.setLevel(logging.WARNING)
+    else:
+        logger.setLevel(logging.DEBUG)
+
+    switch_tool = None
+    try:
+        switch_tool = SwitchToolGeneric(config=config.load_tb_config(skip_deployment=True))
+    except opensyncexception.OpenSyncException as e:
+        if _debug:
+            traceback.print_exc()
+        print(e)
+        exit(1)
+    except Exception as e:
+        if _debug:
+            traceback.print_exc()
+        print(f"Cannot load config file {e}")
+        exit(1)
+
+    rets = None
+    switch_commands['version'] = switch_tool.version
+    switch_commands['system-info'] = switch_tool.system_info
+    switch_commands['restore-config'] = switch_tool.restore_config
+    switch_commands['list'] = switch_tool.switch_interface_list
+    switch_commands['pvid-list'] = switch_tool.pvid_list
+    switch_commands['vlan-list'] = switch_tool.vlan_list
+    switch_commands['status'] = switch_tool.switch_status
+    switch_commands['info'] = switch_tool.info
+    switch_commands['up'] = switch_tool.interface_up
+    switch_commands['down'] = switch_tool.interface_down
+    switch_commands['vlan-set'] = switch_tool.vlan_set
+    switch_commands['vlan-delete'] = switch_tool.vlan_remove
+    switch_commands['set-ip-type'] = switch_tool.set_connection_ip_type
+    switch_commands['connect-client'] = switch_tool.connect_eth_client_tool
+    switch_commands['disconnect-client'] = switch_tool.disconnect_eth_client
+    switch_commands['recovery'] = switch_tool.recovery_switch_cfg
+    switch_commands['disable-isolation'] = switch_tool.disable_port_isolations
+    switch_commands['enable-isolation'] = switch_tool.enable_port_isolations
+    switch_commands['get-port-isolation'] = switch_tool.get_port_isolations
+    switch_commands['get-link-status'] = switch_tool.get_link_status
+    switch_commands['help'] = print_help
+
+    cmd = None
+    cmd_args = []
+    cmd_group = False
+
+    if args[0] in switch_commands:
+        cmd = args[0]
+        cmd_args = args[1:]
+
+    nodes = args[0].split(',')
+
+    if len(args) > 1:
+        if args[1] in switch_commands:
+            if nodes[0].lower() == 'all':
+                nodes = [switch_tool.get_list_of_all_port_names()]
+
+            cmd = args[1]
+            cmd_args = nodes
+            cmd_args.extend(args[2:])
+            cmd_group = True
+
+    if cmd is None:
+        print_help()
+        exit(1)
+    else:
+        arg_spec = inspect.getfullargspec(switch_commands[cmd])
+        args = arg_spec.args
+        if "self" in args:
+            args.remove("self")
+        fixed_params = len(arg_spec.args)
+        default_len = 0
+        if arg_spec.defaults is not None:
+            default_len = len(arg_spec.defaults)
+
+        if len(cmd_args) < fixed_params - default_len:
+            print("Not enough parameters")
+            exit(1)
+        if len(arg_spec[0]) > 0 and arg_spec[0][0] in ('node', 'nodes') and not cmd_group:
+            print("First parameter should be pod specifier")
+            print(f"Usage: {get_fcn_help(cmd, verbose=False)}")
+            exit(1)
+
+    try:
+        rets = switch_commands[cmd](*cmd_args)
+    except opensyncexception.OpenSyncException as e:
+        print(e)
+        if _debug:
+            traceback.print_exc()
+        exit(1)
+    except TypeError as e:
+        print("Invalid number of parameters")
+        print("Usage: {0}".format(get_fcn_help(cmd, verbose=False)))
+        exit(1)
+    except Exception as e:
+        print(f"Error occurred while executing command:\n {e}")
+        if _debug:
+            traceback.print_exc()
+        exit(1)
+    if isinstance(rets, dict):
+        table = format_output(rets)
+        print(terminaltables.DoubleTable(table).table)
+        successful_nodes = parallelssh.select_items(rets)
+        if len(successful_nodes) == len(nodes):
+            exit(0)
+        elif len(successful_nodes) == 0:
+            exit(1)
+        else:
+            exit(2)
+    elif rets is not None:
+        if isinstance(rets[1], list):
+            for line in rets[1]:
+                print(line)
+        else:
+            print(rets[1])
+        exit(rets[0])

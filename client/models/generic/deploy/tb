@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+
+import subprocess
+import json
+import time
+
+
+class Client:
+    def __init__(self):
+        self.client_info = {}
+        self.client_os = subprocess.getoutput('uname')
+        if self.client_os == 'Linux':
+            self.client_info['os'] = 'linux'
+        elif self.client_os in ['Darwin']:
+            self.client_info['os'] = 'osx'
+        else:
+            print('Unknown operating system')
+            exit(1)
+
+    def get_wlan_information(self):
+        if self.client_info['os'] == 'osx':
+            self.client_info['wifi'] = True
+            self.client_info['wlan'] = self.get_mac_wifi_info()
+        elif self.client_info['os'] == 'linux':
+            ifaces = subprocess.getoutput('ls /sys/class/net')
+            for iface in ifaces.split('\n'):
+                # check if it's wifi
+                if subprocess.getstatusoutput(f'test -d /sys/class/net/{iface}/phy80211')[0] == 0:
+                    self.client_info['wifi'] = True
+                    if 'wlan' not in self.client_info:
+                        self.client_info['wlan'] = {}
+                    self.client_info['wlan'][iface] = {}
+                    # get wifi driver
+                    driver = subprocess.getoutput(f'ls -ll  /sys/class/net/{iface}/device/driver')
+                    self.client_info['wlan'][iface]['driver'] = driver.split('/')[-1]
+                    # get MAC address
+                    self.client_info['wlan'][iface]['mac'] = \
+                        subprocess.getoutput(f'cat /sys/class/net/{iface}/address').lower()
+                    # get phy index
+                    phy = f"phy{subprocess.getoutput(f'cat /sys/class/net/{iface}/phy80211/index')}"
+                    self.client_info['wlan'][iface]['phy'] = phy
+                    iw_ret = subprocess.getoutput(f'iw {phy} info')
+                    # get supported commands:
+                    iw_cmd = iw_ret.split("Supported commands:")[1]
+                    supported_cmd = []
+                    for line in iw_cmd.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if not line.startswith("*"):
+                            break
+                        supported_cmd.append(line[2:])
+                    ft_cmd = ['authenticate', 'associate', 'deauthenticate', 'disassociate']
+                    self.client_info['wlan'][iface]['FT']  = set(ft_cmd).issubset(set(supported_cmd))
+                    # get wifi channels
+                    bands = iw_ret.split('Frequencies:')[1:]
+                    channels = []
+                    for band in bands:
+                        for line in band.split('\n'):
+                            if 'DFS' in line:
+                                continue
+                            if 'MHz' in line and 'disabled' not in line:
+                                try:
+                                    channels.append(int(line[line.find('[')+1:line.find(']')]))
+                                except ValueError:
+                                    pass
+                            if line and '*' not in line:
+                                break
+                    self.client_info['wlan'][iface]['channels'] = channels
+                    # check if 11ac
+                    if 'VHT' in iw_ret:
+                        self.client_info['wlan'][iface]['802.11ac'] = True
+                    # get IP address
+                    ip = subprocess.getoutput(f'ip add show dev {iface} | grep "inet "')
+                    if ip:
+                        self.client_info['wlan'][iface]['ip'] = ip[9:ip.rfind('/')]
+        else:
+            return
+
+    def get_mac_wifi_info(self):
+        out = {}
+        ret = subprocess.getoutput('networksetup -listallhardwareports')
+        for iface in ret.split('Hardware Port'):
+            if 'Wi-Fi' in iface:
+                for line in iface.split('\n'):
+                    if 'Device' in line:
+                        iface = line[line.find('en'):]
+                    if 'Ethernet Address' in line:
+                        mac = line[line.find('Address:') + 9:].lower()
+                        out[iface] = {'mac': mac}
+        return out
+
+    def get_architecture(self):
+        if self.client_info['os'] == 'osx':
+            self.client_info['arch'] = 'x86'
+        elif self.client_info['os'] == 'linux':
+            arch = subprocess.getoutput('uname -a')
+            if 'x86' in arch:
+                self.client_info['arch'] = 'x86'
+            elif 'arm' in arch:
+                self.client_info['arch'] = 'arm'
+            else:
+                self.client_info['arch'] = 'unknown'
+        else:
+            self.client_info['arch'] = 'unknown'
+
+    def check_chariot(self):
+        if self.client_info['os'] in ['linux', 'osx']:
+            ret = subprocess.getoutput('ps -ax | grep endpoin')
+            self.client_info['chariot'] = True if 'endpoint' in ret else False
+
+    def get_bt_info(self):
+        if self.client_info['os'] == 'linux':
+            ret = subprocess.getoutput('hciconfig -a')
+            if 'hci' in ret:
+                self.client_info['bt'] = {}
+                for hci in ret.split('hci'):
+                    if 'BD Address:' in hci:
+                        self.client_info['bt']['hci' + hci[:hci.find(':')]] = \
+                            {'addr': hci[hci.find('BD Address:') + 12: hci.find('BD Address:') + 29].lower()}
+                    if 'Name' in hci:
+                        self.client_info['bt']['hci' + hci[:hci.find(':')]]['name'] = \
+                            hci[hci.find('Name:') + 7: hci.rfind("'")]
+
+    def get_eth_info(self):
+        if self.client_info['os'] == 'linux':
+            ifaces = subprocess.getoutput('ls /sys/class/net')
+            for iface in ifaces.split('\n'):
+                # check if it's eth
+                if iface[:2] in ['et', 'en']:
+                    if 'eth' not in self.client_info:
+                        self.client_info['eth'] = {}
+                    self.client_info['eth'][iface] = {}
+                    # get MAC address
+                    self.client_info['eth'][iface]['mac'] = \
+                        subprocess.getoutput(f'cat /sys/class/net/{iface}/address').lower()
+                    # refresh IP if iface is up and get IP address
+                    up = subprocess.getoutput(f'ip add show dev {iface}')
+                    if 'state UP' in up:
+                        subprocess.getoutput(f'kill $(cat /var/run/dhclient.{iface}.pid)')
+                        subprocess.getoutput(f'dhclient -pf /var/run/dhclient.{iface}.pid {iface}')
+
+                    ip = subprocess.getoutput(f'ip -4 add show dev {iface} | grep "inet "')
+                    if ip:
+                        self.client_info['eth'][iface]['ip'] = ip[ip.rfind('inet') + 5: ip.rfind('/')]
+
+    def get_hostname(self):
+        if self.client_info['os'] == 'linux':
+            self.client_info['hostname'] = subprocess.getoutput('hostname')
+
+    def get_all_information(self):
+        self.get_architecture()
+        self.check_chariot()
+        self.get_eth_info()
+        self.get_wlan_information()
+        self.get_bt_info()
+        self.get_hostname()
+        return json.dumps(self.client_info)
+
+
+if __name__ == "__main__":
+    print(Client().get_all_information())
+    exit(0)

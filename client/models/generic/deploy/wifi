@@ -1,0 +1,702 @@
+#!/bin/bash
+
+WIFI_MON_IF=wlan1
+WIFI_IF=wlan1
+
+if [ -f /tbvars.conf ]; then
+    . /tbvars.conf
+fi
+
+# Python way to support also MacOS and Windows clients
+cdir=$(python -c "import os; print(os.path.dirname(os.path.realpath('$0')))")
+
+Usage()
+{
+    echo "wifi connect <ssid> <key> [<bssid>] [<key_mgmt>] [<if>]   Connect to a wifi network"
+    echo "wifi disconnect [<if>]                                    Disconnect from network"
+    echo "wifi scan [<if>]                                          Perform scan"
+    echo "wifi info [<if>]                                          Display wifi info"
+    echo "wifi mac [<if>]                                           Print MAC address of wifi interface"
+    echo "wifi ep [stop|start|restart]                              Control IxChariot Endpoint"
+    echo "wifi monitor <channel> [<HT20|HT40-|HT40+>] [<if>]        Set Interface to Monitor Mode"
+    echo "wifi station [<if>]                                       Set Interface to Station Mode"
+    exit 1
+}
+
+Wifi_Disconnect()
+{
+    if [ -n "$1" ]; then
+        WIFI_IF=$1
+    fi
+
+    case "$os" in
+
+        "osx")
+            sudo "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport" $WIFI_IF -z
+            /usr/sbin/networksetup -setairportpower $WIFI_IF off
+        ;;
+
+        "windows")
+            netsh wlan disconnect
+        ;;
+
+        "rpi")
+            sudo ifdown --force $WIFI_IF
+            sudo ifconfig $WIFI_IF 0.0.0.0 down
+        ;;
+
+        *)
+            echo "Error: Unknown OS type ($os)"
+            exit 1
+        ;;
+
+    esac
+}
+
+Wifi_Endpoint()
+{
+    cmd="$1"
+
+    case "$cmd" in
+
+        "stop")
+            case "$os" in
+
+                "rpi")
+                    sudo killall -9 endpoint
+                ;;
+
+                "osx")
+                    sudo killall endpoint
+                ;;
+
+                "windows")
+                    net stop IxiaEndpoint
+                ;;
+
+            esac
+        ;;
+
+        "start")
+            case "$os" in
+
+                "osx")
+                    if [ ${#IXCHARIOT_REG_IPADDR} -gt 0 -a ${#IXCHARIOT_REG_GW} -gt 0 ]; then
+                        sudo route add $IXCHARIOT_REG_IPADDR/32 $IXCHARIOT_REG_GW
+                    fi
+                    sudo /Applications/Endpoint.app/Contents/MacOS/endpoint >> /tmp/endpoint.log 2>&1 &
+                ;;
+
+                "windows")
+                    if [ ${#IXCHARIOT_REG_IPADDR} -gt 0 -a ${#IXCHARIOT_REG_GW} -gt 0 ]; then
+                        route add $IXCHARIOT_REG_IPADDR mask 255.255.255.255 $IXCHARIOT_REG_GW
+                    fi
+                    net start IxiaEndpoint
+                ;;
+
+                "rpi")
+                    if [ ${#IXCHARIOT_REG_IPADDR} -gt 0 -a ${#IXCHARIOT_REG_GW} -gt 0 ]; then
+                        sudo route add -host $IXCHARIOT_REG_IPADDR gw $IXCHARIOT_REG_GW dev eth0
+                    fi
+                    sudo /opt/ixia/endpoint 1>> /var/ixia/endpoint 2>&1 &
+                    sudo /usr/local/Ixia/endpoint > /dev/null 2>&1 &
+            esac
+        ;;
+
+        "restart")
+            Wifi_Endpoint stop
+            if [ "$os" == "osx" ] || [ "$os" == "rpi" ]; then
+                sleep 1s
+            fi
+            Wifi_Endpoint start
+        ;;
+
+    esac
+}
+
+Wifi_Connect()
+{
+    ssid="$1"
+    psk2="$2"
+    if [ "$3" == "NO_BSSID" ]; then
+        bssid=""
+    else
+        bssid="$3"
+    fi
+
+    key_mgmt="$4"
+
+    echo "1=$1 2=$2 3=$3 4=$4 5=$5"
+
+    if [ -n "$5" ]; then
+        WIFI_IF=$5
+    fi
+
+    case "$os" in
+        # ignore bssid on everything but rpi
+        "osx")
+            sudo networksetup -setairportpower $WIFI_IF on
+            conn_ret=`sudo networksetup -setairportnetwork $WIFI_IF $ssid $psk2`
+            ssid_ret=`/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I | sed -n "s/^ *SSID: //"p`
+
+            if [[ "$ssid" != "$ssid_ret" ]]; then
+                echo $conn_ret
+                exit 1
+            else
+                exit 0
+            fi
+        ;;
+
+        "windows")
+            netsh wlan connect name=$ssid
+        ;;
+
+        "rpi")
+            # command line tools can't handle wifi with WPA/WPA2, so we have
+            # to use wpa_supplicant with all the file editing and all
+            # connect to specific bssid
+            if [ -n "$bssid" ]; then
+                # see if required config is there
+                nbssid=$(sudo grep -c "\sbssid" /etc/wpa_supplicant/wpa_supplicant.conf)
+                # add the bssid line, if required
+                if [ $nbssid -eq 0 ]; then
+                    # create a new file and edit it
+                    tmpsuppl=/tmp/wpa_supplicant.conf
+                    nbbrace=$( sudo grep -P -n "^(\s+)?}" /etc/wpa_supplicant/wpa_supplicant.conf | cut -d ':' -f 1)
+                    let 'nbbrace--'
+                    sudo head -n $nbbrace /etc/wpa_supplicant/wpa_supplicant.conf > $tmpsuppl
+                    echo -e '\n\tbssid=placeholder\n}' >> $tmpsuppl
+
+                    # store perms of the old file
+                    perms=$(stat -c "%a" /etc/wpa_supplicant/wpa_supplicant.conf)
+                    sudo chmod $perms $tmpsuppl
+                    sudo cp -f --remove-destination $tmpsuppl /etc/wpa_supplicant/wpa_supplicant.conf
+                fi
+
+                # there are three regex substitutions,
+                # ssid=X for ssid=$1
+                # psk=X for psk=$2
+                # bssid=X for bssid=$3 (bssid is also uncommented)
+                sudo perl -pni -e 's/(\s+)ssid=.*/$1ssid=\"'"$ssid"'\"/; s/\#*(\s+)bssid=.*/$1bssid='$bssid'/; s/(\s+)psk=.*/$1psk=\"'"$psk2"'\"/; s/(\s+)key_mgmt=.*/$1key_mgmt='$key_mgmt'/g' /etc/wpa_supplicant/wpa_supplicant.conf
+            else
+                # comment bssid, set others
+                # same substitutions as above, except that it comments
+                # the bssid line
+                sudo perl -pni -e 's/(\s+)ssid=.*/$1ssid=\"'"$ssid"'\"/; s/(\s+)bssid=.*/\#$1bssid=placeholder/; s/(\s+)psk=.*/$1psk=\"'"$psk2"'\"/; s/(\s+)key_mgmt=.*/$1key_mgmt='$key_mgmt'/g' /etc/wpa_supplicant/wpa_supplicant.conf
+            fi
+
+            #Check if interface is up and bring it down
+            IF_Is_Up $WIFI_IF
+            ret_code=$?
+            if [[ $ret_code -eq 2 || $ret_code -eq 0 ]]; then
+                sudo ifdown --force $WIFI_IF
+                sudo ifconfig $WIFI_IF 0.0.0.0
+                sleep 0.2
+            fi
+
+            sudo ifup $WIFI_IF
+
+            # check connection state
+            for i in {1..15}; do
+                sudo wpa_cli -i $WIFI_IF status | grep COMPLETED
+                ret_code=$?
+                if [ $ret_code -eq 0 ]; then
+                    break
+                else
+                    sleep 1
+                fi
+            done
+            if [ $ret_code -ne 0 ]; then
+                exit 1
+            fi
+
+            # wait a few sec for an IP
+            for i in {1..15}; do
+                IF_Is_Up $WIFI_IF
+                ret_code=$?
+                if [ $ret_code -eq 0 ]; then
+                    # check if ip is not 169.254.x.x
+                    ae=$(ip addr show $WIFI_IF | grep 169.254 | wc -l)
+                    if [ $ae -eq 0 ]; then
+                        ip add show $WIFI_IF | grep inet
+                        exit 0
+                    else
+                        exit 1
+                    fi
+                elif [ $ret_code -eq 2 ]; then
+                    sleep 1
+                else
+                    exit 1
+                fi
+            done
+            exit 1
+
+        ;;
+        *)
+            echo "Error: Unknown OS type ($os)"
+            exit 1
+        ;;
+
+    esac
+}
+
+Wifi_Scan()
+{
+    if [ -n "$1" ]; then
+        WIFI_IF=$1
+    fi
+
+    case "$os" in
+        "osx")
+            "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport" scan
+        ;;
+
+        "windows")
+            netsh wlan show networks
+        ;;
+
+        "rpi")
+            IF_Is_Up $WIFI_IF
+            ret_code=$?
+            if [ $ret_code -eq 1 ]; then
+                sudo ifconfig $WIFI_IF up
+            fi
+
+            sudo iw $WIFI_IF scan flush
+
+            if [ $ret_code -eq 1 ]; then
+                sudo ifconfig $WIFI_IF down
+            fi
+        ;;
+        *)
+            echo "Error: Unknown OS type ($os)"
+            exit 1
+        ;;
+    esac
+}
+
+Wifi_Check()
+{
+    ipaddr="$1"
+
+    RET=1
+    case "$os" in
+
+        "rpi")
+            sudo ping -c 1 -t 200 -W 1 $ipaddr > /dev/null 2>&1 ; RET=$?
+        ;;
+
+        "osx")
+            ping -c 1 -t 1 -W 1 $ipaddr > /dev/null 2>&1 ; RET=$?
+        ;;
+
+        "windows")
+            timeout 1 strace -o /dev/null ping -q $ipaddr 56 1 > /dev/null 2>&1 ; RET=$?
+        ;;
+
+    esac
+
+    if [ $RET -eq 0 ]; then
+        echo "Ping check successful"
+    else
+        echo "Ping check failed"
+    fi
+    exit $RET
+}
+
+Wifi_Mac_Addr()
+{
+    if [ -n "$1" ]; then
+        WIFI_IF=$1
+    fi
+
+    case "$os" in
+
+        "osx")
+            "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport" mac
+        ;;
+
+        "windows")
+            netsh wlan show int | egrep Physical | ( read a b c d; echo $d )
+        ;;
+        "rpi")
+            cat cat /sys/class/net/$WIFI_IF/address
+        ;;
+
+    esac
+}
+
+Wifi_Raw_Info()
+{
+    case "$os" in
+        "osx")
+            "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport" info
+        ;;
+
+        "windows")
+            netsh wlan show int
+        ;;
+        "rpi")
+            sudo iw dev $WIFI_IF link && sudo iw dev $WIFI_IF info
+        ;;
+    esac
+}
+
+Wifi_Info_Get()
+{
+    if [ $# -eq 2 ]; then
+        WIFI_IF=$2
+    fi
+
+    rvar="$1"
+    # Need to translate variable names here
+    case "$os" in
+
+        "osx")
+            case "$rvar" in
+
+                "signal")   var="agrCtlRSSI";   ;;
+                "state")    var="state";        ;;
+                "ssid")     var="SSID";         ;;
+                "bssid")    var="BSSID";        ;;
+                "channel")  var="channel";      ;;
+                *)          return;             ;;
+
+            esac
+        ;;
+
+        "windows")
+            case "$rvar" in
+
+                "signal")   var="Signal";       ;;
+                "state")    var="State";        ;;
+                "ssid")     var="SSID";         ;;
+                "bssid")    var="BSSID";        ;;
+                "channel")  var="Channel";      ;;
+                "type")     var="Radio";        ;;
+                *)          return;             ;;
+
+            esac
+        ;;
+
+        "rpi")
+            case "$rvar" in
+
+                "signal")   var="signal";       ;;
+                "state")    var="onnected";     ;;
+                "ssid")     var="SSID";         ;;
+                "bssid")    var="Connected to"; ;;
+                "channel")  var="channel";      ;;
+                "type")     var="type";         ;;
+                *)          return;             ;;
+
+            esac
+        ;;
+
+        *)
+            return;
+        ;;
+
+    esac
+
+    if [ "$os" == "rpi" ]; then
+        val=$(Wifi_Raw_Info $WIFI_IF | grep "$var")
+
+        case "$rvar" in
+
+            "signal")
+                val=$(echo $val | awk '{print $2, $3, $4;}');
+            ;;
+
+            "state")
+                if [ "$val" == "Not connected." ]; then
+                    val="disconnected";
+                else
+                    val="connected";
+                fi
+            ;;
+
+            "ssid")
+                val=$(echo $val | awk '{print $2;}');
+            ;;
+
+            "bssid")
+                val=$(echo $val | awk '{print $3;}');
+            ;;
+
+            "channel")
+                val=$(echo $val | awk '{print $2, $3, $4;}');
+            ;;
+
+            "type")
+                val=$(echo $val | awk '{print $2;}');
+            ;;
+
+            *)
+                return;
+            ;;
+        esac
+
+
+    else
+        val="$(Wifi_Raw_Info $WIFI_IF | egrep "[ ^]$var" | cut -d ':' -f 2- | cut -d ' ' -f 2-)"
+
+        case "$rvar" in
+
+            "state")
+                if [ "$val" == "running" ]; then
+                    val="connected";
+                elif [ "$val" == "" ]; then
+                    val="disconnected";
+                fi
+            ;;
+
+            "channel")
+                val="$(echo $val | cut -d ',' -f 1)"
+            ;;
+
+            "signal")
+                if [ "$os" == "windows" -a -n "$val" ]; then
+                    let tmp="$(echo $val | cut -d '%' -f 1)"
+                    let val="($tmp / 2) - 100"
+                fi
+            ;;
+
+        esac
+    fi
+
+    echo $val
+}
+
+Wifi_Info()
+{
+    signal="$(Wifi_Info_Get signal $@)"
+    state="$(Wifi_Info_Get state $@)"
+    ssid="$(Wifi_Info_Get ssid $@)"
+    bssid="$(Wifi_Info_Get bssid $@)"
+    channel="$(Wifi_Info_Get channel $@)"
+
+    if [ "$1" == "-e" ]; then
+        for x in state ssid bssid signal channel; do
+            eval echo "$x=\"\$$x\""
+        done
+    elif [ "$1" == "-s" ]; then
+        for x in state ssid bssid signal channel; do
+            printf "%7s: %s " "$x" "$(eval echo \$$x)"
+        done
+        echo
+    else
+        for x in state ssid bssid signal channel; do
+            printf "%7s: %s\n" "$x" "$(eval echo \$$x)"
+        done
+    fi
+}
+
+Wifi_Monitor()
+{
+    if [ -n "$3" ]; then
+        WIFI_MON_IF=$3
+    fi
+
+    case "$os" in
+
+        "osx")
+            sudo /System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -z
+            sudo /System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport --channel $1
+            /System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I
+            #/usr/local/bin/tshark -a duration:10 -I -i $WIFI_MON_IF -F libpcap -w /tmp/test.pcap
+        ;;
+
+        *)
+            sudo ip link set $WIFI_MON_IF down > /dev/null
+            sudo iw $WIFI_MON_IF set type monitor > /dev/null
+            sudo ip link set $WIFI_MON_IF up > /dev/null
+            sudo iw $WIFI_MON_IF set channel $1 $2 > /dev/null
+            iw $WIFI_MON_IF info
+            iw $WIFI_MON_IF info | grep monitor
+        ;;
+
+    esac
+
+}
+
+Wifi_Station()
+{
+    if [ -n "$1" ]; then
+        WIFI_MON_IF=$1
+    fi
+
+    sudo ip link set $WIFI_MON_IF down > /dev/null
+    sudo iw $WIFI_MON_IF set type managed > /dev/null
+    iw $WIFI_MON_IF info
+    iw $WIFI_MON_IF info | grep managed
+}
+
+IF_Is_Up()
+{
+    if [ -z "$1" ]; then
+        # we need ifname as argument
+        return 127
+    fi
+    if=$1
+    exist=$(cat /proc/net/dev | grep "$if:" | wc -l)
+    if [ $exist -ne 1 ]; then
+        # interface does not exist
+        return 126
+    fi
+    up=$(ip addr show $if | grep -cP "$if(@[a-zA-Z0-9]*)?: <[A-Z,-_]*UP[A-Z,-_]*>")
+    addr=$(ip addr show $if | grep -P 'inet \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}' | wc -l)
+    # if iface is UP and has address, then it's OK
+    if [ $up -eq 1 ] && [ $addr -ge 1 ]; then
+        return 0
+        # if iface is UP has no address
+    elif [ $up -eq 1 ]; then
+        return 2
+    fi
+    return 1
+}
+
+
+os_name=$(uname)
+case $os_name in
+
+    "Darwin")
+        os="osx"
+        ;;
+
+    "Windows")
+        os="windows"
+        ;;
+
+    "Linux")
+        os="rpi"
+        ;;
+    *)
+        echo "Error: Unknown OS type ($os_name)"
+        exit 1
+        ;;
+esac
+
+[ $# -eq 0 ] && Usage
+
+cmd="$1"; shift
+case "$cmd" in
+
+    "mac")
+
+        if [ $# -eq 1 ]; then
+            Wifi_Mac_Addr $1
+        elif [ $# -eq 0 ]; then
+            Wifi_Mac_Addr
+        else
+            Usage
+        fi
+    ;;
+
+    "connect"|"conn")
+        if [ "$1" = "-C" ]; then
+            shift;
+            let _cflag=1
+        else
+            let _cflag=0
+        fi
+        [ $# -lt 3 ] && Usage
+        ssid="$1"; shift
+        wpa2="$1"; shift
+        bssid=$1; shift
+        key_mgmt=$1; shift
+
+        if [ $# -eq 1 ]; then
+            ifname=$1; shift
+        fi
+
+
+        Wifi_Connect "$ssid" "$wpa2" $bssid $key_mgmt $ifname
+        if [ ${_cflag} -eq 0 ]; then
+            sleep 5
+            Wifi_Info
+        fi
+    ;;
+
+    "disconnect"|"disc"|"off")
+        if [ $# -eq 1 ]; then
+            Wifi_Disconnect $1
+        elif [ $# -eq 0 ]; then
+            Wifi_Disconnect
+        else
+            Usage
+        fi
+    ;;
+
+    "scan")
+        if [ $# -eq 1 ]; then
+            Wifi_Scan $1
+        elif [ $# -eq 0 ]; then
+            Wifi_Scan
+        else
+            Usage
+        fi
+    ;;
+
+    "info")
+        if [ $# -eq 1 ]; then
+            Wifi_Info $1
+        elif [ $# -eq 0 ]; then
+            Wifi_Info
+        else
+            Usage
+        fi
+        #Wifi_Info "$@"
+    ;;
+
+    "check")
+        if [ $# -eq 0 ]; then
+            ipaddr="8.8.8.8";
+        elif [ $# -ne 1 ]; then
+            Usage
+        else
+            ipaddr="$1"; shift
+        fi
+
+        Wifi_Check $ipaddr
+    ;;
+
+    "ep"|"endpoint")
+        if [ $# -ne 1 ]; then
+            Usage
+        fi
+
+        Wifi_Endpoint $1
+    ;;
+
+    "mon"|"monitor")
+        if [ $# -eq 1 ]; then
+            Wifi_Monitor $1
+        elif [ $# -eq 2 ]; then
+            Wifi_Monitor $1 $2
+        elif [ $# -eq 3 ]; then
+            Wifi_Monitor $1 $2 $3
+        else
+            Usage
+        fi
+
+    ;;
+
+    "sta"|"station")
+        if [ $# -eq 0 ]; then
+            Wifi_Station
+        elif [ $# -eq 1 ]; then
+            Wifi_Station $1
+        else
+            Usage
+        fi
+
+    ;;
+
+    *)
+        Usage
+    ;;
+
+esac
+
+exit $?

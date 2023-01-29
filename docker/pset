@@ -1,0 +1,15 @@
+
+_pset()
+{
+    local cur opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    opts=`ls $OPENSYNC_ROOT/config/locations  | grep .yaml  | cut -f 1 -d '.'`
+
+
+    if [[ ${cur} == * ]]; then
+        COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+        return 0
+    fi
+}
+complete -F _pset pset

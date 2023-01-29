@@ -1,0 +1,15 @@
+#!/bin/bash
+
+python -c "import sys,subprocess,json;
+info = subprocess.check_output([sys.executable, 'tb', '2']); jinfo = json.loads(info);
+
+iface_info = ''
+if 'wlan' in jinfo:
+    for iface, values in jinfo['wlan'].iteritems():
+        iface_info += 'Wifi: {} ({}), '.format(iface, values['mac'])
+
+if 'eth' in jinfo:
+    for iface, values in jinfo['eth'].iteritems():
+        iface_info += 'Eth: {} ({}), '.format(iface, values['mac'])
+
+print 'OS: {}, hostname: {}, {}'.format(jinfo['os'], jinfo['hostname'], iface_info)"
