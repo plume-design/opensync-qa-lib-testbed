@@ -1,0 +1,16 @@
+ARG PARENT_IMAGE=""
+FROM $PARENT_IMAGE:latest
+
+# -- Adding Pipfiles
+COPY Pipfile Pipfile.lock ./
+
+# -- Install piplock-to-requirements script
+ENV PIPLOCK_TO_REQUIREMENTS_PATH=/usr/bin/piplock-to-requirements
+COPY piplock-to-requirements ${PIPLOCK_TO_REQUIREMENTS_PATH}
+RUN chmod a+x ${PIPLOCK_TO_REQUIREMENTS_PATH}
+
+# -- Install Pipfile dependencies:
+RUN --mount=type=cache,target=/root/.cache/pip \
+    set -x && piplock-to-requirements < Pipfile.lock > requirements.txt && \
+    pip --exists-action=i --no-input install --requirement=requirements.txt \
+        --root-user-action=ignore --no-deps --no-clean --prefer-binary --use-pep517

@@ -1,0 +1,7 @@
+{
+  "first_released_fw": "4.2.0-71-g93b225-dev-debug",
+  "latest_released_fw": "5.6.0-25-gc75906-dev-debug",
+  "ga_released_fw": "4.2.0-87-g5e5fcf-dev-debug",
+  "rounds": 1,
+  "ltm_not_support_fw": "5.4.0-29-g29ca7c-dev-debug"
+}

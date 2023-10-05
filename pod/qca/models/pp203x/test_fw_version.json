@@ -1,0 +1,13 @@
+{
+  "first_released_fw": "0.8.1-97-g45dad00-dev-debug",
+  "ipv6_released_fw": "3.4.1-60-g5c749c-dev-debug",
+  "latest_released_fw": "5.6.0-36-ga16b3a-dev-debug",
+  "monitoring_released_fw": ["1.0.0-45-g3e9f7be-dev-debug", "1.0.1-59-gcd42768-dev-debug",
+    "3.0.1-33-gee89dc8-dev-debug"],
+  "ga_released_fw": "3.0.1-36-g65b0106-dev-debug",
+  "rounds": 1,
+  "capabilities_released_fw": "2.4.3-73-g32935a2-dev-debug",
+  "wano_persistent_storage": "3.4.1-97-gae574c-dev-debug",
+  "wano_ovsdb_storage": "4.2.0-72-gf9f067-dev-debug",
+  "ltm_not_support_fw": "5.4.0-29-g29ca7c-dev-debug"
+}

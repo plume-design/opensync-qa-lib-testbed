@@ -1,0 +1,11 @@
+{
+  "short-name": "AUG",
+  "s3-bucket": "Augustus",
+  "5.8.0": {
+    "proj-name": "build_augustus_sdk542_v5.8.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_REIMAGE-5.02-TO-5.04_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  }
+}

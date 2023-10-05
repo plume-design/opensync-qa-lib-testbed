@@ -1,0 +1,16 @@
+{
+  "short-name": "IPQ9574-AP-AL02-C4",
+  "s3-bucket": "",
+  "master": {
+    "proj-name": "build_alder_master",
+    "fn-prefix": "qcaALDER_norplusnand-ipq9574-single",
+    "encryption": false,
+    "img-suffix": "img"
+  },
+  "build_device_featurebranch": {
+    "proj-name": "build_device_featurebranch/alder",
+    "fn-prefix": "qcaALDER_norplusnand-ipq9574-single",
+    "encryption": false,
+    "img-suffix": "img"
+  }
+}

@@ -1,0 +1,92 @@
+#!/bin/bash
+
+airport="/System/Library/PrivateFrameworks/Apple80211.framework/Versions/A/Resources/airport"
+
+Usage()
+{
+    echo "airport on                      Turn wifi on"
+    echo "airport off                     Turn wifi off"
+    echo "airport info                    Display wifi info"
+    echo "airport scan                    Scan for networks"
+    echo "airport mac                     Ethernet MAC Address"
+    echo "airport connect <ssid> <pass>   Connect to network"
+    echo "airport disconnect              Disconnect from network"
+    exit 1
+}
+
+Get_Wifi_Info()
+{
+    what="$1"
+    networksetup -listallhardwareports | while read a; do
+        read b
+        read c
+        read d
+
+        ifn="$(echo $b | cut -d ' ' -f 3)"
+        dev="$(echo $c | cut -d ' ' -f 2)"
+        mac="$(echo $d | cut -d ' ' -f 3)"
+
+        if [ "$ifn" == "Wi-Fi" ]; then
+            if [ "$what" == "mac" ]; then
+                echo $mac
+            else
+                echo $dev
+            fi
+            break
+        fi
+    done
+}
+
+wifi="$(Get_Wifi_Info ifn)"
+if [ ${#wifi} -eq 0 ]; then
+    echo "Error: Unable to detect wifi interface"
+    exit 1
+fi
+
+[ $# -eq 0 ] && Usage
+
+cmd="$1"; shift
+case "$cmd" in
+
+"on")
+    [ $# -ne 0 ] && Usage
+    networksetup -setairportpower $wifi on; RET=$?
+    ;;
+
+"off")
+    [ $# -ne 0 ] && Usage
+    networksetup -setairportpower $wifi off; RET=$?
+    ;;
+
+"info")
+    [ $# -ne 0 ] && Usage
+    $airport -I; RET=$?
+    ;;
+
+"scan")
+    [ $# -ne 0 ] && Usage
+    $airport -s; RET=$?
+    ;;
+
+"mac")
+    [ $# -ne 0 ] && Usage
+    Get_Wifi_Info mac; RET=0
+    ;;
+
+"connect"|"conn")
+    [ $# -ne 2 ] && Usage
+    networksetup -setairportnetwork $wifi $1 $2; RET=$?
+    ;;
+
+"disconnect"|"disc")
+    [ $# -ne 0 ] && Usage
+    sudo $airport -z ; RET=$?
+    ;;
+
+*)
+    Usage
+    ;;
+
+esac
+
+exit $?

@@ -1,0 +1,151 @@
+{
+  "short-name": "AUG",
+  "s3-bucket": "Augustus",
+  "3.2.0": {
+    "proj-name": "build_augustus_v3.2.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "3.2.1": {
+    "proj-name": "build_augustus_v3.2.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "3.2.2": {
+    "proj-name": "build_augustus_v3.2.2",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "3.4.0": {
+    "proj-name": "build_augustus_v3.4.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "3.4.1": {
+    "proj-name": "build_augustus_v3.4.1",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "4.0.0": {
+    "proj-name": "build_augustus_v4.0.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "4.2.0": {
+    "proj-name": "build_augustus_v4.2.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "4.2.1": {
+    "proj-name": "build_augustus_v4.2.1",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "4.3.0": {
+    "proj-name": "build_augustus_v4.3.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "4.4.0": {
+    "proj-name": "build_augustus_v4.4.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.1.0": {
+    "proj-name": "build_augustus_v5.1.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.1.1": {
+    "proj-name": "build_augustus_v5.1.1",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.1.2": {
+    "proj-name": "build_augustus_v5.1.2",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.2.0": {
+    "proj-name": "build_augustus_v5.2.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.3.0": {
+    "proj-name": "build_augustus_v5.3.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.4.0": {
+    "proj-name": "build_augustus_v5.4.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.8.0": {
+    "proj-name": "build_augustus_sdk542_v5.8.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_nand_squashfs_update_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "master": {
+    "proj-name": "build_augustus_master",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "master_sdk542": {
+    "proj-name": "build_augustus_sdk542_master",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_nand_squashfs_update",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "native_master": {
+    "proj-name": "build_augustus_native_master",
+    "fn-prefix": "bcmAUGUSTUS_BCM52_NATIVE_nand_fs_image_128_puresqubi",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "build_device_featurebranch": {
+    "proj-name": "build_device_featurebranch/augustus",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi-",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  }
+}

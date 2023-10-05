@@ -1,0 +1,5 @@
+TBCFG_NETWORKS = "Networks"
+TBCFG_NETWORKS_SSID = "ssid"
+TBCFG_NETWORKS_KEY = "key"
+TBCFG_NETWORKS_ALIAS = "alias"
+TBCFG_CLIENT_DEPLOY = "client_deploy_to"

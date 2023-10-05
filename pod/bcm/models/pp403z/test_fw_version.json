@@ -1,0 +1,11 @@
+{
+  "first_released_fw": "3.2.2-79-gb778e82-dev-debug",
+  "ipv6_released_fw": "3.4.1-60-g5c749c-dev-debug",
+  "latest_released_fw": "4.2.0-13-g123b6b-dev-debug",
+  "ga_released_fw": "3.4.1-50-g0d6722-dev-debug",
+  "rounds": 1,
+  "wpa3_not_supported_released_fw": "3.2.2-79-gb778e82-dev-debug",
+  "capabilities_released_fw": "3.4.1-50-g0d6722-dev-debug",
+  "wano_persistent_storage": "3.4.1-97-gae574c-dev-debug",
+  "wano_ovsdb_storage": "4.2.0-72-gf9f067-dev-debug"
+}

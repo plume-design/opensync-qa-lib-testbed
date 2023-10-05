@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+import sys
+import traceback
+from typing import Dict, List
+
+from lib_testbed.generic.util.base_tool import ServerToolBase
+from lib_testbed.generic.client.client import Clients
+
+
+class ServerTool(ServerToolBase):
+    def get_command_list(self, parsed_args):
+        config = self.get_config()
+        kwargs = {'config': config, 'multi_obj': True, 'nicknames': ['host']}
+        try:
+            clients_obj = Clients(**kwargs)
+            clients_api = clients_obj.resolve_obj(**kwargs)
+            client_lib = clients_api.lib
+            self.tool = clients_api.lib.tool
+        except Exception:
+            if self.debug:
+                traceback.print_exc(limit=2, file=sys.stdout)
+            raise
+
+        commands = self.map_commands_to_methods(self.tool)
+
+        return commands, client_lib
+
+    @property
+    def command_list(self) -> List:
+        cmd_list = ['run', 'ping', 'uptime', 'version', 'ssh', 'put-file', 'get-file', 'reboot', 'upgrade',
+                    'set-tb-nat', 'get-tb-nat', 'dhcp-reservation', 'limit-tx-power', 'start-mqtt-broker',
+                    'stop-mqtt-broker', 'help']
+
+        return cmd_list
+
+    def map_commands_to_methods(self, tool) -> Dict:
+        exceptional_methods = {
+            'dhcp-reservation': 'testbed_dhcp_reservation',
+            'start-mqtt-broker': 'start_local_mqtt_broker',
+            'stop-mqtt-broker': 'stop_local_mqtt_broker'
+        }
+        mapped_commands = {}
+        for command in self.command_list:
+
+            if command in exceptional_methods.keys():
+                mapped_commands[command] = getattr(tool, exceptional_methods[command])
+            elif "-" in command:
+                mapped_commands[command] = getattr(tool, command.replace('-', '_'))
+            elif "help" in command:
+                mapped_commands[command] = self.get_tool_help_str
+            else:
+                mapped_commands[command] = getattr(tool, command)
+
+        return mapped_commands
+
+
+def main(args):
+    client_tool = ServerTool(args)
+    client_tool.execute()
+    exit(0)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

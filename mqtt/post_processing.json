@@ -1,0 +1,13 @@
+{
+  "HeroReport": {
+    "mac_address": ["deviceId"],
+    "ipv4_address": ["addrIpv4", "ipv4"]
+  },
+  "AdtReport": {
+    "mac_address": ["deviceId"],
+    "ipv6_address": ["destinationIpv6", "sourceIpv6"]
+  },
+  "MdnsRecordsReport": {
+    "encoded_string": ["resDesc"]
+  }
+}

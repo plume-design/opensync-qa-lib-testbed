@@ -1,0 +1,9 @@
+stricthostkeychecking no
+userknownhostsfile /dev/null
+
+ServerAliveInterval 5
+ServerAliveCountMax 5
+
+ControlMaster auto
+ControlPath /tmp/.2%n.%r@%h:%p
+ControlPersist yes

@@ -1,0 +1,470 @@
+#!/bin/sh
+
+##############################################################################
+#
+# node-check script checks a number of states on the node, displaying them in
+# sequence. All states combined determine whether the node is correctly set up
+#
+##############################################################################
+
+GLOBAL_SUCCESS=0
+
+display_store_success()
+{
+    let "GLOBAL_SUCCESS=$GLOBAL_SUCCESS+$1"
+    if [[ $1 -eq 0 ]]; then
+        echo "Success"
+    else
+        echo "Failure"
+    fi
+}
+
+ovs-vsctl show >> /dev/null 2>&1
+ovs_bridge=$?
+
+if [[ -f /usr/opensync/tools/ovsh ]]; then
+    opensync_path='/usr/opensync/'
+elif [[ -f /usr/plume/tools/ovsh ]]; then
+    opensync_path='/usr/plume/'
+else
+    opensync_path='/opt/we/'
+fi
+
+export PATH=${opensync_path}tools:/opt/bin:/opt/sbin:/sbin/:$PATH
+bh_sta_identifier='bhaul-sta'
+node_model="$(ovsh s AWLAN_Node model -r | awk '{$1=$1};1')"
+
+case ${node_model} in
+    "Plume Pod v1.0")
+        echo -n "Plume Pod v1.0:  "
+        home_ap="home-ap-24 home-ap-50"
+        bhaul_ap="bhaul-ap-24 bhaul-ap-50"
+        bhaul_sta="bhaul-sta-24 bhaul-sta-50"
+        ;;
+    "PP152X")
+        echo -n "PP152X (Tyrion):  "
+        home_ap="home-ap-24 home-ap-50"
+        bhaul_ap="bhaul-ap-24 bhaul-ap-50"
+        bhaul_sta="bhaul-sta-24 bhaul-sta-50"
+        ;;
+    "PP203X")
+        echo -n "PP203X (SuperPod):  "
+        home_ap="home-ap-24 "
+        ap_list="home-ap-l50 home-ap-u50"
+        for manager in ${ap_list}; do
+            out="$(ovsh s Wifi_VIF_Config --where if_name=="$manager" 2>&1)"
+            if [[ $? -eq 0 ]]; then
+                home_ap="$home_ap $manager"
+            fi
+        done
+        bhaul_ap="bhaul-ap-24 bhaul-ap-l50 bhaul-ap-u50 b-ap-24 b-ap-l50 b-ap-u50"
+        bhaul_sta="bhaul-sta-24 bhaul-sta-l50 bhaul-sta-u50"
+        ;;
+    "PP302Z")
+        echo -n "PP302Z (Cyrus):  "
+        home_ap="wl0.2 wl1.2"
+        bhaul_ap="wl0.1 wl1.1"
+        bhaul_sta="wl0 wl1"
+        bh_sta_identifier='wl0|\wl1'
+        ;;
+    "PP403Z")
+        echo -n "PP403Z (Augustus):  "
+        home_ap="wl1.2"
+        ap_list="wl0.2 wl2.2"
+        for manager in ${ap_list}; do
+            out="$(ovsh s Wifi_VIF_Config --where if_name=="$manager" 2>&1)"
+            if [[ $? -eq 0 ]]; then
+                home_ap="$home_ap $manager"
+            fi
+        done
+        bhaul_ap="wl0.1 wl1.1 wl2.1"
+        bhaul_sta="wl0 wl1 wl2"
+        bh_sta_identifier='wl0|\wl1|\wl2'
+        ;;
+    "PP443Z")
+        echo -n "PP443Z (Octavian):  "
+        home_ap="wl1.2"
+        ap_list="wl0.2 wl2.2"
+        for manager in ${ap_list}; do
+            out="$(ovsh s Wifi_VIF_Config --where if_name=="$manager" 2>&1)"
+            if [[ $? -eq 0 ]]; then
+                home_ap="$home_ap $manager"
+            fi
+        done
+        bhaul_ap="wl0.1 wl1.1 wl2.1"
+        bhaul_sta="wl0 wl1 wl2"
+        bh_sta_identifier='wl0|\wl1|\wl2'
+        ;;
+    "PP513Z")
+        echo -n "PP513Z (Zeus LTE):  "
+        home_ap="wl0.2 wl1.2 wl2.2"
+        bhaul_ap="wl0.1 wl1.1 wl2.1"
+        bhaul_sta="wl0 wl1 wl2"
+        bh_sta_identifier="wl0|\wl1|\wl2"
+        ;;
+    "PP523Z")
+        echo -n "PP523Z (Zeus Non-LTE):  "
+        home_ap="wl0.2 wl1.2 wl2.2"
+        bhaul_ap="wl0.1 wl1.1 wl2.1"
+        bhaul_sta="wl0 wl1 wl2"
+        bh_sta_identifier="wl0|\wl1|\wl2"
+        ;;
+    "PP603X")
+        echo -n "PP603X (Attila):  "
+        home_ap="home-ap-24 home-ap-50 home-ap-60"
+        bhaul_ap="b-ap-24 b-ap-50 b-ap-60"
+        bhaul_sta="bhaul-sta-24 bhaul-sta-50 bhaul-sta-60"
+        bh_sta_identifier="bhaul-sta-24|bhaul-sta-50|bhaul-sta-60"
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+
+# discover all managers
+ovsh s Node_Services service >> /dev/null 2>&1
+node_services=$?
+if [[ ${node_services} -eq 0 ]]; then
+    managers=$(ovsh s Node_Services -w enable==true service -r)
+else
+    managers=$(ls ${opensync_path}/bin/ | awk '/^.*m$/')
+fi
+
+ovsh s AWLAN_Node id -r
+
+
+# Uplink interface
+eth_int="$(ovsh s Connection_Manager_Uplink if_name --where is_used==true -r)"
+if echo ${eth_int} | egrep -q "^wwan"; then
+    eth_int="wwan0"
+elif ! echo ${eth_int} | egrep -q "^eth"; then
+    eth_int="eth0"
+fi
+
+# Check network mode
+ovsh s Node_Services -w service==wano -w status==enabled >> /dev/null 2>&1
+wano=$?
+echo -n "WANO enabled:             "
+if [[ ${wano} -eq 0 ]]; then
+    echo "yes"
+else
+    echo "no"
+fi
+
+# is bcm?
+which wl >> /dev/null 2>&1
+bcm=$?
+
+# Check WDS mode
+ovsh s Wifi_VIF_Config -w multi_ap==backhaul_bss >> /dev/null 2>&1
+wds=$?
+echo -n "WDS enabled:              "
+if [[ ${wds} -eq 0 ]]; then
+    echo "yes"
+else
+    echo "no"
+fi
+
+echo -n "Network mode:             "
+if [[ ${wano} -eq 0 ]]; then
+    ip route show dev ${eth_int} 2>/dev/null | grep -q default || ip -6 route show dev ${eth_int} 2>/dev/null | grep -q default
+    router=$?
+    if [[ ${router} -eq 0 ]]; then
+        echo "router"
+    else
+        echo "bridge"
+    fi
+else
+    ovsh s Port -w name==patch-h2w >> /dev/null 2>&1
+    router=$?
+    if [[ ${router} -eq 1 ]]; then
+        echo "router"
+    else
+        echo "bridge"
+    fi
+fi
+
+
+# See if br-home is present
+echo -n "br-home bridge present:   "
+ifconfig br-home >> /dev/null 2>&1
+display_store_success $?
+
+
+# See if we are a gateway
+gw_node=0
+if [[ ${ovs_bridge} -eq 0 ]]; then
+    brname="$(ovs-vsctl iface-to-br ${eth_int} 2>&1)"
+    if [[ $? -eq 0 ]]; then
+        if [[ "$brname" == "br-wan" ]]; then
+            let gw_node=1
+        fi
+    fi
+    # Check eth1 for SP
+    brname="$(ovs-vsctl iface-to-br eth1 2>&1)"
+    if [[ $? -eq 0 ]]; then
+        if [[ "$brname" == "br-wan" ]]; then
+            let gw_node=1
+        fi
+    fi
+else
+    # TODO: so far only GW in router mode works, so hard to guess
+    let gw_node=1
+fi
+
+
+# gateway check in case of WANO
+ovsh s Connection_Manager_Uplink -w has_L2==true -w has_L3==true -w if_name==${eth_int} >> /dev/null 2>&1
+out=$?
+if test ${wano} -eq 0 && test ${out} -eq 0 && test gw_node==0; then
+    let gw_node=1
+fi
+
+
+# See if def route is reachable
+echo -n "Default Router reachable: "
+default_route=$(ip route show 2>/dev/null | grep 'default' | head -1 | awk -F 'via' '{print $2}')
+if test -z "$default_route"; then
+    default_route=$(ip -6 route show 2>/dev/null | grep 'default' | head -1 | awk -F 'via' '{print $2}')
+fi
+rtr_ipaddr=$(echo ${default_route} | awk '{print $1}')
+rtr_ifname=$(echo ${default_route} | awk -F 'dev' '{print $2}' | awk '{print $1}')
+
+if test -z "$rtr_ipaddr" -o "$rtr_ipaddr" == "0.0.0.0"; then
+    display_store_success 1
+elif echo ${rtr_ifname} | egrep -q "^wwan"; then
+    # This is an indirect verification caused by mobile network operator
+    # which blocks ICMP on their gateway
+    ping -I ${rtr_ifname} -c1 iana.org >> /dev/null 2>&1
+    display_store_success $?
+else
+    # We need to specify interface to be able to ping IPv6 default route,
+    # since it normally contains gateway's link local address.
+    ping -I ${rtr_ifname} -c1 ${rtr_ipaddr} >> /dev/null 2>&1
+    display_store_success $?
+fi
+
+
+# Check internet connectivity and name resolution
+echo -n "Internet and DNS:         "
+ping -c 1 www.iana.org >> /dev/null 2>&1 || ping -6 -c 1 www.iana.org >> /dev/null 2>&1
+display_store_success $?
+
+
+# See whether time has been synced
+echo -n "Time sync done:           "
+test $(date +%Y) -ge 2016 >> /dev/null 2>&1
+display_store_success $?
+
+
+# Cloud connection is active
+echo -n "Cloud connection active:  "
+ovsh s Manager is_connected -r | grep true >> /dev/null 2>&1
+display_store_success $?
+
+
+# Home AP interfaces present
+echo -n "Home AP ifaces present:   "
+ret=0
+for i in ${home_ap}; do
+    # PP603X: home-ap-60 exists when WPA3 mode is set
+    if test $i == "home-ap-60" && test $node_model == "PP603X" && test -z "$(ovsh s Wifi_VIF_Config -w if_name=="home-ap-50" wpa_key_mgmt | grep -o "sae")"; then
+        continue
+    fi
+    ifconfig ${i} >> /dev/null 2>&1
+    let ret="$ret || $?"
+done
+display_store_success ${ret}
+
+
+# Bhaul AP interfaces present
+echo -n "Bhaul AP ifaces present:  "
+ret=0
+for i in ${bhaul_ap}; do
+    ifconfig ${i} >> /dev/null 2>&1
+    let ret="$ret && $?"
+done
+display_store_success ${ret}
+
+
+# See if STA interfaces are up (backhaul)
+# if GW, none should be there, otherwise one STA should be up
+sta_cnt=0
+for i in ${bhaul_sta}; do
+    vif="$(ovsh s Wifi_VIF_State enabled --where if_name==${i} -r | xargs)"
+    inet="$(ovsh s Wifi_Inet_State network --where if_name==${i} -r | xargs)"
+    test "${vif}" == "true" && test "${inet}" == "true"
+    if test $? -eq 0; then
+        # interface exists
+        let sta_cnt="sta_cnt + 1"
+        # if not wds check if corresponding gre interface exists
+        if test ${wds} -ne 0; then
+            echo -n "Gre interface exists:     "
+            ifconfig g-${i} >> /dev/null 2>&1
+            display_store_success $?
+        fi
+    fi
+done
+
+echo -n "STA interfaces in order:  "
+if test ${gw_node} -gt 0; then
+    test ${sta_cnt} -eq 0
+    display_store_success $?
+else
+    # Only one STA should be present
+    test ${sta_cnt} -eq 1
+    display_store_success $?
+fi
+
+# see if eth0 added to br-home
+eth_bridged=0
+x="$(ovsh s Connection_Manager_Uplink >> /dev/null 2>&1)"
+if [[ $? -eq 0 ]]; then
+    # cloud adds ifaces to bridge
+    # if L2==True and L3==False, iface should be added to br-home
+    has_l2="$(ovsh s Connection_Manager_Uplink --where if_name==${eth_int} has_L2 -r | xargs)"
+    has_l3="$(ovsh s Connection_Manager_Uplink --where if_name==${eth_int} has_L3 -r | xargs)"
+    if test "$has_l2" == "true" && test "$has_l3" == "false"; then
+        if [[ ${ovs_bridge} -eq 0 ]]; then
+            brname="$(ovs-vsctl iface-to-br ${eth_int} 2>&1)"
+            test "$brname" == "br-home"
+        else
+            brctl show br-home | grep eth1 >> /dev/null 2>&1
+        fi
+        echo -n "${eth_int} added to br-home:    "
+        display_store_success $?
+    fi
+else
+    # old way
+    brname="$(ovs-vsctl iface-to-br ${eth_int} 2>&1)"
+    if [[ "$brname" == "br-home" ]]; then
+        let eth_bridged=1
+        if [[ ${gw_node} -eq 0 ]]; then
+            echo -n "${eth_int} added to br-home:    "
+            [[ ${eth_bridged} -eq 1 ]]
+            display_store_success $?
+        fi
+    fi
+fi
+
+
+# see if eth1 added to br-home for SuperPod
+if test "$node_model" == "PP203X" || test "$node_model" == "PP403Z" || test "$node_model" == "PP443Z"; then
+    eth_bridged=0
+    x="$(ovsh s Connection_Manager_Uplink >> /dev/null 2>&1)"
+    if [[ $? -eq 0 ]]; then
+        # cloud adds ifaces to bridge
+        # if L2==True and L3==False, iface should be added to br-home
+        has_l2="$(ovsh s Connection_Manager_Uplink --where if_name==eth1 has_L2 -r | xargs)"
+        has_l3="$(ovsh s Connection_Manager_Uplink --where if_name==eth1 has_L3 -r | xargs)"
+        if test "$has_l2" == "true" && test "$has_l3" == "false"; then
+            if [[ ${ovs_bridge} -eq 0 ]]; then
+                brname="$(ovs-vsctl iface-to-br eth1 2>&1)"
+                [[ "$brname" == "br-home" ]]
+            else
+                brctl show br-home | grep eth1 >> /dev/null 2>&1
+            fi
+            echo -n "eth1 added to br-home:    "
+
+            display_store_success $?
+        fi
+    else
+        # old way
+        brname="$(ovs-vsctl iface-to-br eth1 2>&1)"
+        if [[ "$brname" == "br-home" ]]; then
+            let eth_bridged=1
+            if [[ ${gw_node} -eq 0 ]]; then
+                echo -n "eth1 added to br-home:    "
+                [[ ${eth_bridged} -eq 1 ]]
+                display_store_success $?
+            fi
+        fi
+    fi
+fi
+
+
+# Check crashes (kernel + managers)
+echo -n "Kernel/managers dumps:    "
+ls /var/log/lm/crash/* >> /dev/null 2>&1
+let not="!$?"
+if [[ ${not} -gt 0 ]]; then
+    display_store_success ${not}
+    cd /var/log/lm/crash/
+    ls
+else
+    display_store_success ${not}
+fi
+
+
+# Check if dnsmasq is running
+echo -n "Dnsmasq running:          "
+pidof dnsmasq >> /dev/null 2>&1
+display_store_success $?
+
+
+# Check if ovsdb-server is running
+echo -n "Ovsdb-server running:     "
+pidof ovsdb-server >> /dev/null 2>&1
+display_store_success $?
+
+
+# Check DHCP client/server is running
+# GW -> just server, in case of router mode br-home exists in dnsmasq.conf
+# LEAF -> client and server
+echo -n "DHCP check:               "
+ret=0
+
+if test ${wano} -eq 0; then
+    if test ${gw_node} -gt 0 && test ${router} -eq 0; then  # GW and router mode
+        dhcp_interface=${eth_int}
+    elif test ${gw_node} -eq 0 || test ${router} -gt 0; then  # Leaf and bridge mode
+        dhcp_interface="br-home"
+    fi
+else
+    dhcp_interface="br-wan"
+fi
+
+if [[ ${gw_node} -gt 0 ]]; then
+    /bin/ps | grep udhcp | egrep -q "${dhcp_interface}"
+    let ret="$ret || $?"
+    /bin/ps | grep udhcp | egrep -q "${bh_sta_identifier}"
+    let ret="$ret || ! $?"
+    if test ${router} -eq 1 && test ${wano} -gt 0; then
+        cat /var/etc/dnsmasq.conf | grep br-home >> /dev/null 2>&1
+        let ret="$ret || $?"
+    fi
+    display_store_success ${ret}
+
+else
+    /bin/ps | grep udhcp | grep -q "${dhcp_interface}"
+    let ret="$ret || $?"
+    if test ${wds} -eq 0; then
+        /bin/ps | grep udhcp | egrep -q "${bh_sta_identifier}"
+        let ret="$ret || ! $?"
+    else
+        /bin/ps | grep udhcp | egrep -q "${bh_sta_identifier}"
+        let ret="$ret || $?"
+    fi
+    display_store_success ${ret}
+fi
+
+
+# Check if managers are running
+echo -n "Managers running:         "
+ret=0
+for manager in ${managers}; do
+    if [[ ${manager} == "veego" ]]; then
+      manager="veego-agent"
+    fi
+    pid=$(pidof ${manager} | awk '{print $1}')
+    out=0
+    if test -z ${pid}; then
+        echo -n $'\n'   ${manager} "is not running "
+        out=1
+    fi
+    let ret="$ret || $out"
+done
+display_store_success ${ret}
+
+
+exit ${GLOBAL_SUCCESS}

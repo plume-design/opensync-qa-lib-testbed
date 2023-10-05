@@ -1,0 +1,7 @@
+[flake8]
+ignore = D203 W503 E203
+max-line-length = 120
+exclude = .git, __pycache__, ./lib/cloud/api/*, trash_bin/*, *_pb2.py
+max-complexity = 16
+format = pylint
+show_source = True

@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+import sys
+import re
+import traceback
+from typing import Dict
+
+from lib_testbed.generic.util.testbedtoollib import TestBedToolLib
+from lib_testbed.generic.util.logger import log
+from lib_testbed.generic.util.base_tool import TestBedTool
+
+
+class TestBed(TestBedTool):
+
+    def get_command_list(self, parsed_args):
+        config = self.get_config(exit_no_config=False)
+        kwargs = {"config": config, "json": self.json_output}
+        try:
+            self.tool = TestBedToolLib(**kwargs)
+        except Exception as e:
+            if self.debug:
+                traceback.print_exc(limit=2, file=sys.stdout)
+            if re.compile(r"name: .* not found in config").match(str(e)):
+                log.error(
+                    "Unexpected client name: '%s'\nFirst parameter should be client name specifier",
+                    kwargs["nicknames"],
+                )
+                exit(1)
+            raise
+
+        commands = self.map_commands_to_objects(self.tool)
+        return commands, self.tool
+
+    @property
+    def map_commands_to_method_names(self) -> Dict:
+        commands = {
+            'recover': 'recover',
+            'tools': 'tb_tools_list',
+            'help': 'get_tool_help_str'
+        }
+        return commands
+
+
+def main(args):
+    tb_tool = TestBed(args)
+    tb_tool.execute()
+    exit(0)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

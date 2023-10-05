@@ -1,0 +1,18 @@
+#!/bin/bash
+
+DCONF_DIR=~/.cache/dconf/
+# Check ownership of DCONF_DIR as firefox requires user permission
+[ -d $DCONF_DIR ] && [ $(stat -c %U $DCONF_DIR) = "root" ] && \
+    echo -e "Change owner for directory $DCONF_DIR\nsudo chown -R $USER:$USER ~/.cache/dconf/"
+
+RESULT_PATH=/tmp/automation/allure-results
+REPORT_PATH=/tmp/automation/allure-results/report
+if [[ $# -ge 1 ]]; then
+  RESULT_PATH=$1
+fi
+
+if [[ $# -ge 2 ]]; then
+  REPORT_PATH=$2
+fi
+
+/opt/allure/bin/allure generate --clean "$RESULT_PATH" -o "$REPORT_PATH" && allure-show "$REPORT_PATH"

@@ -1,0 +1,28 @@
+{
+  "short-name": "MR8300",
+  "s3-bucket": "",
+  "3.0.1": {
+    "proj-name": "build_mr8300_v3.0.1",
+    "fn-prefix": "mr8300",
+    "encryption": false,
+    "img-suffix": "bin"
+  },
+  "4.2.0": {
+    "proj-name": "build_mr8300_v4.2.0",
+    "fn-prefix": "mr8300-sysupgrade",
+    "encryption": false,
+    "img-suffix": "bin"
+  },
+  "master": {
+    "proj-name": "build_mr8300_master",
+    "fn-prefix": "mr8300-sysupgrade",
+    "encryption": false,
+    "img-suffix": "bin"
+  },
+  "build_device_featurebranch": {
+    "proj-name": "build_device_featurebranch",
+    "fn-prefix": "mr8300-sysupgrade",
+    "encryption": false,
+    "img-suffix": "bin"
+  }
+}

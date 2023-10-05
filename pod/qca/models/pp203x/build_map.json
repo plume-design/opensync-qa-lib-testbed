@@ -1,0 +1,297 @@
+{
+  "short-name": "PlumeV2",
+  "s3-bucket": "PP203X",
+  "0.2.0": {
+    "proj-name": "build_caesar_v0.2",
+    "fn-prefix": "openwrt-ipq806x-ipq40xx-ubi-root",
+    "encryption": false,
+    "img-suffix": "img"
+  },
+  "0.8": {
+    "proj-name": "build_caesar_0.8",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK52-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "0.8.1": {
+    "proj-name": "build_caesar_0.8",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK52-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "0.8.2": {
+    "proj-name": "build_caesar_0.8.2",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "0.8.5": {
+    "proj-name": "build_caesar_0.8.5",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK52-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "1.0.0": {
+    "proj-name": "build_caesar_1.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK52-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "1.0.0.32": {
+    "proj-name": "build_caesar_1.0.0.32",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK52-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "1.0.1": {
+    "proj-name": "build_caesar_1.0.1",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK52-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "1.2.0": {
+    "proj-name": "build_caesar_1.2",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "1.2.7": {
+    "proj-name": "build_caesar_r02",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "2.4.0": {
+    "proj-name": "build_caesar_2.4",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "2.4.1": {
+    "proj-name": "build_caesar_v2.4.1",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "2.4.2": {
+    "proj-name": "build_caesar_v2.4.2",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "2.4.3": {
+    "proj-name": "build_caesar_v2.4.3",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "2.4.4": {
+    "proj-name": "build_caesar_v2.4.4",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "2.6.0": {
+    "proj-name": "build_caesar_v2.6.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "2.8.0": {
+    "proj-name": "build_caesar_v2.8.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "3.0.0": {
+    "proj-name": "build_caesar_v3.0.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "3.0.1": {
+    "proj-name": "build_caesar_v3.0.1",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "3.2.0": {
+    "proj-name": "build_caesar_v3.2.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "3.2.1": {
+    "proj-name": "build_caesar_v3.2.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "3.2.2": {
+    "proj-name": "build_caesar_v3.2.2",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "3.4.0": {
+    "proj-name": "build_caesar_v3.4.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "3.4.1": {
+    "proj-name": "build_caesar_v3.4.1",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "4.0.0": {
+    "proj-name": "build_caesar_v4.0.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "4.2.0": {
+    "proj-name": "build_caesar_v4.2.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "4.2.1": {
+    "proj-name": "build_caesar_v4.2.1",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "4.3.0": {
+    "proj-name": "build_caesar_v4.3.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "4.4.0": {
+    "proj-name": "build_caesar_v4.4.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.1.0": {
+    "proj-name": "build_caesar_v5.1.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.1.1": {
+    "proj-name": "build_caesar_v5.1.1",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.1.2": {
+    "proj-name": "build_caesar_v5.1.2",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.2.0": {
+    "proj-name": "build_caesar_v5.2.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.3.0": {
+    "proj-name": "build_caesar_v5.3.0",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.4.0": {
+    "proj-name": "build_caesar_sdk11_v5.4.0",
+    "fn-prefix": "qcaPIRANHA2_QSDK11_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.6.0": {
+    "proj-name": "build_caesar_sdk11_v5.6.0",
+    "fn-prefix": "qcaPIRANHA2_QSDK11_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "5.8.0": {
+    "proj-name": "build_caesar_sdk11_v5.8.0",
+    "fn-prefix": "qcaPIRANHA2_QSDK11_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "legacy_master": {
+    "proj-name": "build_caesar_master",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "master": {
+    "proj-name": "build_caesar_SDK11_master",
+    "fn-prefix": "qcaPIRANHA2_QSDK11_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "legacy_native_master": {
+    "proj-name": "build_caesar_native_master",
+    "fn-prefix": "openwrt-os-PIRANHA2_QSDK53_NATIVE-ap-fit",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "native_master": {
+    "proj-name": "build_caesar_sdk11_native_master",
+    "fn-prefix": "qcaPIRANHA2_QSDK11_NATIVE_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "build_device_featurebranch": {
+    "proj-name": "build_device_featurebranch/caesar_sdk11",
+    "fn-prefix": "qcaPIRANHA2_QSDK11_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  }
+}

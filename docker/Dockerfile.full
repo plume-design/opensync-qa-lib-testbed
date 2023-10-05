@@ -1,0 +1,107 @@
+ARG PARENT_IMAGE=""
+FROM $PARENT_IMAGE:latest
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt update && apt install -y  \
+# - Install java
+    openjdk-8-jdk \
+    ant \
+# - Install Firefox prerequisites
+    software-properties-common \
+    libcanberra-gtk-module \
+    libcanberra-gtk3-module \
+    xserver-xorg \
+    dbus-x11 \
+# - Install Chrome prerequisites
+    xvfb \
+    libxi6 \
+    libgconf-2-4 \
+    fonts-liberation \
+    libappindicator3-1 \
+# - Install Webkit browser
+    webkit2gtk-driver
+
+ENV JAVA_HOME /usr/lib/jvm/java-8-openjdk-amd64/
+RUN export JAVA_HOME
+
+# -- Install firefox
+RUN add-apt-repository ppa:mozillateam/ppa
+RUN apt update && apt install -y -t 'o=LP-PPA-mozillateam' firefox
+
+# Disable CORS
+RUN \
+    CFG_FILE="/usr/lib/firefox/firefox.cfg" && \
+    mkdir -p /usr/lib/firefox/defaults/pref/ && \
+    echo '// IMPORTANT: Start your code on the 2nd line' > "$CFG_FILE" && \
+    JS_FILE="/usr/lib/firefox/defaults/pref/autoconfig.js" && \
+    echo '' > "$JS_FILE" && \
+    echo 'pref("general.config.filename", "firefox.cfg");' >> "$JS_FILE" && \
+    echo 'pref("general.config.obscure_value", 0);' >> "$JS_FILE" && \
+    echo 'pref("security.fileuri.strict_origin_policy", false);' >> "$JS_FILE"
+
+# -- Install GeckoDriver
+RUN wget -q "https://github.com/mozilla/geckodriver/releases/download/v0.33.0/geckodriver-v0.33.0-linux64.tar.gz" -O /tmp/geckodriver.tgz \
+    && tar zxf /tmp/geckodriver.tgz -C /usr/bin/ \
+    && rm /tmp/geckodriver.tgz
+
+# Install Chrome browser
+# version: 91.0.4472.114, check https://www.chromium.org/getting-involved/download-chromium for branch_base_position
+# branch_base_position=870763
+# Filter branch_base_position in https://commondatastorage.googleapis.com/chromium-browser-snapshots/index.html?prefix=Linux_x64/
+# Wait a few minutes for page to be fully loaded
+RUN curl https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add
+RUN mkdir -p /tmp/chrome
+RUN wget "https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots/o/Linux_x64%2F870763%2Fchrome-linux.zip?generation=1617926496067901&alt=media" -O /tmp/chrome/chrome-linux.zip \
+    && unzip /tmp/chrome/chrome-linux.zip -d /opt/chrome-linux/
+RUN ls -la /opt/chrome-linux/ && ls -la /opt/chrome-linux/chrome-linux
+ENV CHROME_PATH=/usr/bin/google-chrome
+RUN ln -sf /opt/chrome-linux/chrome-linux/chrome ${CHROME_PATH}
+RUN chown root:root ${CHROME_PATH} \
+    && chmod 755 ${CHROME_PATH}
+RUN rm -rf /tmp/chrome
+
+# Install Chrome driver
+RUN mkdir -p /tmp/chrome
+RUN wget -q "https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots/o/Linux_x64%2F870763%2Fchromedriver_linux64.zip?generation=1617926501117925&alt=media" -O /tmp/chrome/chromedriver.zip \
+    && unzip /tmp/chrome/chromedriver.zip -d /tmp/chrome
+ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
+RUN cp /tmp/chrome/chromedriver_linux64/chromedriver ${CHROMEDRIVER_PATH}
+RUN chown root:root ${CHROMEDRIVER_PATH} \
+    && chmod +x ${CHROMEDRIVER_PATH} \
+    && rm -rf /tmp/chrome
+
+# -- Install Jmeter
+RUN wget --no-check-certificate https://dlcdn.apache.org//jmeter/binaries/apache-jmeter-5.5.tgz \
+    && tar xf apache-jmeter-5.5.tgz -C /opt \
+    && mv /opt/apache-jmeter-5.5 /opt/jmeter \
+    && ln -s /opt/jmeter/bin/jmeter /usr/local/bin/jmeter \
+    && rm apache-jmeter-5.5.tgz
+
+# -- Install Jmeter plugins as needed
+RUN wget -O /opt/jmeter/lib/ext/jmeter-plugins-manager-1.8.jar \
+    http://search.maven.org/remotecontent?filepath=kg/apc/jmeter-plugins-manager/1.8/jmeter-plugins-manager-1.8.jar \
+    -P /opt/jmeter/lib/ext/
+RUN wget -O /opt/jmeter/lib/cmdrunner-2.2.jar \
+    http://search.maven.org/remotecontent?filepath=kg/apc/cmdrunner/2.2/cmdrunner-2.2.jar \
+    -P /opt/jmeter/lib/
+RUN java -cp /opt/jmeter/lib/ext/jmeter-plugins-manager-1.8.jar org.jmeterplugins.repository.PluginManagerCMDInstaller
+#### --- tack on extra plugins from here --- ####
+#### --------------------------------------- ####
+RUN /opt/jmeter/bin/PluginsManagerCMD.sh install jpgc-casutg=2.10 || true \
+    && /opt/jmeter/bin/PluginsManagerCMD.sh install jpgc-graphs-vs=2.0 || true \
+    && /opt/jmeter/bin/PluginsManagerCMD.sh install jpgc-tst=2.5 || true
+#### --------------------------------------- ####
+#### --------- END Jmeter plugins ---------- ####
+
+# -- Install Databricks Dependencies
+RUN mkdir -p /tmp/simba
+RUN wget https://databricks-bi-artifacts.s3.us-east-2.amazonaws.com/simbaspark-drivers/jdbc/2.6.33/DatabricksJDBC42-2.6.33.1055.zip \
+    -O /tmp/simba/DatabricksJDBC42-2.6.33.1055.zip \
+    && unzip /tmp/simba/DatabricksJDBC42-2.6.33.1055.zip -d /tmp/simba
+RUN mkdir /opt/databricks \
+    && mv /tmp/simba/DatabricksJDBC42.jar /opt/databricks \
+    && rm -rf /tmp/simba \
+    && chmod a+x /opt/databricks/DatabricksJDBC42.jar
+
+CMD ["bash"]
