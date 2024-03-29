@@ -6,46 +6,46 @@ from google.protobuf.internal import builder as _builder
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import descriptor_pool as _descriptor_pool
 from google.protobuf import symbol_database as _symbol_database
-
 # @@protoc_insertion_point(imports)
 
 _sym_db = _symbol_database.Default()
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n\x1bgatekeeper_hero_stats.proto\x12\x15gatekeeper.hero_stats"<\n\x14HeroObservationPoint\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x13\n\x0blocation_id\x18\x02 \x01(\t"W\n\x0cHeroHostname\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x12\n\ncount_fqdn\x18\x02 \x01(\x04\x12\x12\n\ncount_host\x18\x03 \x01(\x04\x12\x11\n\tcount_sni\x18\x04 \x01(\x04"%\n\x07HeroUrl\x12\x0b\n\x03url\x18\x01 \x01(\t\x12\r\n\x05\x63ount\x18\x02 \x01(\x04",\n\x08HeroIpv4\x12\x11\n\taddr_ipv4\x18\x01 \x01(\r\x12\r\n\x05\x63ount\x18\x02 \x01(\x04",\n\x08HeroIpv6\x12\x11\n\taddr_ipv6\x18\x01 \x01(\x0c\x12\r\n\x05\x63ount\x18\x02 \x01(\x04"&\n\x07HeroApp\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05\x63ount\x18\x02 \x01(\x04"\x93\x01\n\x11HeroIpv4FlowTuple\x12\x13\n\x0bsource_ipv4\x18\x01 \x01(\r\x12\x18\n\x10\x64\x65stination_ipv4\x18\x02 \x01(\r\x12\x11\n\ttransport\x18\x03 \x01(\r\x12\x13\n\x0bsource_port\x18\x04 \x01(\r\x12\x18\n\x10\x64\x65stination_port\x18\x05 \x01(\r\x12\r\n\x05\x63ount\x18\x06 \x01(\x04"\x93\x01\n\x11HeroIpv6FlowTuple\x12\x13\n\x0bsource_ipv6\x18\x01 \x01(\x0c\x12\x18\n\x10\x64\x65stination_ipv6\x18\x02 \x01(\x0c\x12\x11\n\ttransport\x18\x03 \x01(\r\x12\x13\n\x0bsource_port\x18\x04 \x01(\r\x12\x18\n\x10\x64\x65stination_port\x18\x05 \x01(\r\x12\r\n\x05\x63ount\x18\x06 \x01(\x04"9\n\x0cHeroRedirect\x12\r\n\x05\x63name\x18\x01 \x01(\t\x12\x0c\n\x04ipv4\x18\x02 \x01(\r\x12\x0c\n\x04ipv6\x18\x03 \x01(\x0c"\x81\x05\n\tHeroStats\x12\x11\n\tdevice_id\x18\x01 \x01(\x0c\x12\x32\n\x06\x61\x63tion\x18\x02 \x01(\x0e\x32".gatekeeper.hero_stats.HeroActions\x12\x13\n\x0b\x63\x61tegory_id\x18\x03 \x01(\r\x12\x0e\n\x06policy\x18\x04 \x01(\t\x12\x16\n\x0elast_access_ts\x18\x05 \x01(\x04\x12\x38\n\tdirection\x18\x06 \x01(\x0e\x32%.gatekeeper.hero_stats.HeroDirections\x12\x35\n\x08hostname\x18\x07 \x01(\x0b\x32#.gatekeeper.hero_stats.HeroHostname\x12+\n\x03url\x18\x08 \x01(\x0b\x32\x1e.gatekeeper.hero_stats.HeroUrl\x12-\n\x04ipv4\x18\t \x01(\x0b\x32\x1f.gatekeeper.hero_stats.HeroIpv4\x12-\n\x04ipv6\x18\n \x01(\x0b\x32\x1f.gatekeeper.hero_stats.HeroIpv6\x12+\n\x03\x61pp\x18\x0b \x01(\x0b\x32\x1e.gatekeeper.hero_stats.HeroApp\x12<\n\nipv4_tuple\x18\x0c \x01(\x0b\x32(.gatekeeper.hero_stats.HeroIpv4FlowTuple\x12<\n\nipv6_tuple\x18\r \x01(\x0b\x32(.gatekeeper.hero_stats.HeroIpv6FlowTuple\x12\x35\n\x08redirect\x18\x0e \x01(\x0b\x32#.gatekeeper.hero_stats.HeroRedirect\x12\x14\n\x0cnetwork_zone\x18\x0f \x01(\t"s\n\x15HeroObservationWindow\x12\x12\n\nstarted_at\x18\x01 \x01(\x04\x12\x10\n\x08\x65nded_at\x18\x02 \x01(\x04\x12\x34\n\nhero_stats\x18\x03 \x03(\x0b\x32 .gatekeeper.hero_stats.HeroStats"\xb3\x01\n\nHeroReport\x12\x13\n\x0breported_at\x18\x01 \x01(\x04\x12\x46\n\x11observation_point\x18\x02 \x01(\x0b\x32+.gatekeeper.hero_stats.HeroObservationPoint\x12H\n\x12observation_window\x18\x03 \x03(\x0b\x32,.gatekeeper.hero_stats.HeroObservationWindow*\xab\x01\n\x0bHeroActions\x12\x1b\n\x17HERO_ACTION_UNSPECIFIED\x10\x00\x12\x15\n\x11HERO_ACTION_ALLOW\x10\x01\x12\x15\n\x11HERO_ACTION_BLOCK\x10\x02\x12\x18\n\x14HERO_ACTION_REDIRECT\x10\x03\x12\x17\n\x13HERO_ACTION_FORWARD\x10\x04\x12\x1e\n\x1aHERO_ACTION_REDIRECT_ALLOW\x10\x05*m\n\x0eHeroDirections\x12\x18\n\x14HERO_DIR_UNSPECIFIED\x10\x00\x12\x14\n\x10HERO_DIR_INBOUND\x10\x01\x12\x15\n\x11HERO_DIR_OUTBOUND\x10\x02\x12\x14\n\x10HERO_DIR_LAN2LAN\x10\x03\x62\x06proto3'
-)
+
+
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1bgatekeeper_hero_stats.proto\x12\x15gatekeeper.hero_stats\"<\n\x14HeroObservationPoint\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x13\n\x0blocation_id\x18\x02 \x01(\t\"W\n\x0cHeroHostname\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x12\n\ncount_fqdn\x18\x02 \x01(\x04\x12\x12\n\ncount_host\x18\x03 \x01(\x04\x12\x11\n\tcount_sni\x18\x04 \x01(\x04\"%\n\x07HeroUrl\x12\x0b\n\x03url\x18\x01 \x01(\t\x12\r\n\x05\x63ount\x18\x02 \x01(\x04\",\n\x08HeroIpv4\x12\x11\n\taddr_ipv4\x18\x01 \x01(\r\x12\r\n\x05\x63ount\x18\x02 \x01(\x04\",\n\x08HeroIpv6\x12\x11\n\taddr_ipv6\x18\x01 \x01(\x0c\x12\r\n\x05\x63ount\x18\x02 \x01(\x04\"&\n\x07HeroApp\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05\x63ount\x18\x02 \x01(\x04\"\x93\x01\n\x11HeroIpv4FlowTuple\x12\x13\n\x0bsource_ipv4\x18\x01 \x01(\r\x12\x18\n\x10\x64\x65stination_ipv4\x18\x02 \x01(\r\x12\x11\n\ttransport\x18\x03 \x01(\r\x12\x13\n\x0bsource_port\x18\x04 \x01(\r\x12\x18\n\x10\x64\x65stination_port\x18\x05 \x01(\r\x12\r\n\x05\x63ount\x18\x06 \x01(\x04\"\x93\x01\n\x11HeroIpv6FlowTuple\x12\x13\n\x0bsource_ipv6\x18\x01 \x01(\x0c\x12\x18\n\x10\x64\x65stination_ipv6\x18\x02 \x01(\x0c\x12\x11\n\ttransport\x18\x03 \x01(\r\x12\x13\n\x0bsource_port\x18\x04 \x01(\r\x12\x18\n\x10\x64\x65stination_port\x18\x05 \x01(\r\x12\r\n\x05\x63ount\x18\x06 \x01(\x04\"9\n\x0cHeroRedirect\x12\r\n\x05\x63name\x18\x01 \x01(\t\x12\x0c\n\x04ipv4\x18\x02 \x01(\r\x12\x0c\n\x04ipv6\x18\x03 \x01(\x0c\"\x81\x05\n\tHeroStats\x12\x11\n\tdevice_id\x18\x01 \x01(\x0c\x12\x32\n\x06\x61\x63tion\x18\x02 \x01(\x0e\x32\".gatekeeper.hero_stats.HeroActions\x12\x13\n\x0b\x63\x61tegory_id\x18\x03 \x01(\r\x12\x0e\n\x06policy\x18\x04 \x01(\t\x12\x16\n\x0elast_access_ts\x18\x05 \x01(\x04\x12\x38\n\tdirection\x18\x06 \x01(\x0e\x32%.gatekeeper.hero_stats.HeroDirections\x12\x35\n\x08hostname\x18\x07 \x01(\x0b\x32#.gatekeeper.hero_stats.HeroHostname\x12+\n\x03url\x18\x08 \x01(\x0b\x32\x1e.gatekeeper.hero_stats.HeroUrl\x12-\n\x04ipv4\x18\t \x01(\x0b\x32\x1f.gatekeeper.hero_stats.HeroIpv4\x12-\n\x04ipv6\x18\n \x01(\x0b\x32\x1f.gatekeeper.hero_stats.HeroIpv6\x12+\n\x03\x61pp\x18\x0b \x01(\x0b\x32\x1e.gatekeeper.hero_stats.HeroApp\x12<\n\nipv4_tuple\x18\x0c \x01(\x0b\x32(.gatekeeper.hero_stats.HeroIpv4FlowTuple\x12<\n\nipv6_tuple\x18\r \x01(\x0b\x32(.gatekeeper.hero_stats.HeroIpv6FlowTuple\x12\x35\n\x08redirect\x18\x0e \x01(\x0b\x32#.gatekeeper.hero_stats.HeroRedirect\x12\x14\n\x0cnetwork_zone\x18\x0f \x01(\t\"s\n\x15HeroObservationWindow\x12\x12\n\nstarted_at\x18\x01 \x01(\x04\x12\x10\n\x08\x65nded_at\x18\x02 \x01(\x04\x12\x34\n\nhero_stats\x18\x03 \x03(\x0b\x32 .gatekeeper.hero_stats.HeroStats\"\xb3\x01\n\nHeroReport\x12\x13\n\x0breported_at\x18\x01 \x01(\x04\x12\x46\n\x11observation_point\x18\x02 \x01(\x0b\x32+.gatekeeper.hero_stats.HeroObservationPoint\x12H\n\x12observation_window\x18\x03 \x03(\x0b\x32,.gatekeeper.hero_stats.HeroObservationWindow*\xab\x01\n\x0bHeroActions\x12\x1b\n\x17HERO_ACTION_UNSPECIFIED\x10\x00\x12\x15\n\x11HERO_ACTION_ALLOW\x10\x01\x12\x15\n\x11HERO_ACTION_BLOCK\x10\x02\x12\x18\n\x14HERO_ACTION_REDIRECT\x10\x03\x12\x17\n\x13HERO_ACTION_FORWARD\x10\x04\x12\x1e\n\x1aHERO_ACTION_REDIRECT_ALLOW\x10\x05*m\n\x0eHeroDirections\x12\x18\n\x14HERO_DIR_UNSPECIFIED\x10\x00\x12\x14\n\x10HERO_DIR_INBOUND\x10\x01\x12\x15\n\x11HERO_DIR_OUTBOUND\x10\x02\x12\x14\n\x10HERO_DIR_LAN2LAN\x10\x03\x62\x06proto3')
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
-_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, "gatekeeper_hero_stats_pb2", globals())
-if _descriptor._USE_C_DESCRIPTORS is False:
-    DESCRIPTOR._options = None
-    _HEROACTIONS._serialized_start = 1679
-    _HEROACTIONS._serialized_end = 1850
-    _HERODIRECTIONS._serialized_start = 1852
-    _HERODIRECTIONS._serialized_end = 1961
-    _HEROOBSERVATIONPOINT._serialized_start = 54
-    _HEROOBSERVATIONPOINT._serialized_end = 114
-    _HEROHOSTNAME._serialized_start = 116
-    _HEROHOSTNAME._serialized_end = 203
-    _HEROURL._serialized_start = 205
-    _HEROURL._serialized_end = 242
-    _HEROIPV4._serialized_start = 244
-    _HEROIPV4._serialized_end = 288
-    _HEROIPV6._serialized_start = 290
-    _HEROIPV6._serialized_end = 334
-    _HEROAPP._serialized_start = 336
-    _HEROAPP._serialized_end = 374
-    _HEROIPV4FLOWTUPLE._serialized_start = 377
-    _HEROIPV4FLOWTUPLE._serialized_end = 524
-    _HEROIPV6FLOWTUPLE._serialized_start = 527
-    _HEROIPV6FLOWTUPLE._serialized_end = 674
-    _HEROREDIRECT._serialized_start = 676
-    _HEROREDIRECT._serialized_end = 733
-    _HEROSTATS._serialized_start = 736
-    _HEROSTATS._serialized_end = 1377
-    _HEROOBSERVATIONWINDOW._serialized_start = 1379
-    _HEROOBSERVATIONWINDOW._serialized_end = 1494
-    _HEROREPORT._serialized_start = 1497
-    _HEROREPORT._serialized_end = 1676
+_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'gatekeeper_hero_stats_pb2', globals())
+if _descriptor._USE_C_DESCRIPTORS == False:
+
+  DESCRIPTOR._options = None
+  _HEROACTIONS._serialized_start=1679
+  _HEROACTIONS._serialized_end=1850
+  _HERODIRECTIONS._serialized_start=1852
+  _HERODIRECTIONS._serialized_end=1961
+  _HEROOBSERVATIONPOINT._serialized_start=54
+  _HEROOBSERVATIONPOINT._serialized_end=114
+  _HEROHOSTNAME._serialized_start=116
+  _HEROHOSTNAME._serialized_end=203
+  _HEROURL._serialized_start=205
+  _HEROURL._serialized_end=242
+  _HEROIPV4._serialized_start=244
+  _HEROIPV4._serialized_end=288
+  _HEROIPV6._serialized_start=290
+  _HEROIPV6._serialized_end=334
+  _HEROAPP._serialized_start=336
+  _HEROAPP._serialized_end=374
+  _HEROIPV4FLOWTUPLE._serialized_start=377
+  _HEROIPV4FLOWTUPLE._serialized_end=524
+  _HEROIPV6FLOWTUPLE._serialized_start=527
+  _HEROIPV6FLOWTUPLE._serialized_end=674
+  _HEROREDIRECT._serialized_start=676
+  _HEROREDIRECT._serialized_end=733
+  _HEROSTATS._serialized_start=736
+  _HEROSTATS._serialized_end=1377
+  _HEROOBSERVATIONWINDOW._serialized_start=1379
+  _HEROOBSERVATIONWINDOW._serialized_end=1494
+  _HEROREPORT._serialized_start=1497
+  _HEROREPORT._serialized_end=1676
 # @@protoc_insertion_point(module_scope)

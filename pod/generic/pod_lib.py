@@ -21,12 +21,13 @@ from lib_testbed.generic.util.base_lib import Iface
 from lib_testbed.generic.util.msg.msg import Msg
 from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from lib_testbed.generic.util.logger import log
-from lib_testbed.generic.util.common import BASE_DIR
+from lib_testbed.generic.util.common import BASE_DIR, CACHE_DIR
 from lib_testbed.generic.util.common import wait_for
 from lib_testbed.generic.pod.pod_base import PodBase
 from lib_testbed.generic.pod.generic.capabilities import Capabilities
 from lib_testbed.generic.pod.generic.artifactory_reader import ArtifactoryReader
 from lib_testbed.generic.util.object_resolver import ObjectResolver
+from lib_testbed.generic.util.common import compare_fw_versions
 
 # Regex pattern to parse conntrack entries:
 # src=192.168.40.237 dst=192.168.201.1 sport=55818 dport=5706 packets=16821 bytes=874737
@@ -123,12 +124,27 @@ class PodLib(PodBase):
         return result
 
     def version(self, **kwargs):
-        """Display firmware version of node(s)"""
-        return self.strip_stdout_result(self.ovsdb.get_raw(table="AWLAN_Node", select="firmware_version", **kwargs))
+        """Display firmware version of node(s).
+
+        Returns "native-<version>" for native platforms, which happens when ovs version cannot be determined.
+        """
+        fw_version = self.ovsdb.get_raw(table="AWLAN_Node", select="firmware_version", **kwargs)
+        # FW above 6.0.0 are always native
+        if not self.device.config["model_org"][0:2].startswith("PP") or compare_fw_versions(
+            self.strip_stdout_result(fw_version)[1], "6.0.0", ">"
+        ):
+            return self.strip_stdout_result(fw_version)
+        if fw_version[1] and "N/A" in self.ovs_version()[1]:
+            fw_version[1] = "native-" + fw_version[1]
+        return self.strip_stdout_result(fw_version)
 
     def platform_version(self, **kwargs):
         """Display platform version of node(s)"""
         return self.strip_stdout_result(self.ovsdb.get_raw(table="AWLAN_Node", select="platform_version", **kwargs))
+
+    def ovs_version(self, **kwargs) -> str:
+        """Display ovs version of node(s)."""
+        return self.strip_stdout_result(self.ovsdb.get_raw(table="AWLAN_Node", select="ovs_version", **kwargs))
 
     def opensync_version(self, **kwargs):
         """Display opensync version of node(s)"""
@@ -312,9 +328,9 @@ class PodLib(PodBase):
             # Assume that only residential gateways doesn't support ovs
             return [0, "GW", ""]
         # stations exists only on leafs
-        result = self.ovsdb.get_str(table="Wifi_VIF_State", select="if_name", where=["mode==sta"])
+        result = self.ovsdb.get_bool(table="Wifi_VIF_State", select="enabled", where=["mode==sta"])
 
-        return [0, "Leaf" if len(result) != 0 else "GW", ""]
+        return [0, "Leaf" if result else "GW", ""]
 
     def get_ips(self, iface, **kwargs):
         """get ipv4 and ipv6 address for desired interface"""
@@ -591,7 +607,7 @@ class PodLib(PodBase):
         crash_saved = False
         crash_response = ""
         crash_no_crash = f"Crash not found for {name}"
-        lpdir = os.path.join("/tmp", "automation", f"crash_{serial}_{str(int(time.time()))}")
+        lpdir = os.path.join(CACHE_DIR, f"crash_{serial}_{str(int(time.time()))}")
 
         # core.gz are stored in /tmp
         kwargs.pop("skip_exception", True)
@@ -616,7 +632,7 @@ class PodLib(PodBase):
             response = self.get_file(tar_name, lpdir)
             if response[0] == 0:
                 crash_response += f"{serial} crash saved on {name} to: {lpdir}"
-                log.error(f"{serial} crash saved on {name} to: {lpdir}")
+                log.info(f"{serial} crash saved on {name} to: {lpdir}")
             else:
                 log.error(f"Cannot download crash file: {response[2]}")
             self.run_command(f"rm {remote_path}*")
@@ -862,7 +878,7 @@ class PodLib(PodBase):
 
         return [0, "Disconnected pod from Ethernet ports", ""]
 
-    def get_radio_temperatures(self, radio: Union[int, str, list] = None, retries=3, **kwargs):
+    def get_radio_temperatures(self, radio: Union[int, str, list] = None, retries=2, **kwargs):
         """
         Args:
             radio: accepted arguments: radio_id(e.g.: 0, 1, ...), band frequency(e.g.: '2.4G', '5G'),
@@ -885,7 +901,7 @@ class PodLib(PodBase):
             return self.get_radio_temperatures(radio_band_mapping[radio], retries=retries, **kwargs)
         elif isinstance(radio, int):
             temp = -1
-            for i in range(retries):
+            for i in range(1 + retries):
                 output = self.strip_stdout_result(self.get_radio_temperature(radio_index=radio, **kwargs))
                 if not output[0]:
                     temp = int(output[1])
@@ -959,7 +975,7 @@ class PodLib(PodBase):
         raise NotImplementedError
 
     def check_traffic_acceleration(
-        self, ip_address, expected_protocol=6, multicast=False, flow_count=1, flex=False, **kwargs
+        self, ip_address, expected_protocol=6, multicast=False, flow_count=1, flex=False, map_t=False, **kwargs
     ):
         """
         Check traffic acceleration
@@ -969,6 +985,49 @@ class PodLib(PodBase):
             multicast: (bool) True to check for acceleration of multicast traffic
             flow_count: (int) minimum number of expected accelerated flows (connections)
             flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
+            **kwargs:
+
+        Returns: bool()
+
+        """
+        raise NotImplementedError
+
+    def run_traffic_acceleration_monitor(self, samples: int = 5, interval: int = 5, delay: int = 20, **kwargs):
+        """
+        Start making traffic acceleration statistics dumps on the pod in the background
+        Args:
+            samples: (int) number of statistic dumps
+            interval: (int) seconds apart
+            delay: (int) seconds after the method is called.
+            **kwargs:
+
+        Returns: Return (dict) e.g. dict(sfe_dump=dict(dump_file="", pid="")) Acceleration statistics dumps details.
+
+        """
+        raise NotImplementedError
+
+    def check_traffic_acceleration_dump(
+        self,
+        acceleration_dump: dict,
+        ip_address: list,
+        expected_protocol=6,
+        multicast=False,
+        flow_count=1,
+        flex=False,
+        map_t=False,
+        **kwargs,
+    ):
+        """
+        Check traffic was accelerated
+        Args:
+            acceleration_dump: (dict) Acceleration dump details from run_traffic_acceleration_monitor()
+            ip_address: (list) IP addresses to check
+            expected_protocol: (int) expected protocol id. 6 for TCP, 17 for UDP
+            multicast: (bool) True to check for acceleration of multicast traffic
+            flow_count: (int) minimum number of expected accelerated flows (connections)
+            flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
             **kwargs:
 
         Returns: bool()
@@ -1273,21 +1332,28 @@ class PodLib(PodBase):
                         continue
         return out
 
+    def get_process_mem_usage(self, process_name: str, **kwargs):
+        """Get process VSZ mem in kilobytes and %VSZ usage"""
+        response = self.run_command(f"top -n1 | grep -w {process_name} -i" + "| awk '{print $5, $6}'", **kwargs)
+        if not response[1]:
+            response = [1, "", f"Not found any {process_name} process in process list"]
+        return self.strip_stdout_result(response)
+
     def start_wps_session(self, key_id, **kwargs):
         result = self.ovsdb.set_value(
-            value={"wps_pbc_key_id": f'"{key_id}"'}, table="Wifi_VIF_Config", where=f"ssid_broadcast==enabled", **kwargs
+            value={"wps_pbc_key_id": f'"{key_id}"'}, table="Wifi_VIF_Config", where="ssid_broadcast==enabled", **kwargs
         )
         if result[0]:
             return False
 
         wait_for(
-            lambda: self.ovsdb.get_str("Wifi_VIF_State", "wps_pbc_key_id", where=f"ssid_broadcast==enabled", **kwargs)
+            lambda: self.ovsdb.get_str("Wifi_VIF_State", "wps_pbc_key_id", where="ssid_broadcast==enabled", **kwargs)
             == key_id,
             timeout=30,
             tick=3,
         )
         result = self.ovsdb.set_value(
-            value={"wps": True, "wps_pbc": True}, table="Wifi_VIF_Config", where=f"ssid_broadcast==enabled", **kwargs
+            value={"wps": True, "wps_pbc": True}, table="Wifi_VIF_Config", where="ssid_broadcast==enabled", **kwargs
         )
         return result[0] == 0
 
@@ -1952,6 +2018,74 @@ class PodLib(PodBase):
 
         """
         raise NotImplementedError
+
+    def get_rssi(self, ifname: str, mac: str, **kwargs) -> [int, str, str]:
+        """
+        Get RSSI.
+        Args:
+            ifname: (str) Name of interface
+            mac: (str) mac address
+            **kwargs:
+
+        Returns: str
+
+        """
+        rssi_index = self.run_command(f"wlanconfig {ifname} list sta", **kwargs)[1].split().index("RSSI")
+        response = self.run_command(f"wlanconfig {ifname} list sta | grep -i {mac}", **kwargs)[1].split()[rssi_index]
+
+        if not response:
+            return [1, "", f"Can not get RSSI value for interface: {ifname} and mac: {mac}"]
+        return [0, str(response), ""]
+
+    def wait_for_close_process(self, pid: str, timeout: int = 300, tick: float = 30) -> bool:
+        """
+        Wait for close a process
+        Args:
+            pid: (str) process id
+            timeout: (int)
+            tick: (float)
+
+        Returns:
+
+        """
+        condition, ret = wait_for(lambda: self.run_command(f"ls /proc/ | grep {pid}")[0], timeout=timeout, tick=tick)
+        return condition
+
+    def clear_traffic_acceleration_dump(self, acceleration_dump: dict, **kwargs):
+        """
+        Clear traffic acceleration dump.
+        Args:
+            acceleration_dump: (dict) The acceleration dump details from run_traffic_acceleration_monitor() method
+
+        Returns:
+
+        """
+        for acc_name, acc_monitor_details in acceleration_dump.items():
+            pid, dump_file = acc_monitor_details["pid"], acc_monitor_details["dump_file"]
+            process_cmd_line = self.get_stdout(
+                self.strip_stdout_result(self.run_command(f"cat /proc/{pid}/cmdline", **kwargs)), skip_exception=True
+            )
+            # Make sure it's the acceleration monitor process
+            if dump_file in process_cmd_line:
+                self.run_command(f"kill {pid}", **kwargs)
+            self.run_command(f"rm {dump_file}", **kwargs)
+
+    def _run_traffic_acceleration_monitor(
+        self, acc_name: str, acc_tool: str, samples: int = 5, interval: int = 5, delay: int = 20, **kwargs
+    ) -> dict:
+        """Helper method for starting traffic acceleration monitor in the background."""
+        monitor_cmd_template = (
+            "i=1; while  [ $i -le {samples} ]; "
+            "do if [[ $i -eq 1 ]]; then sleep {delay}; fi; "
+            "i=$(( $i + 1 )); {acc_tool} >> {acc_dump}; sleep {interval}; "
+            "done & echo $!"
+        )
+        acc_dump_file = f"/tmp/{acc_name}_dump_{str(uuid4())[:5]}"
+        ecm_monitor_cmd = monitor_cmd_template.format(
+            samples=samples, delay=delay, acc_tool=acc_tool, acc_dump=acc_dump_file, interval=interval
+        )
+        acc_monitor_pid = self.get_stdout(self.strip_stdout_result(self.run_command(ecm_monitor_cmd, **kwargs)))
+        return {acc_name: {"dump_file": acc_dump_file, "pid": acc_monitor_pid}}
 
 
 class PodIface(Iface):

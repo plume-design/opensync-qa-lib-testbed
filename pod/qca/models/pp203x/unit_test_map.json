@@ -47,15 +47,45 @@
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
-  "5.3.1": {
-    "proj-name": "build_caesar_v5.3.1",
+  "5.4.0": {
+    "proj-name": "build_caesar_sdk11_v5.4.0",
+    "fn-prefix": "debugs-osync-qcaPIRANHA2_QSDK11",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.6.0": {
+    "proj-name": "build_caesar_sdk11_v5.6.0",
+    "fn-prefix": "debugs-osync-qcaPIRANHA2_QSDK11",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.8.0": {
+    "proj-name": "build_caesar_sdk11_v5.8.0",
+    "fn-prefix": "debugs-osync-qcaPIRANHA2_QSDK11",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "legacy-master": {
+    "proj-name": "build_caesar_master",
     "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
   "master": {
-    "proj-name": "build_caesar_master",
-    "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
+    "proj-name": "build_caesar_SDK11_master",
+    "fn-prefix": "debugs-osync-qcaPIRANHA2_QSDK11",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "legacy-native-master": {
+    "proj-name": "build_caesar_native_master",
+    "fn-prefix": "debugs-PIRANHA2_QSDK53_NATIVE-squashfs-ap",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "native-master": {
+    "proj-name": "build_caesar_sdk11_native_master",
+    "fn-prefix": "debugs-osync-qcaPIRANHA2_QSDK11",
     "encryption": false,
     "img-suffix": "tar.bz2"
   }

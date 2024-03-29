@@ -50,7 +50,7 @@ class AllureLogger(logging.Handler):
             try:
                 formatter = logging.getLogger().handlers[0].formatter
                 self.setFormatter(formatter)
-            except Exception as e:
+            except Exception:
                 # We can't log any errors here, it could lead to infinite recursion
                 pass
         return super().format(record)
@@ -143,7 +143,7 @@ class MyLogger:
 
     def get_extended_keyword(self, key, **kwargs):
         value = kwargs.get(key)
-        if value != None:
+        if value is not None:
             # Remove from kwargs
             kwargs.pop(key)
         else:
@@ -202,7 +202,7 @@ class MyLogger:
                 object_context = stack_frames[2].frame.f_locals.get("self", None)
                 if object_context and hasattr(object_context, "name"):
                     device_name = object_context.name
-        except Exception as error:
+        except Exception:
             ...
         return device_name
 
@@ -238,10 +238,9 @@ class LogCatcher:
     def stop_step(self, uuid, exc_type, exc_val, exc_tb):
         """Allure hook, called on step's exit.
 
-        The best way to implement custom step collection in LogCatcher derived class is to override ``step_collect``
-        method and call ``super().step_collect(test_data)`` inside of it.
+        The best way to implement custom step collection in LogCatcher derived class is to override ``step_collect``.
         """
-        test_data = {"failed": False if exc_type is None else True}
+        test_data = {"failed": False if exc_type is None else True, "is_step": True}
         self.step_collect(test_data=test_data)
 
     def add(self, **_kwargs):
@@ -363,6 +362,7 @@ class LogCatcher:
             test_data: contains information whether the step was successfull or not. It mimics the structure of the \
                 ``test_data`` attribute of :py:meth:`LogCatcher.attach_to_allure`
         """
+        self.collect(test_data)
         self.attach_to_allure(loggers_list=[self.loggers])
 
     def get_all(self, test_data):
@@ -383,7 +383,14 @@ class LogCatcher:
         results_dict = {}
         objs = []
         collecting_logs = False
-        test_data = {"name": configuration_name, "failed": failed, "skip_collect": False, "has_steps": has_steps}
+        test_data = {
+            "name": configuration_name,
+            "failed": failed,
+            "skip_collect": False,
+            "has_steps": has_steps,
+            "is_step": False,
+            "scope": scope,
+        }
         for _obj in opensync_obj:
             obj_list = _obj.obj_list if hasattr(_obj, "obj_list") else [_obj]
             for obj in obj_list:
@@ -436,7 +443,7 @@ class LogCatcher:
 
         resp_loggers = Results.get_sorted_results(results_dict, objs, skip_exception=True)
         for my_loggers in resp_loggers:
-            if type(my_loggers) != list:
+            if not isinstance(my_loggers, list):
                 error = repr(my_loggers).replace("\\n", "\n")
                 log.error(f"[log_catcher] error occurred:\n{error}")
         obj_loggers = [obj.log_catcher.loggers for obj in objs if obj.log_catcher]
@@ -509,18 +516,37 @@ class XdistStreamHandler(logging.StreamHandler):
     def __init__(self):
         super(XdistStreamHandler, self).__init__()
 
+    @staticmethod
+    def split_record_messages(record) -> list:
+        messages = [record.msg]
+        if not record.args:  # Don't split records for print("Value: %s\n%s", value1, value2)
+            try:
+                messages = str(record.msg).split("\n")
+            except Exception:
+                log.exception(f"[XdistStreamHandler] Failed to convert into string: {record.msg}")
+
+        return messages
+
     def emit(self, record):
-        try:
-            messages = str(record.msg).split("\n")
-        except Exception as e:
-            log.exception(f"[XdistStreamHandler] Failed to convert into string: {record.msg}")
-            messages = [record.msg]
+        # Split log entries to add worker prefix to each of message.
+        messages = self.split_record_messages(record)
         for message in messages:
-            record.msg = message
-            super(XdistStreamHandler, self).emit(record)
+            # create a new reference of record object
+            new_record = log.makeRecord(
+                name=record.name,
+                level=record.levelno,
+                fn=record.pathname,
+                lno=record.lineno,
+                msg=message,
+                args=record.args if isinstance(record.args, tuple) else (record.args,),
+                exc_info=record.exc_info,
+                func=record.funcName,
+                sinfo=record.stack_info,
+            )
+            super(XdistStreamHandler, self).emit(new_record)
 
 
-def setup_xdist_logger(config):
+def setup_xdist_logger(config, log_level):
     from lib_testbed.generic.util.pytest_config_utils import get_option_config_name, get_option_config_names
 
     # Add worker prefix only in case xdist is used
@@ -566,7 +592,7 @@ def setup_xdist_logger(config):
         )
         # Configure logging
         logger.addHandler(console_handler)
-        logger.setLevel(logging.INFO)
+        logger.setLevel(log_level)
 
         if config_name:
-            log.info(f"Worker: `{worker_id}` is assigned to config: `{full_config_name}`")
+            log.info("Worker: `%s` is assigned to config: `%s`", worker_id, full_config_name)

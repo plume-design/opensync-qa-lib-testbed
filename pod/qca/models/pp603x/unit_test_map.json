@@ -5,26 +5,44 @@
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
-  "4.2.1": {
-    "proj-name": "build_attila_v4.2.1",
-    "fn-prefix": "debugs-osync-qcaATTILA_QSDK11",
-    "encryption": false,
-    "img-suffix": "tar.bz2"
-  },
-  "4.4.0": {
-    "proj-name": "build_attila_v4.4.0",
-    "fn-prefix": "debugs-osync-qcaATTILA_QSDK11",
-    "encryption": false,
-    "img-suffix": "tar.bz2"
-  },
   "5.2.0": {
     "proj-name": "build_attila_v5.2.0",
     "fn-prefix": "debugs-osync-qcaATTILA_QSDK11",
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
+  "5.4.0": {
+    "proj-name": "build_attila_v5.4.0",
+    "fn-prefix": "debugs-osync-qcaATTILA_QSDK11",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.6.0": {
+    "proj-name": "build_attila_v5.6.0",
+    "fn-prefix": "debugs-osync-qcaATTILA_QSDK11",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.8.0": {
+    "proj-name": "build_attila_v5.8.0",
+    "fn-prefix": "debugs-osync-qcaATTILA_QSDK11",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "native-5.8.0": {
+    "proj-name": "build_attila_native_v5.8.0",
+    "fn-prefix": "debugs-osync-qcaATTILA_QSDK11",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
   "master": {
     "proj-name": "build_attila_master",
+    "fn-prefix": "debugs-osync-qcaATTILA_QSDK11",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "native-master": {
+    "proj-name": "build_attila_native_master",
     "fn-prefix": "debugs-osync-qcaATTILA_QSDK11",
     "encryption": false,
     "img-suffix": "tar.bz2"

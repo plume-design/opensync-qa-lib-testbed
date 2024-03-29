@@ -367,7 +367,6 @@ class ClientTool:
 
         You can also pick FW version based on the latest or stable release."""
         results = self.lib.upgrade(fw_path, restore_cfg, force, version=version, **kwargs)
-        self.lib.run_command("rm -R /tmp/automation")
         return results
 
     def set_tb_nat(self, mode, **kwargs):

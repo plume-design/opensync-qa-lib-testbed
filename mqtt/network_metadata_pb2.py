@@ -6,46 +6,46 @@ from google.protobuf.internal import builder as _builder
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import descriptor_pool as _descriptor_pool
 from google.protobuf import symbol_database as _symbol_database
-
 # @@protoc_insertion_point(imports)
 
 _sym_db = _symbol_database.Default()
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n\x16network_metadata.proto\x12\x07traffic"6\n\x10ObservationPoint\x12\x0e\n\x06nodeId\x18\x01 \x01(\t\x12\x12\n\nlocationId\x18\x02 \x01(\t"S\n\x11VendorData_KVPair\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x0f\n\x07val_str\x18\x02 \x01(\t\x12\x0f\n\x07val_u32\x18\x03 \x01(\r\x12\x0f\n\x07val_u64\x18\x04 \x01(\x04"N\n\nVendorData\x12\x0e\n\x06vendor\x18\x01 \x01(\t\x12\x30\n\x0cvendorKVPair\x18\x02 \x03(\x0b\x32\x1a.traffic.VendorData_KVPair"-\n\rDataReportTag\x12\x10\n\x08\x66\x65\x61tures\x18\x01 \x03(\t\x12\n\n\x02id\x18\x02 \x01(\t"<\n\x08\x46lowTags\x12\x0e\n\x06vendor\x18\x01 \x01(\t\x12\x0f\n\x07\x61ppName\x18\x02 \x01(\t\x12\x0f\n\x07\x61ppTags\x18\n \x03(\t"`\n\tFlowState\x12\x17\n\x0f\x66irstObservedAt\x18\x01 \x01(\x04\x12\x16\n\x0elastObservedAt\x18\x02 \x01(\x04\x12\x11\n\tflowStart\x18\x03 \x01(\x08\x12\x0f\n\x07\x66lowEnd\x18\x04 \x01(\x08"9\n\nFlowUplink\x12\x14\n\x0cuplinkIfType\x18\x01 \x01(\t\x12\x15\n\ruplinkChanged\x18\x02 \x01(\x08"\x87\x04\n\x07\x46lowKey\x12\x0e\n\x06srcMac\x18\x01 \x01(\t\x12\x0e\n\x06\x64stMac\x18\x02 \x01(\t\x12\x0e\n\x06vlanId\x18\x03 \x01(\r\x12\x11\n\tetherType\x18\x04 \x01(\r\x12\r\n\x05srcIp\x18\x05 \x01(\t\x12\r\n\x05\x64stIp\x18\x06 \x01(\t\x12\x12\n\nipProtocol\x18\x07 \x01(\r\x12\x12\n\ntptSrcPort\x18\x08 \x01(\r\x12\x12\n\ntptDstPort\x18\t \x01(\r\x12#\n\x08\x66lowTags\x18\n \x03(\x0b\x32\x11.traffic.FlowTags\x12\'\n\nvendorData\x18\x0b \x03(\x0b\x32\x13.traffic.VendorData\x12%\n\tflowState\x18\x0c \x01(\x0b\x32\x12.traffic.FlowState\x12\x16\n\x0eparentOfSrcMac\x18\r \x01(\x08\x12\x16\n\x0eparentOfDstMac\x18\x0e \x01(\x08\x12%\n\tdirection\x18\x0f \x01(\x0e\x32\x12.traffic.Direction\x12\'\n\noriginator\x18\x10 \x01(\x0e\x32\x13.traffic.Originator\x12\x13\n\x0bnetworkZone\x18\x11 \x01(\t\x12\x12\n\nflowMarker\x18\x12 \x01(\r\x12\x12\n\nuplinkName\x18\x13 \x01(\t\x12-\n\rdataReportTag\x18\x14 \x03(\x0b\x32\x16.traffic.DataReportTag"8\n\x0c\x46lowCounters\x12\x14\n\x0cpacketsCount\x18\x01 \x01(\x04\x12\x12\n\nbytesCount\x18\x02 \x01(\x04"X\n\tFlowStats\x12!\n\x07\x66lowKey\x18\x01 \x01(\x0b\x32\x10.traffic.FlowKey\x12(\n\tflowCount\x18\x02 \x01(\x0b\x32\x15.traffic.FlowCounters"\x9d\x01\n\x11ObservationWindow\x12\x11\n\tstartedAt\x18\x01 \x01(\x04\x12\x0f\n\x07\x65ndedAt\x18\x02 \x01(\x04\x12%\n\tflowStats\x18\x03 \x03(\x0b\x32\x12.traffic.FlowStats\x12\x14\n\x0c\x64roppedFlows\x18\x04 \x01(\r\x12\'\n\nflowUplink\x18\x05 \x01(\x0b\x32\x13.traffic.FlowUplink"\x8c\x01\n\nFlowReport\x12\x12\n\nreportedAt\x18\x01 \x01(\x04\x12\x33\n\x10observationPoint\x18\x02 \x01(\x0b\x32\x19.traffic.ObservationPoint\x12\x35\n\x11observationWindow\x18\x03 \x03(\x0b\x32\x1a.traffic.ObservationWindow*\x80\x01\n\tDirection\x12\x1e\n\x1a\x46LOW_DIRECTION_UNSPECIFIED\x10\x00\x12\x1b\n\x17\x46LOW_DIRECTION_OUTBOUND\x10\x01\x12\x1a\n\x16\x46LOW_DIRECTION_INBOUND\x10\x02\x12\x1a\n\x16\x46LOW_DIRECTION_LAN2LAN\x10\x03*_\n\nOriginator\x12\x1f\n\x1b\x46LOW_ORIGINATOR_UNSPECIFIED\x10\x00\x12\x17\n\x13\x46LOW_ORIGINATOR_SRC\x10\x01\x12\x17\n\x13\x46LOW_ORIGINATOR_DST\x10\x02'
-)
+
+
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16network_metadata.proto\x12\x07traffic\"6\n\x10ObservationPoint\x12\x0e\n\x06nodeId\x18\x01 \x01(\t\x12\x12\n\nlocationId\x18\x02 \x01(\t\"S\n\x11VendorData_KVPair\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x0f\n\x07val_str\x18\x02 \x01(\t\x12\x0f\n\x07val_u32\x18\x03 \x01(\r\x12\x0f\n\x07val_u64\x18\x04 \x01(\x04\"N\n\nVendorData\x12\x0e\n\x06vendor\x18\x01 \x01(\t\x12\x30\n\x0cvendorKVPair\x18\x02 \x03(\x0b\x32\x1a.traffic.VendorData_KVPair\"-\n\rDataReportTag\x12\x10\n\x08\x66\x65\x61tures\x18\x01 \x03(\t\x12\n\n\x02id\x18\x02 \x01(\t\"<\n\x08\x46lowTags\x12\x0e\n\x06vendor\x18\x01 \x01(\t\x12\x0f\n\x07\x61ppName\x18\x02 \x01(\t\x12\x0f\n\x07\x61ppTags\x18\n \x03(\t\"`\n\tFlowState\x12\x17\n\x0f\x66irstObservedAt\x18\x01 \x01(\x04\x12\x16\n\x0elastObservedAt\x18\x02 \x01(\x04\x12\x11\n\tflowStart\x18\x03 \x01(\x08\x12\x0f\n\x07\x66lowEnd\x18\x04 \x01(\x08\"9\n\nFlowUplink\x12\x14\n\x0cuplinkIfType\x18\x01 \x01(\t\x12\x15\n\ruplinkChanged\x18\x02 \x01(\x08\"\x87\x04\n\x07\x46lowKey\x12\x0e\n\x06srcMac\x18\x01 \x01(\t\x12\x0e\n\x06\x64stMac\x18\x02 \x01(\t\x12\x0e\n\x06vlanId\x18\x03 \x01(\r\x12\x11\n\tetherType\x18\x04 \x01(\r\x12\r\n\x05srcIp\x18\x05 \x01(\t\x12\r\n\x05\x64stIp\x18\x06 \x01(\t\x12\x12\n\nipProtocol\x18\x07 \x01(\r\x12\x12\n\ntptSrcPort\x18\x08 \x01(\r\x12\x12\n\ntptDstPort\x18\t \x01(\r\x12#\n\x08\x66lowTags\x18\n \x03(\x0b\x32\x11.traffic.FlowTags\x12\'\n\nvendorData\x18\x0b \x03(\x0b\x32\x13.traffic.VendorData\x12%\n\tflowState\x18\x0c \x01(\x0b\x32\x12.traffic.FlowState\x12\x16\n\x0eparentOfSrcMac\x18\r \x01(\x08\x12\x16\n\x0eparentOfDstMac\x18\x0e \x01(\x08\x12%\n\tdirection\x18\x0f \x01(\x0e\x32\x12.traffic.Direction\x12\'\n\noriginator\x18\x10 \x01(\x0e\x32\x13.traffic.Originator\x12\x13\n\x0bnetworkZone\x18\x11 \x01(\t\x12\x12\n\nflowMarker\x18\x12 \x01(\r\x12\x12\n\nuplinkName\x18\x13 \x01(\t\x12-\n\rdataReportTag\x18\x14 \x03(\x0b\x32\x16.traffic.DataReportTag\"8\n\x0c\x46lowCounters\x12\x14\n\x0cpacketsCount\x18\x01 \x01(\x04\x12\x12\n\nbytesCount\x18\x02 \x01(\x04\"X\n\tFlowStats\x12!\n\x07\x66lowKey\x18\x01 \x01(\x0b\x32\x10.traffic.FlowKey\x12(\n\tflowCount\x18\x02 \x01(\x0b\x32\x15.traffic.FlowCounters\"\x9d\x01\n\x11ObservationWindow\x12\x11\n\tstartedAt\x18\x01 \x01(\x04\x12\x0f\n\x07\x65ndedAt\x18\x02 \x01(\x04\x12%\n\tflowStats\x18\x03 \x03(\x0b\x32\x12.traffic.FlowStats\x12\x14\n\x0c\x64roppedFlows\x18\x04 \x01(\r\x12\'\n\nflowUplink\x18\x05 \x01(\x0b\x32\x13.traffic.FlowUplink\"\x8c\x01\n\nFlowReport\x12\x12\n\nreportedAt\x18\x01 \x01(\x04\x12\x33\n\x10observationPoint\x18\x02 \x01(\x0b\x32\x19.traffic.ObservationPoint\x12\x35\n\x11observationWindow\x18\x03 \x03(\x0b\x32\x1a.traffic.ObservationWindow*\x80\x01\n\tDirection\x12\x1e\n\x1a\x46LOW_DIRECTION_UNSPECIFIED\x10\x00\x12\x1b\n\x17\x46LOW_DIRECTION_OUTBOUND\x10\x01\x12\x1a\n\x16\x46LOW_DIRECTION_INBOUND\x10\x02\x12\x1a\n\x16\x46LOW_DIRECTION_LAN2LAN\x10\x03*_\n\nOriginator\x12\x1f\n\x1b\x46LOW_ORIGINATOR_UNSPECIFIED\x10\x00\x12\x17\n\x13\x46LOW_ORIGINATOR_SRC\x10\x01\x12\x17\n\x13\x46LOW_ORIGINATOR_DST\x10\x02')
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
-_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, "network_metadata_pb2", globals())
-if _descriptor._USE_C_DESCRIPTORS is False:
-    DESCRIPTOR._options = None
-    _DIRECTION._serialized_start = 1496
-    _DIRECTION._serialized_end = 1624
-    _ORIGINATOR._serialized_start = 1626
-    _ORIGINATOR._serialized_end = 1721
-    _OBSERVATIONPOINT._serialized_start = 35
-    _OBSERVATIONPOINT._serialized_end = 89
-    _VENDORDATA_KVPAIR._serialized_start = 91
-    _VENDORDATA_KVPAIR._serialized_end = 174
-    _VENDORDATA._serialized_start = 176
-    _VENDORDATA._serialized_end = 254
-    _DATAREPORTTAG._serialized_start = 256
-    _DATAREPORTTAG._serialized_end = 301
-    _FLOWTAGS._serialized_start = 303
-    _FLOWTAGS._serialized_end = 363
-    _FLOWSTATE._serialized_start = 365
-    _FLOWSTATE._serialized_end = 461
-    _FLOWUPLINK._serialized_start = 463
-    _FLOWUPLINK._serialized_end = 520
-    _FLOWKEY._serialized_start = 523
-    _FLOWKEY._serialized_end = 1042
-    _FLOWCOUNTERS._serialized_start = 1044
-    _FLOWCOUNTERS._serialized_end = 1100
-    _FLOWSTATS._serialized_start = 1102
-    _FLOWSTATS._serialized_end = 1190
-    _OBSERVATIONWINDOW._serialized_start = 1193
-    _OBSERVATIONWINDOW._serialized_end = 1350
-    _FLOWREPORT._serialized_start = 1353
-    _FLOWREPORT._serialized_end = 1493
+_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'network_metadata_pb2', globals())
+if _descriptor._USE_C_DESCRIPTORS == False:
+
+  DESCRIPTOR._options = None
+  _DIRECTION._serialized_start=1496
+  _DIRECTION._serialized_end=1624
+  _ORIGINATOR._serialized_start=1626
+  _ORIGINATOR._serialized_end=1721
+  _OBSERVATIONPOINT._serialized_start=35
+  _OBSERVATIONPOINT._serialized_end=89
+  _VENDORDATA_KVPAIR._serialized_start=91
+  _VENDORDATA_KVPAIR._serialized_end=174
+  _VENDORDATA._serialized_start=176
+  _VENDORDATA._serialized_end=254
+  _DATAREPORTTAG._serialized_start=256
+  _DATAREPORTTAG._serialized_end=301
+  _FLOWTAGS._serialized_start=303
+  _FLOWTAGS._serialized_end=363
+  _FLOWSTATE._serialized_start=365
+  _FLOWSTATE._serialized_end=461
+  _FLOWUPLINK._serialized_start=463
+  _FLOWUPLINK._serialized_end=520
+  _FLOWKEY._serialized_start=523
+  _FLOWKEY._serialized_end=1042
+  _FLOWCOUNTERS._serialized_start=1044
+  _FLOWCOUNTERS._serialized_end=1100
+  _FLOWSTATS._serialized_start=1102
+  _FLOWSTATS._serialized_end=1190
+  _OBSERVATIONWINDOW._serialized_start=1193
+  _OBSERVATIONWINDOW._serialized_end=1350
+  _FLOWREPORT._serialized_start=1353
+  _FLOWREPORT._serialized_end=1493
 # @@protoc_insertion_point(module_scope)

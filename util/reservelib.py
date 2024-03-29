@@ -1,4 +1,5 @@
 import os
+import getpass
 import sys
 import traceback
 import time
@@ -24,13 +25,21 @@ class ReserveLib:
     def __init__(self, **kwargs):
         self.tb_config = kwargs.get("config")
         self.json_output = kwargs.get("json")
-        self.new_reservation_msg = self.tb_config.get("message")
+        self.new_reservation_msg = self.tb_config.get("message", "")
         self.tb_name = config.get_location_name(self.tb_config)
         self.res_file = f"/.reserve_{self.tb_name}"
-        self.machine_uuid = self._get_machine_uuid()
         self.client_lib = self._get_client_lib()
-        self.openfd_cmd = "sudo touch " + self.res_file + "; exec {reservefd}<" + self.res_file + ";"
+        self.sudo = "sudo " if kwargs.get("sudo", True) else ""  # if False, the commands will run without sudo
+        self.openfd_cmd = f"{self.sudo}touch {self.res_file}; exec {{reservefd}}<{self.res_file};"
         self.closefd_cmd = "exec {reservefd}<&-"
+        if not (host_name := os.environ.get("CUSTOM_HOSTNAME")):
+            host_name = os.uname()[1]
+
+        if host_name.endswith("-docker"):
+            host_name = host_name[: -len("-docker")]  # strip '-docker' from the end of the hostname
+        self.host_name = host_name
+        self.machine_uuid = self._get_machine_uuid()
+        self.log_catcher = log_catcher  # reference to log_catcher, allows derived classes to log into their own loggers
 
     def _tb_purpose_decorator(func):
         """
@@ -144,10 +153,10 @@ class ReserveLib:
                 "since": "-",
                 "expiration": "-",
             }
-        if type(timeout) is not int:
+        if not isinstance(timeout, int):
             timeout = int(timeout)
         status = self.get_reservation_status(tool=False)
-        log_catcher.process_caller(inspect.stack()[1][3], status)
+        self.log_catcher.process_caller(inspect.stack()[1][3], status)
         if not self.tb_config.get("force"):
             # check if we can reserve test bed
             log.debug("Checking if testbed if not reserved")
@@ -173,13 +182,13 @@ class ReserveLib:
         if status["busyByMe"]:
             file_operation_cmds = (
                 f'flock -x "$reservefd"; '
-                f'sudo sed -i "$ d" {self.res_file}; '
-                f'echo "{res_row}" | sudo tee -a {self.res_file}; '
+                f'{self.sudo}sed -i "$ d" {self.res_file}; '
+                f'echo "{res_row}" | {self.sudo}tee -a {self.res_file}; '
                 f"sync; "
             )
         else:
             file_operation_cmds = (
-                f'flock -x "$reservefd"; ' f'echo "{res_row}" | sudo tee -a {self.res_file}; ' f"sync; "
+                f'flock -x "$reservefd"; ' f'echo "{res_row}" | {self.sudo}tee -a {self.res_file}; ' f"sync; "
             )
 
         cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
@@ -238,7 +247,7 @@ class ReserveLib:
             if out != "empty file":
                 return {
                     "name": self.tb_name,
-                    "busy": False,
+                    "busy": True,
                     "busyByMe": False,
                     "owner": "CANNOT GET RESERVATION",
                     "since": "-",
@@ -258,7 +267,7 @@ class ReserveLib:
         if out.startswith("Error:") or "__" not in out:
             return {
                 "name": self.tb_name,
-                "busy": False,
+                "busy": True,
                 "busyByMe": False,
                 "owner": "CANNOT GET RESERVATION",
                 "since": "-",
@@ -276,13 +285,13 @@ class ReserveLib:
             log.error(f"Invalid timestamp in reservation file -> {error}")
         if len(info) != 4 or busy is None:
             log.error("Reservation file is corrupted, removing last reservation")
-            file_operation_cmds = f'flock -x "$reservefd"; ' f'sudo sed -i "$ d" {self.res_file}; ' f"sync;"
+            file_operation_cmds = f'flock -x "$reservefd"; ' f'{self.sudo}sed -i "$ d" {self.res_file}; ' f"sync;"
             cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
 
             self._server_ssh_call(cmd)
             return {
                 "name": self.tb_name,
-                "busy": False,
+                "busy": True,
                 "busyByMe": False,
                 "owner": "CANNOT GET RESERVATION",
                 "since": "-",
@@ -327,8 +336,8 @@ class ReserveLib:
                 "expiration": "-",
             }
         status = self.get_reservation_status(tool=False)
-        log_catcher.process_caller(inspect.stack()[1][3], status)
-        # if cannot get reservation notify about that
+        self.log_catcher.process_caller(inspect.stack()[1][3], status)
+        # if script cannot get reservation notify about that
         if status["owner"] == "CANNOT GET RESERVATION":
             return {
                 "name": self.tb_name,
@@ -360,8 +369,8 @@ class ReserveLib:
 
         file_operation_cmds = (
             f'flock -x "$reservefd"; '
-            f'sudo sed -i "$ d" {self.res_file}; '
-            f'echo "{res_row}" | sudo tee -a {self.res_file}; '
+            f'{self.sudo}sed -i "$ d" {self.res_file}; '
+            f'echo "{res_row}" | {self.sudo}tee -a {self.res_file}; '
             f"sync;"
         )
         cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
@@ -391,17 +400,19 @@ class ReserveLib:
         if not self.check_reservation_possible():
             return {"name": self.tb_name, "status": False, "msg": "RESERVATION NOT POSSIBLE"}
         status = self.get_reservation_status(tool=False)
-        log_catcher.process_caller(inspect.stack()[1][3], status)
+        self.log_catcher.process_caller(inspect.stack()[1][3], status)
         # if reserved, keep the last line
         if status["busy"]:
             file_operation_cmds = (
-                f'flock -x "$reservefd"; ' f'echo "$(tail -1 {self.res_file})" | sudo tee {self.res_file}; ' f"sync;"
+                f'flock -x "$reservefd"; '
+                f'echo "$(tail -1 {self.res_file})" | {self.sudo}tee {self.res_file}; '
+                f"sync;"
             )
             cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
 
             out = self._server_ssh_call(cmd)
         else:
-            out = self._server_ssh_call(f"sudo rm {self.res_file}; sync")
+            out = self._server_ssh_call(f"{self.sudo}rm {self.res_file}; sync")
         if "Error" in out:
             return {"name": self.tb_name, "status": False, "msg": "CLEARING ERROR"}
         else:
@@ -513,12 +524,6 @@ class ReserveLib:
         if not self._system_qa_rsrv_exemption():
             assert reservation_time <= max_reserv_time, f"Max reservation time is {max_reserv_time} minutes"
 
-        if not (host_name := os.environ.get("CUSTOM_HOSTNAME")):
-            host_name = os.uname()[1]
-
-        if host_name.endswith("-docker"):
-            host_name = host_name[: -len("-docker")]  # strip '-docker' from the end of the hostname
-
         if keep_owner:
             file_operation_cmds = f'flock -x "$reservefd"; ' f"tail -1 {self.res_file};"
             cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
@@ -535,14 +540,18 @@ class ReserveLib:
             if not self.new_reservation_msg:
                 if build_number:
                     # we have both job_name and build_number -- we were most probably started by Jenkins
-                    self.new_reservation_msg = f"Jenkins job on {host_name}"
+                    self.new_reservation_msg = f"Jenkins job on {self.host_name}"
                 else:
                     # just job_name, possibly exported by a user -- use a more generic "<job_name> on <host>"
-                    self.new_reservation_msg = f"{job_name} on {host_name}"
+                    self.new_reservation_msg = f"{job_name} on {self.host_name}"
             mach_uuid = self.machine_uuid
         else:
             build_number = f"-{os.environ.get('BUILD_NUMBER')}" if os.environ.get("BUILD_NUMBER") else ""
-            owner = f"{host_name}{build_number}"
+            try:
+                user_name = getpass.getuser()
+                owner = f"{user_name}@{self.host_name}{build_number}"
+            except Exception:
+                owner = f"{self.host_name}{build_number}"
             mach_uuid = self.machine_uuid
 
         start_time = current_reservation.get("since")
@@ -562,15 +571,21 @@ class ReserveLib:
                 end_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=reservation_time)
 
         rsrv_msg = f" ({self.new_reservation_msg})" if self.new_reservation_msg else ""
+        owner = self.tb_config["owner"] if self.tb_config.get("owner") else owner
         return f"{owner}__{mach_uuid}__{start_time}__{end_time.isoformat()}{rsrv_msg}"
 
-    @staticmethod
-    def _get_machine_uuid():
+    def _get_machine_uuid(self):
         """
         Generate unique machine UUID
         Returns: (str) machine uuid
         """
-        return f"{str(uuid.UUID(int=uuid.getnode())).split('-')[-1]}{os.environ.get('BUILD_NUMBER', '')}"
+        if self.tb_config.get("owner"):
+            return self.tb_config["owner"]
+        else:
+            return (
+                f"{self.host_name}{str(uuid.UUID(int=uuid.getnode())).split('-')[-1]}"
+                f"{os.environ.get('BUILD_NUMBER', '')}"
+            )
 
     @staticmethod
     def _convert_utc_to_local(utc_time):
@@ -603,6 +618,7 @@ class PyReservePlugin:
         self.reserve_t = None
         self.res = None
         self.tb_config = tb_config
+        self.log_catcher = log_catcher  # reference to log_catcher, allows derived classes to log into their own loggers
 
     @pytest.fixture(scope="session", autouse=True)
     def reserve_fixture(self, request):
@@ -618,7 +634,7 @@ class PyReservePlugin:
         self._reserve()
         yield
         self._unreserve()
-        LogCatcher.attach_to_allure([[log_catcher.get_logger()]])
+        LogCatcher.attach_to_allure([[self.log_catcher.get_logger()]])
 
     def reserve_testbed(self):
         if not self.tb_config:
@@ -703,29 +719,19 @@ class PyReservePlugin:
             return
         timeout = time.time() + 10 * 60 * 60  # 10 hours should be enough
         i = 0
-        err_cnt = 0
         while time.time() < timeout:
             status = self.res.get_reservation_status(tool=False)
-            log_catcher.process_caller(inspect.stack()[1][3], status)
+            self.log_catcher.process_caller(inspect.stack()[1][3], status)
             if status["owner"] == "CANNOT GET RESERVATION":
-                err_cnt += 1
-                if err_cnt < 20:
-                    log.warning("Cannot check reservation, trying again in 10 sec...")
-                    time.sleep(10)
-                    continue
-                log.warning(
-                    f'End up with checking reservation for {status.get("name")}, '
-                    f"make sure ssh_gateway is set in the config"
-                )
-                return
+                log.warning("Cannot check reservation, trying again in 10 sec...")
+                time.sleep(30)
+                continue
             if status["busy"] and not status["busyByMe"]:
                 if not i % 5:
                     log.info(f"Testbed is reserved by {status['owner']}, waiting...")
                 time.sleep(30)
             else:
                 break
-            # reset error counter, only 3 failures in a row can skip reservation
-            err_cnt = 0
             i += 1
         else:
             assert False, "Testbed still reserved!"
@@ -784,7 +790,7 @@ class ReserveLibLogCatcher(LogCatcher):
             msg_str += f'{indent_str}Caller function: "{log_json["function_name"]}"'
             msg_str += f'{indent_str}Remote command: "{log_json["remote_command"]}"'
             msg_str += f"{indent_str}Output: "
-            if log_json["cmd_out"]["truncated"] and type(log_json["cmd_out"]["remote_output"]) == list:
+            if log_json["cmd_out"]["truncated"] and isinstance(log_json["cmd_out"]["remote_output"], list):
                 msg_str += f'(truncated)\n{" ":4} - ' + f'\n{" ":4} - '.join(log_json["cmd_out"]["remote_output"])
                 del log_json["cmd_out"]["remote_output"]
             msg_str += log_json["cmd_out"]["remote_output"] if "remote_output" in log_json["cmd_out"] else ""
@@ -842,6 +848,10 @@ class ReserveLibLogCatcher(LogCatcher):
             },
             ssh_log=True,
         )
+
+    def step_collect(self, test_data):
+        """Overriden to stop attaching log_reservelib to steps."""
+        ...
 
 
 log_catcher = ReserveLibLogCatcher(default_name="log_reservelib")

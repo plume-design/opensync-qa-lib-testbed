@@ -39,11 +39,20 @@ def get_option_config_name(config):
             # User set multi configs but with numprocesses = 0
             config_name = config_names[0]
         elif is_worker_xdist(config):
-            worker_idx = int(config.workerinput["workerid"].replace("gw", ""))
-            config_name = config_names[worker_idx % number_of_configs]
+            config_name = get_config_for_xdist(config, config_names)
         else:  # main xdist
             config_name = ""
     return config_name
+
+
+def get_config_for_xdist(pytest_config, config_names) -> str:
+    # Use previous_id to assign the same config-name to the new worker.
+    if previous_id := pytest_config.workerinput.get("previous_id"):
+        worker_id = previous_id
+    else:
+        worker_id = pytest_config.workerinput["workerid"]
+    worker_idx = int(worker_id.replace("gw", ""))
+    return config_names[worker_idx % len(config_names)]
 
 
 def get_worker_for_tb_name(config, tb_name):

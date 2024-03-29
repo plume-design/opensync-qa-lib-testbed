@@ -1,0 +1,68 @@
+{
+  "4.2.0": {
+    "proj-name": "build_BCM947622DVT_v4.2.0",
+    "fn-prefix": "bcmBCM947622DVT_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "4.4.0": {
+    "proj-name": "build_BCM947622DVT_v4.4.0",
+    "fn-prefix": "bcmBCM947622DVT_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.1.0": {
+    "proj-name": "build_BCM947622DVT_v5.1.0",
+    "fn-prefix": "bcmBCM947622DVT_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.1.1": {
+    "proj-name": "build_BCM947622DVT_v5.1.1",
+    "fn-prefix": "bcmBCM947622DVT_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.1.2": {
+    "proj-name": "build_BCM947622DVT_v5.1.2",
+    "fn-prefix": "bcmBCM947622DVT_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.2.0": {
+    "proj-name": "build_BCM947622DVT_v5.2.0",
+    "fn-prefix": "bcmBCM947622DVT_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.3.0": {
+    "proj-name": "build_BCM947622DVT_v5.3.0",
+    "fn-prefix": "bcmBCM947622DVT_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.3.1": {
+    "proj-name": "build_BCM947622DVT_v5.3.1",
+    "fn-prefix": "bcmBCM947622DVT_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "master": {
+    "proj-name": "build_BCM947622DVT_master",
+    "fn-prefix": "bcmBCM947622DVT_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "SDK542_master": {
+    "proj-name": "build_BCM947622DVT_SDK542_master",
+    "fn-prefix": "BCM947622DVT_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "sdk542_master": {
+    "proj-name": "build_OS_BCM947622DVT_sdk542_master",
+    "fn-prefix": "bcmOS_BCM947622DVT_BCM54_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  }
+}

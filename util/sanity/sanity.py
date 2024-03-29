@@ -100,7 +100,7 @@ class Sanity(object):
                         for bridge in tables["Bridge table"]:
                             if bridge["name"] != "br-wan":
                                 continue
-                            if type(bridge["ports"]) is not list:
+                            if not isinstance(bridge["ports"], list):
                                 bridge["ports"] = [bridge["ports"]]
                             gw_node = any((x in eth_uuid for x in bridge["ports"]))
                     if gw_node:

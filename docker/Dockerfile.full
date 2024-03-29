@@ -41,7 +41,7 @@ RUN \
     echo 'pref("security.fileuri.strict_origin_policy", false);' >> "$JS_FILE"
 
 # -- Install GeckoDriver
-RUN wget -q "https://github.com/mozilla/geckodriver/releases/download/v0.33.0/geckodriver-v0.33.0-linux64.tar.gz" -O /tmp/geckodriver.tgz \
+RUN wget -q "https://github.com/mozilla/geckodriver/releases/download/v0.34.0/geckodriver-v0.34.0-linux64.tar.gz" -O /tmp/geckodriver.tgz \
     && tar zxf /tmp/geckodriver.tgz -C /usr/bin/ \
     && rm /tmp/geckodriver.tgz
 

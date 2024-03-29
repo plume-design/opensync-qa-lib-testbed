@@ -1,5 +1,6 @@
+import re
+import os.path
 import time
-import os
 import json
 import pytest
 import urllib.request
@@ -15,12 +16,14 @@ from lib_testbed.generic.util.common import (
     mark_failed_recovery_attempt,
     get_target_pytest_mark,
     ALL_MARKERS_NAME,
+    CACHE_DIR,
 )
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.ssh.sshexception import SshException
 from lib_testbed.generic.switch.switch_api_resolver import SwitchApiResolver
 from lib_testbed.generic.util.object_resolver import ObjectResolver
 from lib_testbed.generic.rpower.rpowerlib import PowerControllerApi
+from lib_testbed.generic.util.opensyncexception import OpenSyncException
 
 
 class PodApi(DeviceApi):
@@ -55,7 +58,7 @@ class PodApi(DeviceApi):
         if not self.lib.main_object:
             return
 
-        if not self.lib.get_stdout(self.lib.uptime(timeout=20), skip_exception=True):
+        if not self.lib.get_stdout(self.lib.version(timeout=20, retry=False), skip_exception=True):
             self.pod_recovery()
 
         self.auto_limit_tx_power()
@@ -141,7 +144,7 @@ class PodApi(DeviceApi):
 
         ret = self.lib.upgrade(exp_ver)
         if ret[0]:
-            log.error(f"Restoring FW failed:\n{ret}")
+            log.error(f"\nRestoring FW failed:\n{ret}. Trigger signal keyboard-interrupt to exit pytest session\n")
             pytest.exit(f"Cannot restore {exp_ver} on the {self.nickname}, stopping test execution")
 
     @staticmethod
@@ -160,12 +163,30 @@ class PodApi(DeviceApi):
         name = self.get_nickname()
         pod_prefix = "Pod{}".format("s" if self.lib.multi_devices else "")
 
+        log.warning(f"{pod_prefix} {name} has no management access")
+        # Before run switch recovery make sure target pod is on
+        rpower = PowerControllerApi(self.lib.config)
+        rpower_pods = rpower.get_nodes_devices()
+        if name not in rpower_pods:
+            raise OpenSyncException(
+                f"Can not start recovery attempt for: {pod_prefix}: {name} without rpower access.",
+                f"Configure rpower access for {pod_prefix}: {name}",
+            )
+        rpower_node_status = rpower.status(name)
+        if rpower_node_status[name] == "OFF":
+            log.info(f"Turning ON {name} node to restore management access")
+            rpower.on(rpower_pods)
+            log.info(f"Wait for restoring management access after turning on {name} node")
+            if self.wait_available():
+                log.info(f"Recovery has been finished successfully on {name} node")
+                return
+
         resp = self.lib.recover()
-        if not resp[0] and self.lib.get_stdout(self.lib.uptime(timeout=10), skip_exception=True):
+        if not resp[0] and self.lib.get_stdout(self.lib.version(timeout=10), skip_exception=True):
             log.info(f"Pod recover has been finished successfully on {name}")
             return
 
-        # Before run rpower action check switch configuration
+        # Before run power cycle action check switch configuration
         if self.lib.config.get("Switch"):
             switch = SwitchApiResolver(**{"config": self.lib.config})
             log.info(f"Running switch recovery on {name} node with switch configuration")
@@ -175,14 +196,6 @@ class PodApi(DeviceApi):
                 log.info(f"Recovery has been finished successfully on {name} node")
                 return
 
-        if not self.lib.config.get("rpower"):
-            assert False, f"{pod_prefix}: {name} has no management access and rpower section is " f"missing in config"
-
-        # get all rpower aliases for getting pods which are connected to rpower
-        rpower = PowerControllerApi(self.lib.config)
-        rpower_pods = rpower.get_nodes_devices()
-        assert name in rpower_pods, f"{pod_prefix}: {name} without management access has no configured rpower"
-        log.info(f"{pod_prefix} {name} has no management access")
         log.info(f"Check last operation on rpower for: {name}")
         last_request_time = rpower.get_last_request_time(name)[name]
         rpower_status = rpower.status(name)[name]
@@ -212,11 +225,13 @@ class PodApi(DeviceApi):
             time.sleep(5)
         else:
             mark_failed_recovery_attempt(tb_config=self.lib.config)
-            assert False, f"Pod name: {name} has no management access. " f"Can't recover {name} pod by power cycle"
+            raise OpenSyncException(
+                f"Pod name: {name} has no management access.", f"Check management connection for: {name} pod."
+            )
         log.info(f"{pod_prefix}: {name} successfully recovered")
 
     def set_wano_configuration(self):
-        if not hasattr(self, ALL_MARKERS_NAME) or self.obj_name.get("name", "") != "gw":
+        if not getattr(self, ALL_MARKERS_NAME, None) or self.nickname != "gw":
             return
         wan_connection = get_target_pytest_mark(self.all_markers, "wan_connection")
         vlan_id = getattr(wan_connection, "kwargs", {}).get("vlan_id", 200)
@@ -294,6 +309,11 @@ class PodApi(DeviceApi):
         """Copy a file from node(s)"""
         response = self.lib.get_file(remote_file, location, **kwargs)
         return self.get_stdout(response, **kwargs)
+
+    def put_dir(self, directory, location, **kwargs):
+        """Copy dir into client(s)"""
+        result = self.lib.put_dir(directory, location, **kwargs)
+        return self.get_stdout(result, **kwargs)
 
     def put_file(self, file_name, location, **kwargs):
         """Copy a file onto device(s)"""
@@ -451,7 +471,7 @@ class PodApi(DeviceApi):
         """
         return self.lib.iface.get_backhauls()
 
-    def get_radio_temperatures(self, radio: Union[int, str, list] = None, retries=3, **kwargs):
+    def get_radio_temperatures(self, radio: Union[int, str, list] = None, retries=2, **kwargs):
         """
         Args:
             radio: accepted arguments: radio_id(e.g.: 0, 1, ...), band frequency(e.g.: '2.4G', '5G'),
@@ -509,10 +529,9 @@ class PodApi(DeviceApi):
                     log.info("Downgrade requires erasing certificates...")
                     self.lib.erase_certificates()
         fw_file_name = fw_url.split("/")[-1]
-        if not os.path.exists("/tmp/automation/"):
-            os.makedirs("/tmp/automation/")
-        urllib.request.urlretrieve(fw_url, f"/tmp/automation/{fw_file_name}")
-        self.put_file(f"/tmp/automation/{fw_file_name}", "/tmp/")
+        fw_file_name_path = os.path.join(CACHE_DIR, fw_file_name)
+        urllib.request.urlretrieve(fw_url, fw_file_name_path)
+        self.put_file(fw_file_name_path, "/tmp/")
         update_cmd = f"safeupdate -u /tmp/{fw_file_name}"
 
         if fw_key:
@@ -669,6 +688,21 @@ class PodApi(DeviceApi):
 
     def get_cpu_memory_usage(self, **kwargs):
         return self.lib.get_cpu_memory_usage(**kwargs)
+
+    def get_process_mem_usage(self, process_name: str, **kwargs) -> dict:
+        """
+        Get process VSZ mem in kilobytes and %VSZ usage
+        Args:
+            process_name:
+            **kwargs:
+
+        Returns: dict(vsz: int, vsz_usage: int)
+
+        """
+        response = self.lib.get_process_mem_usage(process_name, **kwargs)
+        stdout = self.get_stdout(response, **kwargs)
+        vsz, vsz_usage = re.findall(r"\d+", stdout)
+        return dict(vsz=int(vsz), vsz_usage=int(vsz_usage))
 
     def set_fan_mode(self, status, **kwargs):
         """
@@ -866,7 +900,7 @@ class PodApi(DeviceApi):
         return self.get_stdout(self.lib.get_memory_information(**kwargs), **kwargs)
 
     def check_traffic_acceleration(
-        self, ip_address, expected_protocol=6, multicast=False, flow_count=1, flex=False, **kwargs
+        self, ip_address, expected_protocol=6, multicast=False, flow_count=1, flex=False, map_t=False, **kwargs
     ):
         """
         Check traffic acceleration
@@ -876,6 +910,7 @@ class PodApi(DeviceApi):
             multicast: (bool) True to check for acceleration of multicast traffic
             flow_count: (int) minimum number of expected accelerated flows (connections)
             flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
             **kwargs:
 
         Returns: bool()
@@ -887,6 +922,7 @@ class PodApi(DeviceApi):
             multicast=multicast,
             flow_count=flow_count,
             flex=flex,
+            map_t=map_t,
             **kwargs,
         )
 
@@ -933,7 +969,7 @@ class PodApi(DeviceApi):
         """Disconnect Specified pod from Ethernet."""
         return self.lib.eth_disconnect()
 
-    def get_parsed_conntrack_entries(self, raw_conntrack_entries: str, ipv6: bool = False) -> dict:
+    def get_parsed_conntrack_entries(self, raw_conntrack_entries: str = None, ipv6: bool = False) -> dict:
         """
         Get parsed conntrack entries and group them by protocol
         Args:
@@ -961,6 +997,11 @@ class PodApi(DeviceApi):
         response = self.lib.get_client_snr(ifname=ifname, client_mac=client_mac, **kwargs)
         return self.get_stdout(result=response, **kwargs)
 
+    def get_rssi(self, ifname: str, mac: str, **kwargs) -> str:
+        """Get RSSI level from the Wi-Fi driver"""
+        response = self.lib.get_rssi(ifname=ifname, mac=mac, **kwargs)
+        return self.get_stdout(result=response, **kwargs)
+
     def get_beacon_interval(self, ifname: str = None, **kwargs) -> str:
         """Get Beacon Internal from the Wi-Fi driver"""
         if ifname is None:
@@ -968,15 +1009,78 @@ class PodApi(DeviceApi):
         response = self.lib.get_beacon_interval(ifname=ifname, **kwargs)
         return self.get_stdout(result=response, **kwargs)
 
-    def is_linux_snd(self) -> bool:
+    def is_linux_sdn(self) -> bool:
         """Check if LinuxSDN is enabled"""
         ovs_version = self.ovsdb.get_str(table="AWLAN_Node", select="ovs_version", skip_exception=True)
         return ovs_version == "N/A"
+
+    def is_single_dpi_enabled(self) -> bool:
+        """Check if SingleDPI is enabled"""
+        single_dpi_handler = self.ovsdb.get_json_table(
+            table="Flow_Service_Manager_Config", where=["handler==dpi_ndp"], skip_exception=True
+        )
+        return bool(single_dpi_handler)
+
+    def run_traffic_acceleration_monitor(self, samples: int = 5, interval: int = 5, delay: int = 20, **kwargs) -> dict:
+        """Start making traffic acceleration statistics dumps on the pod in the background"""
+        return self.lib.run_traffic_acceleration_monitor(samples, interval, delay, **kwargs)
+
+    def check_traffic_acceleration_dump(
+        self,
+        acceleration_dump: dict,
+        ip_address: list,
+        expected_protocol: int = 6,
+        multicast: bool = False,
+        flow_count: int = 1,
+        flex: bool = False,
+        map_t: bool = False,
+        **kwargs,
+    ) -> bool:
+        """
+        Check traffic acceleration
+        Args:
+            acceleration_dump: (dict) Acceleration dump details from run_traffic_acceleration_monitor()
+            ip_address: (list) IP addresses to check
+            expected_protocol: (int) expected protocol id. 6 for TCP, 17 for UDP
+            multicast: (bool) True to check for acceleration of multicast traffic
+            flow_count: (int) minimum number of expected accelerated flows (connections)
+            flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
+            **kwargs:
+
+        Returns: bool()
+
+        """
+        return self.lib.check_traffic_acceleration_dump(
+            acceleration_dump=acceleration_dump,
+            ip_address=ip_address,
+            expected_protocol=expected_protocol,
+            multicast=multicast,
+            flow_count=flow_count,
+            flex=flex,
+            map_t=map_t,
+            **kwargs,
+        )
+
+    def clear_traffic_acceleration_dump(self, acceleration_dump: dict, **kwargs):
+        """
+        Clear traffic acceleration dump.
+        Args:
+            acceleration_dump: (dict) The acceleration dump details from run_traffic_acceleration_monitor() method
+
+        Returns:
+
+        """
+        self.lib.clear_traffic_acceleration_dump(acceleration_dump, **kwargs)
 
     # PROPERTIES FOR STORED DATA
     @property
     def model(self):
         return self.get_model()
+
+    @property
+    def model_org(self):
+        return self.lib.device.config["model_org"]
 
     @property
     def serial(self):

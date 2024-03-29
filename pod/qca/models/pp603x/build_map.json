@@ -8,6 +8,13 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
+  "native-master": {
+    "proj-name": "build_attila_native_master",
+    "fn-prefix": "qcaATTILA_QSDK11_NATIVE_fit-norplusemmc",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
   "4.2.0": {
     "proj-name": "build_attila_v4.2.0",
     "fn-prefix": "qcaATTILA_QSDK11_fit-norplusemmc",
@@ -67,6 +74,13 @@
   "build_device_featurebranch": {
     "proj-name": "build_device_featurebranch/attila",
     "fn-prefix": "qcaATTILA_QSDK11_fit-norplusemmc",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "native-build_device_featurebranch": {
+    "proj-name": "build_device_featurebranch/attila-native",
+    "fn-prefix": "qcaATTILA_QSDK11_NATIVE_fit-norplusemmc",
     "encryption": true,
     "enc-suffix": "eim",
     "key-suffix": "key"

@@ -1,11 +1,11 @@
 {
-  "first_released_fw": "5.8.0-2-g8affdb-dev-debug",
-  "ipv6_released_fw": "5.8.0-2-g8affdb-dev-debug",
-  "latest_released_fw": "5.8.0-3-g8affdb-dev-debug",
-  "ga_released_fw": "5.8.0-3-g8affdb-dev-debug",
+  "first_released_fw": "5.8.0-15-ga0fd71-dev-debug",
+  "ipv6_released_fw": "5.8.0-22-ga0f009-dev-debug",
+  "latest_released_fw": "5.8.0-22-ga0f009-dev-debug",
+  "ga_released_fw": "5.8.0-22-ga0f009-dev-debug",
   "rounds": 1,
-  "wpa3_not_supported_released_fw": "5.8.0-2-g8affdb-dev-debug",
-  "capabilities_released_fw": "5.8.0-2-g8affdb-dev-debug",
-  "wano_persistent_storage": "5.8.0-2-g8affdb-dev-debug",
-  "wano_ovsdb_storage": "5.8.0-2-g8affdb-dev-debug"
+  "wpa3_not_supported_released_fw": "5.8.0-22-ga0f009-dev-debug",
+  "capabilities_released_fw": "5.8.0-22-ga0f009-dev-debug",
+  "wano_persistent_storage": "5.8.0-22-ga0f009-dev-debug",
+  "wano_ovsdb_storage": "5.8.0-22-ga0f009-dev-debug"
 }

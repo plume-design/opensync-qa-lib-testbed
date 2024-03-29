@@ -4,6 +4,18 @@ import ipaddress
 DEFAULT_TAGGED_VLANS = ["4", "24", "35", "700"]
 
 
+class TESTBED_SERVER_IPERF_ADDRESS:
+    """
+    Testbed server addresses that can be used when running iperf to bind / connect to.
+
+    These addresses are reachable from all testbed namespaces and VLANs, so can be
+    safely used even for tests whose WAN VLAN is isolated from testbed's main namespace.
+    """
+
+    IPv4 = ipaddress.IPv4Address("192.168.7.1")
+    IPv6 = ipaddress.IPv6Address("2001:ee2:1704:9807::1")
+
+
 class WAN_VLAN(enum.IntEnum):
     """
     Describes a testbed WAN VLAN
@@ -14,6 +26,7 @@ class WAN_VLAN(enum.IntEnum):
         ipv4_subnet (IPv4Network): IPv4 subnet used on this WAN VLAN, or '0.0.0.0/32' if not used
         ipv4_gateway (IPv4Address): IPv4 address of default gateway, or '0.0.0.0' if not used
         ipv4_nameserver (IPv4Address): IPv4 address of DNS name server, or '0.0.0.0' if not used
+        ipv4_mapped (IPv4Network): IPv4 subnet used for MAP-E/T on this WAN VLAN, or '0.0.0.0/32' if not used
         ipv6_subnet (IPv6Network): IPv6 subnet used on this WAN VLAN, or '::/128' if not used
         ipv6_gateway (IPv6Address): IPv6 address of default gateway, or '::' if not used
         ipv6_nameserver (IPv6Address): IPv6 address of DNS name server, or '::' if not used
@@ -114,21 +127,21 @@ class WAN_VLAN(enum.IntEnum):
     )
     MAP_E_OPT3 = (
         223,
-        "192.168.3.0/24",
-        "2001:ee2:1704:9923::/64",
+        "192.168.23.0/24",
+        "2001:ee2:1704:99e0::/64",
         "2001:ee2:1704:99e0::/61",
         "::/128",
     )
     MAP_E_OPT4 = (
         224,
-        "192.168.4.0/24",
-        "2001:ee2:1704:9924::/64",
-        "2001:ee2:1704:99e8::/61",
+        "192.168.24.0/24",
+        "2001:ee2:1704:99e8::/64",
+        "2001:ee2:1704:99e8::/64",
         "::/128",
     )
     MAP_E_OPT5 = (
         225,
-        "99.99.225.0/24",
+        "0.0.0.0/32",
         "2001:ee2:1704:9925::/64",
         "2001:ee2:1704:9970::/61",
         "::/128",
@@ -136,8 +149,8 @@ class WAN_VLAN(enum.IntEnum):
     MAP_E_OPT6 = (
         226,
         "0.0.0.0/32",
-        "2001:ee2:1704:9926::/64",
-        "2001:ee2:1704:9978::/61",
+        "2001:ee2:1704:9978::/64",
+        "2001:ee2:1704:9978::/64",
         "::/128",
     )
     IPv4_PPPoE_CHAP = 230, "99.99.230.0/24", "::/128", "::/128", "::/128"
@@ -169,6 +182,12 @@ class WAN_VLAN(enum.IntEnum):
         self.ipv6_gateway = self.ipv6_nameserver = next(iter(self.ipv6_subnet.hosts()))
         self.ipv6_multicast = ipaddress.IPv6Network(ipv6_multicast)
         return self
+
+    @property
+    def ipv4_mapped(self):
+        if self.name.startswith("MAP_"):
+            return ipaddress.IPv4Network(f"192.168.{self.value}.4/31")
+        return ipaddress.IPv4Network("0.0.0.0/32")
 
     @property
     def wano_config(self):

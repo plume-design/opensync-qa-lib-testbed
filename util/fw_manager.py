@@ -18,16 +18,18 @@ class FwManager:
         self.fw_map = self.load_fw_map()
 
     def is_new_sdk(self) -> bool:
-        return bool(re.search("new sdk", self.tb_cfg.get("purpose", ""), re.IGNORECASE))
+        return bool(
+            re.search("new sdk", self.tb_cfg.get("purpose", ""), re.IGNORECASE)
+        ) or "NEW_SDK" in self.tb_cfg.get("capabilities", [])
 
     def load_fw_map(self) -> dict:
         fw_map = dict()
         new_sdk = self.is_new_sdk()
         device_models = list(
-            set([DeviceCommon.convert_model_name(pod_cfg["model"]) for pod_cfg in self.tb_cfg["Nodes"]])
+            set([pod_cfg["model_org"] for pod_cfg in self.tb_cfg["Nodes"]])
         )
         for device_model in device_models:
-            fw_file = self.get_file_to_load(device_model=device_model, new_sdk=new_sdk)
+            fw_file = self.get_file_to_load(device_model=DeviceCommon.convert_model_name(device_model), new_sdk=new_sdk)
             if not fw_file:
                 continue
             with open(fw_file) as fw:
@@ -62,7 +64,6 @@ class FwManager:
         latest_fw = {}
         rounds = []
         for model in models:
-            model = DeviceCommon.convert_model_name(model)
             fw_dict = self.fw_map.get(model)
             if not fw_dict:
                 continue
@@ -87,7 +88,6 @@ class FwManager:
         """
         fw_model_map = dict()
         for model in models:
-            model = DeviceCommon.convert_model_name(model)
             fw_dict = self.fw_map.get(model)
             if not fw_dict:
                 continue

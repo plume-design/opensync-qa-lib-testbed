@@ -120,6 +120,20 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
+  "6.2.0": {
+    "proj-name": "build_augustus_sdk542_v6.2.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_nand_squashfs_update_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "reimage-5.8.0": {
+    "proj-name": "build_augustus_sdk542_v5.8.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_REIMAGE-5.02-TO-5.04_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
   "master": {
     "proj-name": "build_augustus_master",
     "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi",
@@ -134,7 +148,7 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "native_master": {
+  "native-master": {
     "proj-name": "build_augustus_native_master",
     "fn-prefix": "bcmAUGUSTUS_BCM52_NATIVE_nand_fs_image_128_puresqubi",
     "encryption": true,
@@ -143,7 +157,7 @@
   },
   "build_device_featurebranch": {
     "proj-name": "build_device_featurebranch/augustus",
-    "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi-",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_nand_squashfs_update_secureboot-",
     "encryption": true,
     "enc-suffix": "eim",
     "key-suffix": "key"

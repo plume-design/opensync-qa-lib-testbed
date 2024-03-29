@@ -1,7 +1,9 @@
 import re
+import copy
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from lib_testbed.generic.util.config import load_tb_config
+from lib_testbed.generic.util import local_storage
 
 
 class ObjectFactory(object):
@@ -61,8 +63,7 @@ class PyMoveToDeploymentPlugin:
         for item in request.session.items:
             # better use tb_config fixture if possible, instead of these patched test classes
             if item.cls is not None:
-                item.cls.tb_config = cfg
-                item.cls.tb_config_orig = cfg
+                item.cls.tb_config_orig = item.cls.tb_config = copy.deepcopy(cfg)
         return cfg
 
     def __init__(self, config_name, deployment):
@@ -83,4 +84,5 @@ class PyMoveToDeploymentPlugin:
                 log.info(f"Location has been moved successfully to {self.deployment}")
             else:
                 raise Exception(f"Location has not been moved to {self.deployment}")
+            local_storage.node_deployment_cache = {}
             return load_tb_config(config_name)

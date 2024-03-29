@@ -1,4 +1,28 @@
 {
+  "3.2.2": {
+    "proj-name": "build_augustus_v3.2.2",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "3.4.0": {
+    "proj-name": "build_augustus_v3.4.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "3.4.1": {
+    "proj-name": "build_augustus_v3.4.1",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "4.0.0": {
+    "proj-name": "build_augustus_v4.0.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
   "4.2.0": {
     "proj-name": "build_augustus_v4.2.0",
     "fn-prefix": "bcmAUGUSTUS_BCM527_debugs_utest",
@@ -7,12 +31,6 @@
   },
   "4.2.1": {
     "proj-name": "build_augustus_v4.2.1",
-    "fn-prefix": "bcmAUGUSTUS_BCM527_debugs_utest",
-    "encryption": false,
-    "img-suffix": "tar.bz2"
-  },
-  "4.3.0": {
-    "proj-name": "build_augustus_v4.3.0",
     "fn-prefix": "bcmAUGUSTUS_BCM527_debugs_utest",
     "encryption": false,
     "img-suffix": "tar.bz2"
@@ -47,9 +65,33 @@
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
+  "5.4.0": {
+    "proj-name": "build_augustus_v5.4.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM527_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "5.8.0": {
+    "proj-name": "build_augustus_sdk542_v5.8.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM54_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
   "master": {
     "proj-name": "build_augustus_master",
     "fn-prefix": "bcmAUGUSTUS_BCM527_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "master_sdk542": {
+    "proj-name": "build_augustus_sdk542_master",
+    "fn-prefix": "bcmAUGUSTUS_BCM54_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "native-master": {
+    "proj-name": "build_augustus_native_master",
+    "fn-prefix": "bcmAUGUSTUS_BCM52_NATIVE_debugs_utest",
     "encryption": false,
     "img-suffix": "tar.bz2"
   }

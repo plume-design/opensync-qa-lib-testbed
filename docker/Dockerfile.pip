@@ -14,3 +14,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     set -x && piplock-to-requirements < Pipfile.lock > requirements.txt && \
     pip --exists-action=i --no-input install --requirement=requirements.txt \
         --root-user-action=ignore --no-deps --no-clean --prefer-binary --use-pep517
+
+# Below COPY won't fail if qase-python directory is not present
+COPY qase-python* /opt/qase-python
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    set -x && pip --exists-action=i --no-input install --use-pep517 --root-user-action=ignore -e \
+        /opt/qase-python/qase-python-commons/ \
+        /opt/qase-python/qase-pytest/ \
+        /opt/qase-python/qaseio/ || true

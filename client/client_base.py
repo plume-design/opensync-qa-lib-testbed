@@ -1,6 +1,6 @@
 from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from lib_testbed.generic.util.base_lib import BaseLib
-from lib_testbed.generic.util.config import get_uprise_loc_cfg
+from lib_testbed.generic.util.config import get_mdu_loc_cfg
 from lib_testbed.generic.client.client_config import (
     TBCFG_CLIENT_DEPLOY,
     TBCFG_NETWORKS,
@@ -15,10 +15,10 @@ class ClientBase(BaseLib):
         super().__init__(**kwargs)
 
     def get_tb_networks(self) -> list:
-        if not self.is_uprise_location():
+        if not self.is_mdu_location():
             networks = self.config.get(TBCFG_NETWORKS, [])
         else:
-            networks = self.get_uprise_unit_networks()
+            networks = self.get_mdu_unit_networks()
         return networks
 
     def get_network_name(self) -> str | None:
@@ -27,9 +27,9 @@ class ClientBase(BaseLib):
             return None
         return networks[0][TBCFG_NETWORKS_SSID]
 
-    def get_uprise_unit_networks(self) -> list:
+    def get_mdu_unit_networks(self) -> list:
         default_loc = self.device.config["default_location"]
-        location_cfg = get_uprise_loc_cfg(self.config, location_name=default_loc)
+        location_cfg = get_mdu_loc_cfg(self.config, location_name=default_loc)
         return location_cfg.get(TBCFG_NETWORKS, [])
 
     def get_network(self, name: str) -> tuple[str, str] | tuple[None, None]:

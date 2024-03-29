@@ -10,8 +10,8 @@ class BaseLib(SshCmd):
 
     """Common methods for client and pod"""
 
-    def is_uprise_location(self):
-        return "UPRISE" in self.config.get("capabilities", [])
+    def is_mdu_location(self):
+        return "MDU" in self.config.get("capabilities", [])
 
     @staticmethod
     def is_main_object(device_obj):
@@ -46,7 +46,7 @@ class BaseLib(SshCmd):
         ping_ver = "ping6" if v6 else "ping"
         return ping_ver if root else f"sudo {ping_ver}"
 
-    def ping_check(self, ipaddr="", count=1, fqdn_check=False, v6=False, **kwargs):
+    def ping_check(self, ipaddr="", count=1, fqdn_check=False, v6=False, show_log: bool = True, **kwargs):
         ip_address = ipaddr if ipaddr else self.get_ip_address_ping_check(ipv6=v6)
         ping_ver = self.which_ping(v6)
         rdns = kwargs.pop("rdns", None)
@@ -54,7 +54,8 @@ class BaseLib(SshCmd):
             # Skip reverse DNS lookup when ip_address is an IPv4 or IPv6 address
             rdns = ":" not in ip_address and not ip_address.replace(".", "").isdecimal()
         rdns = "" if rdns else "-n"
-        log.info(f"Sending {count} {ping_ver}(s) to {ip_address}")
+        if show_log:
+            log.info(f"Sending {count} {ping_ver}(s) to {ip_address}")
         result = self.run_command(f"{ping_ver} -c {count} -t 200 -W 5 {rdns} {ip_address}", **kwargs)
         if result[0] == 0 and result[1]:
             ping_results = pingparsing.PingParsing().parse(result[1]).as_dict()

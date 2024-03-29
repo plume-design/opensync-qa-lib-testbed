@@ -17,10 +17,15 @@ from pathlib import Path
 
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.client.client_base import ClientBase
+from lib_testbed.generic.util.common import CACHE_DIR
 from lib_testbed.generic.client.models.generic.client_tool import ClientTool
 from lib_testbed.generic.switch.switch_api_resolver import SwitchApiResolver
 from lib_testbed.generic.util.base_lib import Iface
 from lib_testbed.generic.util.config import FIXED_HOST_CLIENTS
+
+UPGRADE_DIR = "/tmp/automation/"
+UPGRADE_LOCAL_CACHE_DIR = CACHE_DIR / "client_upgrade_cache"
+KERNEL_DIR = "/home/plume/kernel-packages/"
 
 
 class ClientLib(ClientBase):
@@ -132,9 +137,11 @@ class ClientLib(ClientBase):
         return result
 
     def put_dir(self, directory, location, timeout=5 * 60, **kwargs):
+        as_sudo = kwargs.pop("as_sudo", True)
+        as_sudo = "sudo" if as_sudo else ""
         command = (
             f"cd {directory}; tar -cf - *  |"
-            + self.device.get_remote_cmd(f"sudo mkdir -p {location}; cd {location}; sudo tar -xof -")
+            + self.device.get_remote_cmd(f"{as_sudo} mkdir -p {location}; cd {location}; {as_sudo} tar -xof -")
             + " 2>/dev/null"
         )
         return self.run_command(command, **kwargs, timeout=timeout, skip_remote=True)
@@ -205,7 +212,7 @@ class ClientLib(ClientBase):
         chariot["chariot"] = True if "endpoint" in status else False
         return [0, chariot.copy(), ""]
 
-    def get_eth_info(self, timeout=5, **kwargs):
+    def get_eth_info(self, timeout=20, **kwargs):
         """
         Get information from eth interface
         Args:
@@ -359,7 +366,7 @@ class ClientLib(ClientBase):
         if "HE" in iw_info:
             wlan_info["wlan"][iface]["802.11ax"] = True
         wlan_info["wlan"][iface]["6e"] = False
-        if re.search(r"6\d\d\d MHz", iw_info):
+        if re.search(r"6\d\d\d(\.\d+)? MHz", iw_info):
             wlan_info["wlan"][iface]["6e"] = True
         # get IP address
         ip = self.get_stdout(self.strip_stdout_result(self.run_command("hostname -I")))
@@ -528,7 +535,7 @@ class ClientLib(ClientBase):
             self.eth_iface
             if hasattr(self, "eth_iface") and not force
             else self.get_stdout(
-                self.strip_stdout_result(self.run_command('ls /sys/class/net | grep "et\|en"', **kwargs)),  # noqa
+                self.strip_stdout_result(self.run_command('ls /sys/class/net | grep "et\\|en"', **kwargs)),
                 skip_exception=True,
             ).split("\n")[0]
         )
@@ -655,9 +662,10 @@ class ClientLib(ClientBase):
             return [1, "", "Missing wlan interface"]
         return self.run_command(command, **kwargs)
 
-    def fqdn_check(self, count=1, v6=False, **kwargs):
+    def fqdn_check(self, count=1, v6=False, show_log: bool = True, **kwargs):
         timeout = kwargs.pop("timeout", 20)
-        log.info("Check fqdn resolving")
+        if show_log:
+            log.info("Check fqdn resolving")
         domain_type = "aaaa" if v6 else "a"
         # https://www.iana.org/domains/root/servers
         fqdn_check_domain = self.config.get("wifi_check", {}).get("fqdn_check_domain", "www.iana.org")
@@ -675,7 +683,7 @@ class ClientLib(ClientBase):
         ip_address = self.get_stdout(result).strip()
         if not ip_address:
             return [99, "", "Dig did not return IP address"]
-        return self.ping_check(ip_address, count=count, v6=v6, fqdn_check=False, rdns=True, **kwargs)
+        return self.ping_check(ip_address, count=count, v6=v6, fqdn_check=False, rdns=True, show_log=show_log, **kwargs)
 
     def fqdn_type65(self, domain, **kwargs):
         cmd = f"dig -t TYPE65 {domain}"
@@ -997,6 +1005,7 @@ country={country}
         return (
             "brcmf_cfg80211_scan: scan error (-110)" in txt
             or "brcmf_cfg80211_scan: scan error (-52)" in txt
+            or "brcmf_cfg80211_get_tx_power: error (-110)" in txt
             or ("Exception stack" in txt and "Workqueue" in txt and "Hardware name" in txt)
             or "Scan failed! ret -5" in txt
         )
@@ -1756,6 +1765,7 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         ret = self.run_command(f"sudo ifconfig {interface} hw ether {new_mac}", **kwargs)
         # short pause is needed here, otherwise we are not able to read the address right after
         time.sleep(1)
+        setattr(self, f"{interface}_mac", new_mac)
         return ret
 
     def set_ip_address(self, ip, netmask="255.255.255.0", iface=None, **kwargs):
@@ -1789,7 +1799,7 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         """
         # to have Internet access over mgmt iface we need to jump out from the network namespace
         netns = self.device.config.get("host", {}).pop("netns", "")
-        self.run_command("rm -R /tmp/automation/")
+        self.run_command("rm -R %s" % UPGRADE_DIR)
         # short sleep to spread threads in time
         time.sleep(random.randint(1, 50) / 10)
         linux_upgrade = LinuxClientUpgrade(lib=self)
@@ -2223,10 +2233,6 @@ class ClientIface(Iface):
     pass
 
 
-UPGRADE_DIR = "/tmp/automation/"
-KERNEL_DIR = "/home/plume/kernel-packages/"
-
-
 class LinuxClientUpgrade:
     lock = Lock()
 
@@ -2276,7 +2282,7 @@ class LinuxClientUpgrade:
                         raise Exception(f"Download {download_url} url finished unsuccessfully")
 
     def download_image_from_url(self, http_address):
-        fw_path = f"{UPGRADE_DIR}upgrade_brix"
+        fw_path = UPGRADE_LOCAL_CACHE_DIR / "upgrade_brix"
         os.makedirs(fw_path, exist_ok=True)
         assert ".deb" in http_address, f"Incorrect file to download. Please provide deb package: {http_address}"
         download_urls = [http_address]
@@ -2358,7 +2364,7 @@ class LinuxClientUpgrade:
 
     def _start_upgrade(self, fw_path, force, download_url, target_version, **kwargs):
         if fw_path is None:
-            fw_path = f"{UPGRADE_DIR}upgrade_brix"
+            fw_path = UPGRADE_LOCAL_CACHE_DIR / "upgrade_brix"
             expected_file = download_url.split("/")[-1]
             os.makedirs(fw_path, exist_ok=True)
             self.download_image(fw_path, [download_url])

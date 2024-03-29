@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 OPENSYNC_ROOT=$(dirname "$(dirname "$(dirname "$(dirname "$(realpath "$0")")")")")
 #echo "OPENSYNC_ROOT=$OPENSYNC_ROOT"

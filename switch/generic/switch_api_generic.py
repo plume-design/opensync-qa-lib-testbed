@@ -1,14 +1,16 @@
+import functools
 import re
 import time
 import pytest
 import random
 from typing import Union
 from lib_testbed.generic import WAN_VLAN, DEFAULT_TAGGED_VLANS
-from distutils.version import StrictVersion
+from lib_testbed.generic.util.common import compare_fw_versions, get_client_config_by
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.allure_util import AllureUtil
 from lib_testbed.generic.switch.switch_controller import SwitchController
 from lib_testbed.generic.util.request_handler import parse_request
+from lib_testbed.generic.util.opensyncexception import OpenSyncException
 
 
 class SwitchApiGeneric:
@@ -18,7 +20,7 @@ class SwitchApiGeneric:
         self.init_fixed_vlans()
         self.switch_ctrl = SwitchController(tb_config=self.config, switch_unit_cfg=switch_unit_cfg, switch_api=True)
         self.switch_unit = self.switch_ctrl.switch_units[0]
-        self.min_required_version = "1.0.0"
+        self.min_required_version = "1.7.5"
         self.ports_isolation_cfg = dict()
 
     @parse_request
@@ -33,13 +35,22 @@ class SwitchApiGeneric:
         version = self.version(skip_exception=True)
         self.config["switch_version"] = version
         AllureUtil(request.config).add_environment(f"switch_{self.switch_unit.ip}_version", version, "_error")
-        assert StrictVersion(version) >= StrictVersion(self.min_required_version), (
+        assert compare_fw_versions(version, self.min_required_version, ">="), (
             f"Config on the {self.switch_unit.ip} switch is older than {self.min_required_version}, "
             f"please upgrade to the latest"
         )
 
-    def init_fixed_vlans(self):
-        ...
+    @property
+    def switch_aliases(self) -> dict:
+        """Return switch aliases defined in test-config."""
+        return self.switch_unit.aliases
+
+    @functools.cached_property
+    def switch_isolation(self) -> dict:
+        """Return port isolation config based on switch cfg from rpi-server."""
+        return self.get_port_isolation_cfg()
+
+    def init_fixed_vlans(self): ...
 
     def init_ports_info_to_cfg(self):
         if self.config.get("ports_info"):
@@ -593,14 +604,12 @@ class SwitchApiGeneric:
             self.recovery_switch_configuration(pod_names=[pod_name], force=True, set_default_wan=False)
         self.recover_wan_port(ports_info=ports_info, default_wan_vlan=default_wan_vlan)
 
-    def set_connection_ip_type(self, pod_name, ip_type, disable_ports_isolation=False, enable_port=True, **kwargs):
+    def set_connection_ip_type(self, pod_name, ip_type, enable_port=True, **kwargs):
         """
         Set connection IP type
         Args:
             pod_name: (str) Name of device
             ip_type: (str) One of the WAN_VLAN names from [ipv4, ipv6_stateful, ipv6_stateless, ipv6_slaac, ...]
-            disable_ports_isolation: (bool) Disable port isolation before set connection type -
-             For leaf multi-gw mandatory
             enable_port: (bool)
 
         Returns: (bool)
@@ -610,11 +619,21 @@ class SwitchApiGeneric:
         ports_name = [port_alias[0] for port_alias in ports_aliases]
         target_port = [port_name for port_name in ports_name if self.get_wan_vlan_number(self.switch_info(port_name))]
         target_port = target_port[0] if target_port else ports_name[0]
-        if disable_ports_isolation:
-            self.disable_ports_isolation(target_port, **kwargs)
         vlan_map = {vlan_name.lower(): vlan for vlan_name, vlan in WAN_VLAN.__members__.items()}
         target_vlan = ip_type if isinstance(ip_type, int) else vlan_map.get(ip_type.lower())
-        return self.change_untagged_vlan(port_name=target_port, target_vlan=int(target_vlan), enable_port=enable_port)
+
+        # Make sure port-forwarding is enabled between target port and tb-server
+        switch_isolation_cfg = self.switch_isolation[str(self.switch_aliases[target_port]["port"])]
+        if "1/0/2" not in switch_isolation_cfg:
+            switch_isolation_cfg += ",1/0/2"
+            self.switch_ctrl.issue_port_action(target_port, port_action=switch_isolation_cfg)
+
+        response = self.change_untagged_vlan(
+            port_name=target_port, target_vlan=int(target_vlan), enable_port=enable_port
+        )
+        # Set port-forwarding between gw nodes
+        self.set_port_forwarding_between_gws()
+        return response
 
     def get_connection_ip_type(self, pod_name):
         """
@@ -714,14 +733,25 @@ class SwitchApiGeneric:
                     target_port, target_backhaul = port_name, default_backhaul
                     break
             else:
-                assert False, (
-                    "Can not find any unused port to set daisy chain connection between"
-                    f" {target_device} <--> {connect_to_device} devices"
+                raise OpenSyncException(
+                    f"Can not find any unused port to set daisy chain connection between "
+                    f"{target_device} <--> {connect_to_device} devices"
                 )
         else:
             target_port, target_backhaul = self.get_no_wan_port(self.get_all_switch_aliases(connect_to_device))
         self.enable_port(target_port)
-        device_port_name, *_ = self.get_switch_alias(target_device)
+        device_port_name, port_number, *_ = self.get_switch_alias(target_device)
+
+        # Set port-forwarding between used ports
+        port_to_update = [
+            (self.switch_aliases[device_port_name], self.switch_aliases[target_port]["port"]),
+            (self.switch_aliases[target_port], port_number),
+        ]
+        for switch_alias, port_to_forward in port_to_update:
+            port_isolation_cfg = self.switch_isolation[str(switch_alias["port"])]
+            port_isolation_cfg += f",1/0/{port_to_forward}"
+            self.switch_ctrl.issue_port_action(switch_alias["name"], port_action=port_isolation_cfg)
+
         return self.change_untagged_vlan(device_port_name, target_vlan=target_backhaul)
 
     def get_devices_connection_type(self):
@@ -764,11 +794,25 @@ class SwitchApiGeneric:
         """
         log.info(f'Swapping current gateway -> "{gw_name}" with leaf "{leaf_name}"')
         self.recovery_switch_configuration(gw_name, force=True)
-        self.set_connection_ip_type(
-            pod_name=leaf_name, ip_type=ip_type, enable_port=enable_port, disable_ports_isolation=True
-        )
+        self.set_connection_ip_type(pod_name=leaf_name, ip_type=ip_type, enable_port=enable_port)
         leaf_new_con_type, leaf_new_vlan_num = self.get_connection_ip_type(leaf_name)
         assert 200 <= leaf_new_vlan_num < 300, f"Pod {leaf_name} has been switched to gateway"
+
+    def is_eth_client_connected(self, client_name: str) -> bool:
+        """Check if ethernet client is connected to the node."""
+        client_cfg = get_client_config_by(self.config, client_name)
+        client_vlan = str(client_cfg.get("vlan"))
+        if not client_vlan:
+            raise OpenSyncException(f"Client VLAN not found for {client_name} from the tb-config.")
+        ports_info = self.get_stdout_port_requests(
+            self.get_ports_info([port_name for port_name in self.switch_aliases])
+        )
+        is_connected = False
+        for port_name, port_config in ports_info.items():
+            if client_vlan in port_config:
+                is_connected = True
+                break
+        return is_connected
 
     @staticmethod
     def is_daisy_chain_connection(all_ports_info, target_port_name):
@@ -790,7 +834,7 @@ class SwitchApiGeneric:
 
     @staticmethod
     def get_wan_vlan_number(port_info, vlan_type="untagged"):
-        match_expression = f"(?<={vlan_type}).\s+2[0-9][0-9]"  # noqa W605
+        match_expression = rf"(?<={vlan_type}).\s+2[0-9][0-9]"
         result = re.findall(match_expression, port_info, re.IGNORECASE)
         return result[0].strip() if result else ""
 
@@ -861,7 +905,6 @@ class SwitchApiGeneric:
         """
         raise NotImplementedError
 
-    # TODO: Create specific function for multiple port and one port arg to get consistent function output
     def set_forward_ports_isolation(self, vlan_port_names, ports_isolation):
         """
         Set forward ports isolation on target port
@@ -876,14 +919,12 @@ class SwitchApiGeneric:
         """
         raise NotImplementedError
 
-    # TODO: Create specific function for multiple port and one port arg to get consistent function output
-    def disable_ports_isolation(self, vlan_port_names, dump_ports_isolation=False, **kwargs):
+    def disable_ports_isolation(self, vlan_port_names, **kwargs):
         """
         Disable ports isolation on target port
         Args:
             vlan_port_names: For one port: (str) vlan port name
                              For multiple port (list) [(str)]
-            dump_ports_isolation: (bool) If True dump ports isolation config to switchlib obj
         Returns: None
 
         """
@@ -895,4 +936,12 @@ class SwitchApiGeneric:
     def set_port_duplex(self, ports: str | list[str], mode: str) -> dict:
         """Sets duplex mode for port(s). Possible modes are "half", "full",
         and "auto"."""
+        raise NotImplementedError
+
+    def get_port_isolation_cfg(self) -> dict:
+        """Get port isolation config based on switch cfg from rpi-server."""
+        raise NotImplementedError
+
+    def set_port_forwarding_between_gws(self):
+        """Set port forwarding between gateway devices."""
         raise NotImplementedError

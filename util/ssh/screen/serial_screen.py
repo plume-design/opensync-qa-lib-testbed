@@ -99,7 +99,9 @@ class SerialScreen(object):
         screen_name = list(self.screen.keys())[0]
         screen_info = {screen_name: None}
         info = self.get_screen_info(screen_info)
-        cmd = f"sudo kill -9 $(ps ax | grep \"expect.*{self.screen[screen_name]}\" | fgrep -v grep | awk '{{ print $1 }}')"
+        cmd = (
+            f'sudo kill -9 $(ps ax | grep "expect.*{self.screen[screen_name]}" ' "| fgrep -v grep | awk '{ print $1 }')"
+        )
         try:
             self.host_run(cmd, info.chained_ssh)
         except Exception:

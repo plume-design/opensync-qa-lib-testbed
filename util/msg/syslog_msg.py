@@ -1,5 +1,4 @@
 import datetime
-import hashlib
 import re
 
 # strptime uses locale dependent month names, but we need english names
@@ -112,7 +111,7 @@ class SyslogMsg:
         messages = []
         last_timestamp = 0
         cursor_id = 0
-        for line in self.pod.get_stdout(result).splitlines():
+        for line in self.pod.get_stdout(result, skip_exception=True).splitlines():
             line = line.rstrip()
             if not line:
                 continue

@@ -1,13 +1,16 @@
 import os
 import json
+import re
 import traceback
 from typing import TYPE_CHECKING
 
-from lib_testbed.generic.pod.pod import Pod
 from lib_testbed.generic.util import config
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.opensyncexception import OpenSyncException
+from lib_testbed.generic.util.common import wait_for
 
+EXIT_CODE_FAILED_TO_READ_NON_EMPTY_MODEL = 100
+OVSDB_NULL_VALUE = '["set",[]]'
 
 class PodTool:
     def __init__(self, lib):
@@ -97,9 +100,25 @@ class PodTool:
         """Node connection information"""
         return self.lib.info()
 
-    def get_model(self, **kwargs):
+    def get_model(self, wait_non_empty: int = 0, **kwargs):
         """Get node(s) model"""
-        return self.lib.get_model(retry=False, **kwargs)
+
+        if wait_non_empty <= 0:
+            return self.lib.get_model(retry=False, **kwargs)
+
+        pattern = re.compile(r'\s+')
+
+        success, get_model_op = wait_for(
+            lambda: self.lib.get_model(retry=False, **kwargs),
+            timeout=int(wait_non_empty),
+            tick=10,
+            eval_condition=lambda ret: ret and ret[0] == 0 and ret[1] and re.sub(pattern, '', ret[1]) != OVSDB_NULL_VALUE
+        )
+
+        if not success:
+            get_model_op[0] = EXIT_CODE_FAILED_TO_READ_NON_EMPTY_MODEL
+
+        return get_model_op
 
     def bssid(self, bridge: str = "", **kwargs):
         """Display BSSID of node bridge = <br-wan|br-home>-, default both"""
@@ -179,19 +198,26 @@ class PodTool:
                     pod <gw|l1|l2|all> upgrade <image_location> <optional>
         Upgrading from artifactory:
             Newest version:
-                    pod <gw|l1|l2|all> upgrade <version|master|native-version> <optional>
-                        eg.
+                    pod <gw|l1|l2|all> upgrade <version|native-version|master> <optional>
+                        e.g.
                             pod gw upgrade master
+                            pod gw upgrade native-master
+                            pod gw upgrade legacy-native-master
                             pod all upgrade 4.2.0
                             pod gw upgrade native-5.8.0
+                            pod gw upgrade 6.2.0  -> Note missing "native" prefix
 
             Requested build:
-                    pod <gw|l1|l2|all> upgrade <version|master|fbb|native-version>-<build_num> <optional>
+                    pod <gw|l1|l2|all> upgrade <version|native-version|master|fbb>-<build_num> <optional>
                         e.g.
                             pod all upgrade master-1777
+                            pod all upgrade native-master-1777
+                            pod all upgrade legacy-master-1777
                             pod l1 upgrade 4.2.0-15
                             pod gw upgrade fbb-13422
+                            pod gw upgrade native-fbb-13422
                             pod gw upgrade native-5.8.0-12
+                            pod gw upgrade 6.2.0-3  -> Note missing "native" prefix
         """
         custbase = None
         deployment_file = None
@@ -272,7 +298,7 @@ class PodTool:
         return self.lib.get_ips(iface, retry=False)
 
     def set_region(self, region, **kwargs):
-        """Set DFS regional domain (EU, US, UK, CA, JP, KR, PH, AU) (for Caesar, also: NZ, SG, IL, HK)"""
+        """Set DFS regional domain (EU, US, UK, CA, JP, KR, KW, PH, AU) (for Caesar, also: NZ, SG, IL, HK)"""
         return self.lib.set_region(region=region, retry=False, **kwargs)
 
     def get_region(self, **kwargs):

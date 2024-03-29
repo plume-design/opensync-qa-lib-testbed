@@ -89,14 +89,14 @@ class PyTemperatureMonitorPlugin:
             client_temps = self.clients.get_temperature(skip_logging=True, skip_exception=True, timeout=3, retry=False)
             temp_log_catcher.add(clients, client_temps)
             for node, node_temperatures in zip(nodes, temperatures):
-                if type(node_temperatures) is not list:
+                if not isinstance(node_temperatures, list):
                     continue
                 for temp in node_temperatures:
                     if temp and temp > 82:
                         log.warning(f"{node.upper()} IS OVERHEATING!!! Current radios temperature: {node_temperatures}")
                         break
             for client, client_temp in zip(clients, client_temps):
-                if type(client_temp) is int and client_temp > 82:
+                if isinstance(client_temp, int) and client_temp > 82:
                     log.warning(f"CLIENT {client.upper()} IS OVERHEATING!!! Current temperature: {client_temp}")
 
         while True:

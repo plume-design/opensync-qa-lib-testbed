@@ -1,5 +1,10 @@
 #!/bin/sh -ae
 
+echo_debug()
+{
+    echo "${ColorDEBUG}$@${ColorOff}" >&2
+}
+
 export DOCKER_TAG=${DOCKER_TAG:-'trident'}
 SKIP_DOCKER_START=${SKIP_DOCKER_START:-}
 DOCKER_START_FLAG=${DOCKER_START_FLAG:-"-ai"}
@@ -16,17 +21,17 @@ DOCKER_EXTRA_DOCKERFILE=${DOCKER_EXTRA_DOCKERFILE:-}
 # Enable BuildKit, so that we can use "RUN --mount=type=cache ..." in Dockerfiles.
 export DOCKER_BUILDKIT=1
 
+# Create framework cache directory
+FRAMEWORK_CACHE_DIR="$OPENSYNC_ROOT/.framework_cache"
+echo_debug "Creating framework cache directory: $FRAMEWORK_CACHE_DIR"
+mkdir -p "${FRAMEWORK_CACHE_DIR}/allure-results" "${FRAMEWORK_CACHE_DIR}/.local" "${FRAMEWORK_CACHE_DIR}/.pyenv"
+
 PWDF="/etc/passwd"
 GRPF="/etc/group"
 MPWDF=${PWDF}
 MGRPF=${GRPF}
 TPWDF=""
 TGRPF=""
-
-echo_debug()
-{
-    echo "${ColorDEBUG}$@${ColorOff}" >&2
-}
 
 generate_pwd_file()
 {
@@ -75,6 +80,12 @@ delete_grp_file()
 
     echo_debug "Removing temporary group file $TGRPF"
     rm -f "$TGRPF"
+}
+
+clean_framework_cache_dir()
+{
+    echo_debug "Cleaning $FRAMEWORK_CACHE_DIR by removing files older than 7 days"
+    find $FRAMEWORK_CACHE_DIR -type f -mtime +7 -delete
 }
 
 if [ -z "${OPENSYNC_ROOT}" ]; then
@@ -134,11 +145,6 @@ else
     fi
 fi
 
-TMP_AUTOMATION_DIR="/tmp/automation-user-$(id -u)/"
-mkdir -p "${TMP_AUTOMATION_DIR}"
-chmod -R 777 "${TMP_AUTOMATION_DIR}" || true
-mkdir -p "${TMP_AUTOMATION_DIR}/allure-results" "${TMP_AUTOMATION_DIR}/.local"
-
 (
     echo grabbing docker build lock ... >&2
     $_FLOCK
@@ -177,12 +183,32 @@ fi
 SSHARGS=
 if [ -e "$SSH_AUTH_SOCK" ]; then
     SSHARGS="-eSSH_AUTH_SOCK -v"$SSH_AUTH_SOCK:$SSH_AUTH_SOCK""
+    if [ $(uname) = "Darwin" ]; then
+        SSHARGS="-v /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock -e SSH_AUTH_SOCK="/run/host-services/ssh-auth.sock""
+    fi
 fi
 
 _MOUNT_CUR_DIR=
 if [ "$OPENSYNC_ROOT" != "$(pwd)" ]; then
     _MOUNT_CUR_DIR="-v$(pwd):$(pwd)"
 fi
+
+QASE_ENV="
+--env QASE_TESTOPS_API_TOKEN
+--env QASE_RUN_COMPLETE
+--env QASE_REPORT
+--env QASE_API_BASE_URL
+--env QASE_TESTOPS_PROJECT=$QASE_PROJECT_CODE
+--env QASE_TESTOPS_PLAN_ID=$QASE_PLAN_ID
+--env QASE_TESTOPS_RUN_ID=$QASE_RUN_ID
+--env QASE_TESTOPS_RERUN_FAILURES=$QASE_RERUN_FAILURES
+--env QASE_WEB_SRF_TOKEN
+--env QASE_WEB_HOST_SESSION
+--env QASE_WEB_SESSION_NAME
+--env QASE_WEB_SESSION
+--env QASE_WEB_EMAIL
+--env QASE_WEB_PASS"
+
 
 DOCKER_COMMAND_EXEC='
 export PYTHONDONTWRITEBYTECODE=true
@@ -201,7 +227,7 @@ generate_grp_file
 
 sig='INT HUP KILL TERM EXIT QUIT'
 id=
-cleanup() { r=$?; trap - $sig; test -z $id || docker kill $id; delete_pwd_file; delete_grp_file; exit $r; }
+cleanup() { r=$?; trap - $sig; test -z $id || docker kill $id; delete_pwd_file; delete_grp_file; clean_framework_cache_dir; exit $r; }
 trap cleanup $sig
 id=$(docker $DOCKER_COMMAND \
         --rm \
@@ -219,6 +245,7 @@ id=$(docker $DOCKER_COMMAND \
         --env CLOUD_SMOKE_USER \
         --env CLOUD_SMOKE_PASS \
         --env OPENSYNC_ROOT \
+        --env FRAMEWORK_CACHE_DIR \
         --env TOOLS_DIR \
         --env DISPLAY=$DISPLAY \
         --env QT_X11_NO_MITSHM=1 \
@@ -227,17 +254,17 @@ id=$(docker $DOCKER_COMMAND \
         -v"$MPWDF":/etc/passwd \
         -v"$MGRPF":/etc/group \
         -v$HOME:$HOME \
-        -v"${TMP_AUTOMATION_DIR}/.local":"$HOME/.local" \
-        -v"${TMP_AUTOMATION_DIR}/allure-results":/tmp/allure-results \
-        -v"${TMP_AUTOMATION_DIR}":/tmp/automation \
+        -v"${FRAMEWORK_CACHE_DIR}/.local":"$HOME/.local" \
         -v/tmp/.X11-unix:/tmp/.X11-unix \
         -v/dev/shm:/dev/shm \
+        -v"${FRAMEWORK_CACHE_DIR}/.pyenv":"$HOME/.pyenv" \
         --shm-size 1G \
         $_MOUNT_CUR_DIR \
         $_MOUNT_ROOT \
         $_USER \
         $_TIMEZONE \
         $DOCKER_OPTS \
+        $QASE_ENV \
         $SSHARGS \
         $DOCKER_CONTAINER_NAME_OPT \
         "$RUN_DOCKER_TAG" \

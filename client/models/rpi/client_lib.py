@@ -2,7 +2,7 @@ import os
 import time
 import random
 
-from lib_testbed.generic.client.models.debian.client_lib import DebianClientUpgrade
+from lib_testbed.generic.client.models.debian.client_lib import DebianClientUpgrade, UPGRADE_DIR
 from lib_testbed.generic.client.models.debian.client_lib import ClientLib as DebianClientLib
 
 
@@ -42,7 +42,7 @@ class ClientLib(DebianClientLib):
         Returns: (ret_val, std_out, str_err)
 
         """
-        self.run_command("rm -R /tmp/automation/")
+        self.run_command("rm -R %s" % UPGRADE_DIR)
         # short sleep to spread threads in time
         time.sleep(random.randint(1, 10) / 10)
         rpi_upgrade = RpiClientUpgrade(

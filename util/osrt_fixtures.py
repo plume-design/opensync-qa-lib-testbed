@@ -31,6 +31,7 @@ from lib_testbed.generic.client import client as _client_factory
 from lib_testbed.generic.pod import pod as _pod_factory
 from lib_testbed.generic.util.fw_manager import FwManager
 from lib_testbed.generic.util.iperf import Iperf
+from uuid import uuid4
 
 
 class DeviceApiIterator:
@@ -40,6 +41,17 @@ class DeviceApiIterator:
 
     def __iter__(self):
         return (obj for obj in self.__dict__.values() if isinstance(obj, DeviceApi))
+
+
+def setup_log_to_console(loaded_config, pytestconfig):
+    if "log_to_console" not in loaded_config:
+        if pytestconfig.option.log_to_console_full:
+            log_to_console = "full"
+        elif pytestconfig.option.log_to_console:
+            log_to_console = "basic"
+        else:
+            log_to_console = ""
+        loaded_config["log_to_console"] = log_to_console
 
 
 @pytest.fixture(scope="session")
@@ -63,11 +75,12 @@ def tb_config(request, pytestconfig, reserve_fixture) -> TbConfig:
         else:
             try:
                 inv_resp = urllib.request.urlopen(
-                    "http://inventory-development.shared.us-west-2.aws.plume.tech:3005" "/explorer/", timeout=2
+                    "https://inventory-api.global.plume.tech/explorer/", timeout=2
                 ).getcode()
             except Exception:
                 inv_resp = 404
             loaded_config["inside_infrastructure"] = inv_resp == 200
+    setup_log_to_console(loaded_config, pytestconfig)
     return loaded_config
 
 
@@ -459,3 +472,80 @@ def iperf2(request) -> callable(Iperf):
 def fw_mng(tb_config):
     """Fixture for getting firmware candidates for test purposes"""
     yield FwManager(tb_config)
+
+
+@pytest.fixture(scope="function")
+def tcp_dump(request):
+    """Tcp dump fixture, function-scope. Fixture starts a tcpdump as a daemon with finalizer to close tcpdump."""
+
+    def _tcp_dump(
+        device_obj: ClientApi | PodApi, tcp_dump_cmd: str, write_packets_to_file: bool = True
+    ) -> [str, str, str]:
+        """
+        Fixture helper method to start tcpdump.
+        Args:
+            device_obj: (ClientApi) or (PodApi) object
+            write_packets_to_file: (bool) Write the raw packets to file rather than parsing and printing them out
+            tcp_dump_cmd: (str) Raw tcpdump command which should be executed on provided object. For example:
+            "sudo tcpdump -n -U -evlni eth0.200 ether host 64:49:7d:c0:fb:70"
+            It's recommend to start tcpdump with following arguments:
+             -n - don't convert addresses (i.e., host addresses, port numbers, etc.) to names args,
+             -U - make the saved raw packet output packet-buffered
+
+        Returns: str(tcp_dump_pid), str(tcp_dump_log_file), str(tcp_dump_sniff_file)
+
+        """
+        tcp_dump_log_file = f"/tmp/tcp_dump_log_{str(uuid4())}.txt"
+        tcp_dump_sniff_file = f"/tmp/tcp_dump_sniff_file_{str(uuid4())}.pcap"
+        if write_packets_to_file:
+            tcp_dump_cmd += f" -w {tcp_dump_sniff_file}"
+        tcp_dump_pid = device_obj.run(tcp_dump_cmd + f" > {tcp_dump_log_file} 2>&1 & echo $!")
+        tcp_dump_process = device_obj.run(f"ls /proc/ | grep {tcp_dump_pid}", skip_exception=True)
+        assert (
+            tcp_dump_process
+        ), f'TCP-dump did not start properly: {device_obj.run(f"cat {tcp_dump_log_file}", skip_exception=True)}'
+
+        sudo_prefix = "sudo" if tcp_dump_cmd.startswith("sudo") else ""
+        request.addfinalizer(lambda: device_obj.run(f"{sudo_prefix} kill {tcp_dump_pid}", skip_exception=True))
+        request.addfinalizer(lambda: device_obj.run(f"{sudo_prefix} rm {tcp_dump_log_file}", skip_exception=True))
+        request.addfinalizer(lambda: device_obj.run(f"{sudo_prefix} rm {tcp_dump_sniff_file}", skip_exception=True))
+        return tcp_dump_pid, tcp_dump_log_file, tcp_dump_sniff_file
+
+    yield _tcp_dump
+
+
+@pytest.fixture(scope="function")
+def connect_wifi_client(request):
+    """Connect wireless client, function scoped"""
+
+    def _connect_wifi_client(client_obj: ClientApi, **kwargs) -> str:
+        response = client_obj.connect(**kwargs)
+        request.addfinalizer(lambda: client_obj.disconnect(skip_exception=True))
+        return response
+
+    yield _connect_wifi_client
+
+
+@pytest.fixture(scope="function")
+def connect_eth_client(request):
+    """Connect wireless client, function scoped"""
+
+    def _connect_eth_client(client_obj: ClientApi, **kwargs) -> str:
+        response = client_obj.eth_connect(**kwargs)
+        request.addfinalizer(lambda: client_obj.eth_disconnect(skip_exception=True))
+        return response
+
+    yield _connect_eth_client
+
+
+@pytest.fixture(scope="function")
+def connect_client(connect_wifi_client, connect_eth_client):
+    """Connect wireless or wired client, function scoped"""
+
+    def _connect_client(client_obj: ClientApi, **kwargs) -> str:
+        if client_obj.wlan_ifname:
+            return connect_wifi_client(client_obj, **kwargs)
+        else:
+            return connect_eth_client(client_obj, **kwargs)
+
+    yield _connect_client

@@ -14,23 +14,15 @@ class PodApi(PodApiGeneric):
         if compare_fw_versions(none_ver, "6.0.0.0", ">"):
             self.lib.capabilities.device_capabilities["interfaces"]["backhaul_ap"] = {
                 "24g": "b-24",
-                "5g": None,
-                "5gl": "b-l5",
-                "5gu": "b-u5",
-                "6g": None,
+                "5g": "b-50",
+                "5gl": None,
+                "5gu": None,
+                "6g": "b-60",
             }
             self.lib.capabilities.device_capabilities["interfaces"]["home_ap"] = {
                 "24g": "h-24",
-                "5g": None,
-                "5gl": "h-l5",
-                "5gu": "h-u5",
-                "6g": None,
-            }
-        elif compare_fw_versions(none_ver, "5.8.0.0", ">"):
-            self.lib.capabilities.device_capabilities["interfaces"]["backhaul_ap"] = {
-                "24g": "b-ap-24",
-                "5g": None,
-                "5gl": "b-ap-l50",
-                "5gu": "b-ap-u50",
-                "6g": None,
+                "5g": "h-50",
+                "5gl": None,
+                "5gu": None,
+                "6g": "h-60",
             }

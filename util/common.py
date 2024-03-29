@@ -3,21 +3,62 @@ import re
 import ssl
 import pprint
 import random
+import datetime
 import urllib.request
 import ipaddress
 import traceback
 import subprocess
 import concurrent.futures
+from copy import deepcopy
 from functools import wraps
 from time import time, sleep
-from lib_testbed.generic.util.logger import log
+
+import pytest
+from packaging.version import parse, InvalidVersion
 from pathlib import Path
 
-BASE_DIR = Path(__file__).absolute().parents[3].as_posix()
+from lib_testbed.generic.util.logger import log
+
+BASE_DIR = Path(__file__).absolute().parents[3]
+CACHE_DIR = BASE_DIR / ".framework_cache"
 SKIP_RESULT = "[SKIP_RESULT]"
 ALL_MARKERS_NAME = "all_markers"  # Variable assignation is done in lib/util/conftest_base.py
 OVERWRITE_MARK_NAME = "overwrite_markers"
+QASE_ID_MARKER_NAME = "qase_id"
+QASE_TITLE_MARKER_NAME = "qase_title"
 _DEFAULT_THREAD_EXECUTOR = concurrent.futures.ThreadPoolExecutor()
+POSSIBLE_BANDS = ["2.4G", "5G", "5GL", "5GU", "6G"]
+
+
+def skip_exception(*errors, log_traceback=True):
+    """
+    Decorator that accepts Exceptions: IOError, ValueError
+    and wraps the whole function and skips those Exceptions.
+    Usage:
+
+    .. code-block:: py
+
+        @skip_exception(ValueError, IOError)
+        def do_whatever():
+            ...
+    """
+    if not errors:
+        raise SyntaxError("Explicit exceptions are required for the @skip_exception decorator.")
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except errors as e:
+                if log_traceback:
+                    log.exception("An error occurred")
+                else:
+                    log.error("An error occurred: %s", e)
+
+        return wrapper
+
+    return decorator
 
 
 def threaded(f, executor=None) -> concurrent.futures.Future:
@@ -96,18 +137,62 @@ def fix_mac_address(address):
     return ":".join([i.zfill(2) for i in address.split(":")])
 
 
-def wait_for(predictable: callable, timeout: int, tick: float):
-    start = time()
+def fill_ip_address(address):
+    """
+    Fill IP address parts with leading 0 if missing
+    Args:
+        address: (str) IP address to be fixed, e.g '192.168.1.10'
 
+    Returns: (str) Fixed IP address, e.g '192.168.001.010'
+
+    """
+    return ".".join([i.zfill(3) for i in address.split(".")])
+
+
+def wait_for(predictable: callable, timeout: int, tick: float, eval_condition: callable = lambda ret: True):
+    start = time()
     condition = False
     ret = None
     while time() - start < timeout:
-        if ret := predictable():
-            condition = True
-            break
+        try:
+            if ret := predictable():
+                if condition := eval_condition(ret):
+                    break
+        except Exception as e:
+            ret = e
         sleep(tick)
 
     return condition, ret
+
+
+def compare_fw_versions(fw_version: str, reference_fw: str, condition: str = ">") -> bool | None:
+    """Compare two FW version and returns True if fw_version is newer than reference_fw.
+    It is possible to compare version with the >, <, >=, <= or == conditions.
+    """
+    try:
+        firmware_version = re.search(r"(\d+\.\d+\.\d+([-.]\d+)?)", fw_version).group().replace("-", ".")
+    except AttributeError:
+        firmware_version = fw_version
+    try:
+        reference_fw_version = re.search(r"(\d+\.\d+\.\d+([-.]\d+)?)", reference_fw).group().replace("-", ".")
+    except AttributeError:
+        reference_fw_version = reference_fw
+    try:
+        match condition:
+            case ">":
+                return parse(firmware_version) > parse(reference_fw_version)
+            case "<":
+                return parse(firmware_version) < parse(reference_fw_version)
+            case ">=":
+                return parse(firmware_version) >= parse(reference_fw_version)
+            case "<=":
+                return parse(firmware_version) <= parse(reference_fw_version)
+            case "==":
+                return parse(firmware_version) == parse(reference_fw_version)
+            case _:
+                raise ValueError("Comparison condition must either be '>', '<', '>=' or '=='.")
+    except InvalidVersion:
+        return None
 
 
 class DeviceCommon:
@@ -226,7 +311,7 @@ def is_service_accessible(service):
 
 
 def is_inside_infrastructure():
-    return is_service_accessible("http://inventory-development.shared.us-west-2.aws.plume.tech:3005/explorer/")
+    return is_service_accessible("https://inventory-api.global.plume.tech/explorer/")
 
 
 def get_target_pytest_mark(all_marks, target_mark_name, arg_name=""):
@@ -279,7 +364,7 @@ def mark_failed_recovery_attempt(tb_config):
 
 
 def get_digits_value_from_text(value_to_take, text_response):
-    regex_pattern = f"(?<={value_to_take}).\d+"
+    regex_pattern = rf"(?<={value_to_take}).\d+"
     value = re.search(regex_pattern, text_response)
     if not value:
         return 0
@@ -287,7 +372,7 @@ def get_digits_value_from_text(value_to_take, text_response):
 
 
 def get_string_value_from_text(value_to_take, text_response):
-    regex_pattern = f"(?<={value_to_take}).[A-Za-z]+"
+    regex_pattern = rf"(?<={value_to_take}).[A-Za-z]+"
     value = re.search(regex_pattern, text_response)
     if not value:
         return ""
@@ -363,7 +448,16 @@ def get_node_config_by(tb_cfg: dict, name: str = "", node_id: str = "", idx: int
     return node_cfg
 
 
-def get_module_parameterization_id(item, add_brackets: bool = False) -> str:
+def get_client_config_by(tb_cfg: dict, name: str = "", idx: int = None) -> dict:
+    client_cfg = dict()
+    if name:
+        client_cfg = next(filter(lambda node: node.get("name", "") == name, tb_cfg["Clients"]), {})
+    elif idx is not None:
+        client_cfg = tb_cfg["Clients"][idx]
+    return client_cfg
+
+
+def get_module_parameterization_id(item, add_brackets: bool = False, skip_func_param: bool = True) -> str:
     param_id = ""
     if not hasattr(item, "callspec"):
         return param_id
@@ -372,7 +466,7 @@ def get_module_parameterization_id(item, add_brackets: bool = False) -> str:
     # Skip setting parameterization id for function parameterization scopes
     parameterization_ids = list()
     for _param_id, param_scope in zip(item.callspec._idlist, item.callspec._arg2scope.values()):
-        if Scope("function") == param_scope:
+        if skip_func_param and (Scope("function") == param_scope):
             continue
         parameterization_ids.append(_param_id)
     param_id = "-".join(parameterization_ids)
@@ -385,3 +479,52 @@ def is_ipv6_used(all_markers: list) -> True:
     wan_connection = get_target_pytest_mark(all_markers, "wan_connection")
     wan_vlan = getattr(wan_connection, "kwargs", {}).get("vlan_id", 200)
     return 201 <= wan_vlan <= 206
+
+
+def get_modified_params(item):
+    params = deepcopy(item.callspec.params) if hasattr(item, "callspec") else {}
+    id_list = deepcopy(item.callspec._idlist) if hasattr(item, "callspec") else []
+    mod_params = deepcopy(params)
+    if len(id_list) == len(params):
+        for i, (param_key, param_value) in enumerate(mod_params.items()):
+            params[param_key] = id_list[i]
+    return params
+
+
+def get_qase_id(item: pytest.Item) -> int | None:
+    """Get qase-id from the pytest item."""
+    # Single item can have only one qase-id
+    qase_id_marker = item.get_closest_marker(QASE_ID_MARKER_NAME)
+    if not qase_id_marker:
+        return None
+    return qase_id_marker.kwargs.get("id")
+
+
+def get_test_title(item: pytest.Item) -> str:
+    qase_title_marker = item.get_closest_marker(QASE_TITLE_MARKER_NAME)
+    if not qase_title_marker:
+        return ""
+    return qase_title_marker.kwargs.get("title")
+
+
+def get_datetime_iso(
+    timezone: datetime.timezone = datetime.UTC,
+    tz_offset: bool = True,
+    zulu_offset: bool = False,
+    timedelta: datetime.timedelta = None,
+) -> str:
+    """Get datetime iso format based on provided timezone - by default UTC."""
+    datetime_now = datetime.datetime.now(timezone)
+    # Some of the cloud API doesn't support time zone offset within isoformat():
+    # with offset: 2024-01-29T07:39:47.875566+00:00
+    # without offset: 2024-01-29T07:39:47.875566
+    # Add possibility to remove timezone info to support these API endpoints.
+    if not tz_offset:
+        datetime_now = datetime_now.replace(tzinfo=None)
+    if timedelta:
+        datetime_now = datetime_now + timedelta
+    date_time_iso = datetime_now.isoformat()
+    # Some of the cloud API needs Zulu offset
+    if timezone == datetime.UTC and zulu_offset:
+        date_time_iso += "Z"
+    return date_time_iso

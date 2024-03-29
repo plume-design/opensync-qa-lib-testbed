@@ -47,6 +47,11 @@ class IperfWindowsCommon(IperfCommon):
             self.client.lib.run_command(f"Stop-Process -Id {self.iperf_pid} -Force")
         self.client.lib.run_command(f"Remove-Item {self.iperf_output_file}", skip_exception=True)
 
+    def flush_iperf_result(self):
+        """Flush Iperf results."""
+        self.client.lib.run_command(f"Remove-Item {self.iperf_output_file}", skip_exception=True)
+        self.client.lib.run_command(f"New-Item {self.iperf_output_file}", skip_exception=True)
+
     def parse_iperf_results(self, iperf_results: str, force_parse: bool = False) -> dict:
         if self.iperf_ver == 2:
             return self.get_iperf2_results(iperf_results)
@@ -161,11 +166,13 @@ class IperfServerWindows(IperfWindowsCommon, IperfServerLib):
         else:
             assert False, "Iperf server started unsuccessfully!"
 
-    def get_result_from_server(self) -> dict:
+    def get_result_from_server(self, skip_exception: bool = False) -> dict:
         """
         Read and parse results from iperf server. You need to wait for results from client first.
         """
         iperf_results = self.client.lib.run_command(f"type {self.iperf_output_file}")[1].strip()
+        if skip_exception and not iperf_results:
+            return {"error": "No iperf results"}
         assert iperf_results, "No iperf results found on server"
         log.info("Successfully read iperf server results")
         return self.parse_iperf_results(iperf_results)
@@ -175,7 +182,7 @@ class IperfServerWindows(IperfWindowsCommon, IperfServerLib):
             rnd_port = randint(min_port, max_port)
             cmd = f"Get-NetTCPConnection | where Localport -eq {rnd_port} | select Localport"
             output = self.client.lib.run_command(cmd)[1]
-            if not str(rnd_port) in output:
+            if str(rnd_port) not in output:
                 return rnd_port
 
 

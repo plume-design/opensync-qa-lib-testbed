@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 WIFI_MON_IF=wlan1
 WIFI_IF=wlan1

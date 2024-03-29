@@ -3,14 +3,11 @@ import os
 import time
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.common import DeviceCommon
+from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from lib_testbed.generic.switch.generic.switch_api_generic import SwitchApiGeneric
 
 
 SWITCH_CFG_DIR = "/home/plume/config-files"
-CFG_8_PORTS = "tplink_8ports.cfg"
-CFG_8_PORTS_V2 = "tplink_8ports_v2.cfg"
-CFG_16_PORTS = "tplink_16ports.cfg"
-CFG_16_PORTS_V2 = "tplink_16ports_v2.cfg"
 PORT_15_NAME = "rpi_dongle"
 PORT_15_CONF = {"name": PORT_15_NAME, "port": 15, "backhaul": 309}
 FIXED_VLANS = [PORT_15_CONF]
@@ -19,8 +16,6 @@ FIXED_VLANS = [PORT_15_CONF]
 class SwitchApi(SwitchApiGeneric):
     def __init__(self, config, switch_unit_cfg):
         super().__init__(config=config, switch_unit_cfg=switch_unit_cfg)
-        # TODO: change to 1.7.1 after adding switch restore config method
-        self.min_required_version = "1.0.0"
 
     def init_fixed_vlans(self):
         for switch in self.config.get("Switch", []):
@@ -180,8 +175,7 @@ class SwitchApi(SwitchApiGeneric):
             return self.switch_ctrl.get_forward_port_isolation(vlan_port_names)[vlan_port_names][1]
         return self.switch_ctrl.get_forward_port_isolation(vlan_port_names)
 
-    # TODO: Create specific function for multiple port and one port arg to get consistent function output
-    def set_forward_ports_isolation(self, vlan_port_names, ports_isolation):
+    def set_forward_ports_isolation(self, vlan_port_names: str | list, ports_isolation: str | list) -> dict[str:str]:
         """
         Set forward ports isolation on target port
         Args:
@@ -196,26 +190,20 @@ class SwitchApi(SwitchApiGeneric):
         if isinstance(ports_isolation, list):
             ports_isolation = [f"1/0/{port_isolation}" for port_isolation in ports_isolation]
             ports_isolation = ",".join(ports_isolation)
-        if isinstance(vlan_port_names, str):
-            return self.switch_ctrl.set_forward_port_isolation(vlan_port_names, ports_isolation)[vlan_port_names][1]
-        return self.switch_ctrl.set_forward_port_isolation(vlan_port_names, ports_isolation)
+        response = self.switch_ctrl.set_forward_port_isolation(vlan_port_names, ports_isolation)
+        return self.get_stdout_port_requests(response)
 
-    # TODO: Create specific function for multiple port and one port arg to get consistent function output
-    def disable_ports_isolation(self, vlan_port_names, dump_ports_isolation=False, **kwargs):
+    def disable_ports_isolation(self, vlan_port_names, **kwargs) -> dict[str:str]:
         """
         Disable ports isolation on target port
         Args:
             vlan_port_names: For one port: (str) vlan port name
                              For multiple port (list) [(str)]
-            dump_ports_isolation: (bool) If True dump ports isolation config to switchlib obj
-        Returns: None
+        Returns: dict() {port_name: switch_stdout}
 
         """
-        if dump_ports_isolation:
-            self.dump_ports_isolation(vlan_port_names)
-        if isinstance(vlan_port_names, str):
-            return self.switch_ctrl.disable_port_isolation(vlan_port_names)[vlan_port_names][1]
-        return self.switch_ctrl.disable_port_isolation(vlan_port_names)
+        response = self.switch_ctrl.disable_port_isolation(vlan_port_names)
+        return self.get_stdout_port_requests(response)
 
     def dump_ports_isolation(self, port_names):
         port_names = port_names if isinstance(port_names, list) else [port_names]
@@ -223,23 +211,21 @@ class SwitchApi(SwitchApiGeneric):
             port_isolation_cfg = self.get_forward_ports_isolation(port_name)
             self.ports_isolation_cfg[port_name] = port_isolation_cfg
 
-    def recovery_port_isolation_from_static_cfg(self):
+    def get_port_isolation_cfg(self) -> dict:
+        """Get port isolation config based on switch cfg from rpi-server."""
         # Determine switch type
-        assert self.config.get("Switch"), "Switch configuration not found"
         # TODO: Update testbed cfgs to use one common key to specify IP address of the switch
         switch_ip = (
             self.config["Switch"][0]["ipaddr"]
             if self.config["Switch"][0].get("ipaddr")
             else self.config["Switch"][0].get("hostname")
         )
-        assert switch_ip, "Can not determine IP address to the switch"
+        if not switch_ip:
+            raise OpenSyncException("IP address to the USTB switch not found.", "Check USTB config switch section.")
 
         switch_cfg_path = self.get_model_switch_cfg()
         if not switch_cfg_path:
-            log.warning(
-                f"Can not find switch config for {self.model()} switch model. Skip recovering port isolation..."
-            )
-            return False
+            return {}
 
         # init server obj to get switch cfg
         from lib_testbed.generic.client.client import Client
@@ -250,8 +236,21 @@ class SwitchApi(SwitchApiGeneric):
 
         # get switch config
         switch_cfg = server.run(f"cat {switch_cfg_path}", skip_exception=True)
-        assert switch_cfg, f"Can not get switch config: {switch_cfg_path} from testbed server"
-        isolation_config = self.parse_port_isolation_from_switch_cfg(switch_cfg)
+        if not switch_cfg:
+            raise OpenSyncException(
+                f'Unable to get switch cfg: "{switch_cfg_path}" from the rpi server.',
+                "Make sure you have a latest rpi-server version.",
+            )
+        port_isolation_config = self.parse_port_isolation_from_switch_cfg(switch_cfg)
+        return port_isolation_config
+
+    def recovery_port_isolation_from_static_cfg(self):
+        if not self.switch_isolation:
+            log.warning(
+                f"Can not find switch config for {self.model()} switch model. Skip recovering port isolation..."
+            )
+            return False
+
         # start recovery port isolation
         for port_name in self.get_list_of_all_port_names():
             port_alias = self.switch_ctrl.get_port_alias(port_name)
@@ -259,7 +258,7 @@ class SwitchApi(SwitchApiGeneric):
                 log.warning(f"Can not get port alias for {port_name}")
                 continue
             port_number = str(port_alias["port"])
-            default_port_isolation = isolation_config.get(port_number)
+            default_port_isolation = self.switch_isolation.get(port_number)
             if not default_port_isolation:
                 log.warning(f"Can not describe isolation config for {port_name} and port number: {port_number}")
                 continue
@@ -269,7 +268,7 @@ class SwitchApi(SwitchApiGeneric):
     def parse_port_isolation_from_switch_cfg(switch_cfg):
         isolation_config = dict()
         for i, line in enumerate(switch_cfg.splitlines()):
-            if not line.startswith("interface gigabitEthernet"):
+            if not line.startswith("interface") or "gigabitEthernet" not in line:
                 continue
             # Interface cfg
             for interface_cfg_line in switch_cfg.splitlines()[i + 1 :]:
@@ -317,15 +316,22 @@ class SwitchApi(SwitchApiGeneric):
 
     def get_model_switch_cfg(self) -> str:
         """Get path to the switch cfg on the ustb-server"""
-        match self.model():
-            case "T1600G-18TS":
-                switch_cfg_path = os.path.join(SWITCH_CFG_DIR, CFG_16_PORTS)
-            case "TL-SG2218":
-                switch_cfg_path = os.path.join(SWITCH_CFG_DIR, CFG_16_PORTS_V2)
-            case "T1500G-8T":
-                switch_cfg_path = os.path.join(SWITCH_CFG_DIR, CFG_8_PORTS)
-            case "TL-SG2008":
-                switch_cfg_path = os.path.join(SWITCH_CFG_DIR, CFG_8_PORTS_V2)
-            case _:
-                switch_cfg_path = None
-        return switch_cfg_path
+        return os.path.join(SWITCH_CFG_DIR, f"tplink_{self.model()}_{self.switch_ctrl.name}.cfg")
+
+    def set_port_forwarding_between_gws(self):
+        """Set port forwarding between gateway devices."""
+        gateways = [
+            device_name
+            for device_name, connection_type in self.get_devices_connection_type().items()
+            if "fake_internet" in connection_type
+        ]
+        for device_name in gateways:
+            wan_port = self.get_wan_port(device_name)
+            for device_name_to_forward in gateways:
+                if device_name == device_name_to_forward:
+                    continue
+                port_isolation_to_update = self.get_forward_ports_isolation(wan_port)
+                wan_port_to_forward = self.get_wan_port(device_name_to_forward)
+                port_to_forward = self.switch_aliases[wan_port_to_forward]["port"]
+                port_isolation_to_update += f",1/0/{port_to_forward}"
+                self.switch_ctrl.set_forward_port_isolation(wan_port, forward_ports=port_isolation_to_update)

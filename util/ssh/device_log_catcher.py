@@ -8,6 +8,7 @@ import zlib
 import subprocess
 from multiprocessing import Lock
 from lib_testbed.generic.util.logger import log, LogCatcher
+from lib_testbed.generic.util.common import CACHE_DIR
 
 DEBUG = False
 
@@ -30,12 +31,10 @@ class DeviceLogCatcher(LogCatcher):
         if DEBUG:
             self.add_to_logs(f"Remote command: {new_commands[name]}")
             log.info(f"Response for cmd: {command}\n{result[name][1]}")
-        if not result[name][0]:
-            info = result[name][1]
-            error = ""
-        else:
-            info = result[name][2]
-            error = f"[ERROR] ret:{result[name][0]}, stderr: "
+        info = f"stdout:\n{result[name][1]}"
+        error = ""
+        if result[name][0]:
+            error = f"[ERROR] ret:{result[name][0]}, stderr:\n{result[name][2]}\n"
             if DEBUG:
                 log.error(error)
         # assert info is not None
@@ -122,7 +121,7 @@ class DeviceLogCatcher(LogCatcher):
         self.add_to_logs(mock_resp, name=mock_logger_name)
 
     def collect(self, test_data):
-        if not test_data.get("failed") or test_data.get("skip_collect"):
+        if not test_data.get("failed") or test_data.get("skip_collect") or test_data.get("is_step"):
             return
         # collect logs for main device objects only
         # in case of optional mgmt access device is None, so we are not able to get anything
@@ -131,7 +130,7 @@ class DeviceLogCatcher(LogCatcher):
         dev_name = self.obj.get_name()
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         # make sure dirs are unique per device, so we can remove it completely after allure attach
-        log_pull_dir = f'/tmp/automation/log_pull/{test_data["name"]}_{dev_name}_{timestamp}'
+        log_pull_dir = f'{CACHE_DIR}/log_pull/{test_data["name"]}_{dev_name}_{timestamp}'
         with lock:
             try:
                 os.makedirs(log_pull_dir)

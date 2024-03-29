@@ -71,6 +71,10 @@ class IperfLinuxCommon(IperfCommon):
         self.kill_iperf()
         self.client.lib.run_command(f"rm {self.iperf_output_file}", skip_exception=True)
 
+    def flush_iperf_result(self):
+        """Flush Iperf results."""
+        self.client.lib.run_command(f'echo "" > {self.iperf_output_file}', skip_exception=True)
+
     def kill_iperf(self):
         """
         Make sure iperf is killed, by sending -9
@@ -161,11 +165,13 @@ class IperfServerLinux(IperfLinuxCommon, IperfServerLib):
         else:
             assert False, "Iperf server started unsuccessfully!"
 
-    def get_result_from_server(self) -> dict:
+    def get_result_from_server(self, skip_exception: bool = False) -> dict:
         """
         Read and parse results from iperf server. You need to wait for results from client first.
         """
         iperf_results = self.client.lib.run_command(f"cat {self.iperf_output_file}")[1].strip()
+        if skip_exception and not iperf_results:
+            return {"error": "No iperf results"}
         assert iperf_results, "No iperf results found on server"
         log.info("Successfully read iperf server results")
         return self.parse_iperf_results(iperf_results)

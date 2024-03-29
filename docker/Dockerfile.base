@@ -1,5 +1,5 @@
 FROM ubuntu:22.04
-ENV PYTHON_VERSION 3.10.9
+ENV PYTHON_VERSION 3.12.1
 ENV PATH /usr/local/bin:$PATH
 ENV LC_ALL C.UTF-8
 ENV LANG C.UTF-8
@@ -80,15 +80,10 @@ COPY allure-show ${ALLURE_SHOW_FILE}
 RUN chmod a+x ${ALLURE_SHOW_FILE}
 ENV PATH="/opt/allure/bin:${PATH}"
 
-# -- Install flake8-check script
-ENV FLAKE8_CHECK_FILE=/usr/bin/flake8-check
-COPY flake8-check ${FLAKE8_CHECK_FILE}
-RUN chmod a+x ${FLAKE8_CHECK_FILE}
-
-# -- Install black-check script
-ENV BLACK_CHECK_FILE=/usr/bin/black-check
-COPY black-check ${BLACK_CHECK_FILE}
-RUN chmod a+x ${BLACK_CHECK_FILE}
+# -- Install ruff-check script
+ENV RUFF_CHECK_FILE=/usr/bin/ruff-check
+COPY ruff-check ${RUFF_CHECK_FILE}
+RUN chmod a+x ${RUFF_CHECK_FILE}
 
 RUN mkdir -p /plume
 
@@ -97,7 +92,6 @@ ENV MPLBACKEND=Agg
 RUN export MPLBACKEND
 
 # -- Install pipenv
-ENV SETUPTOOLS_USE_DISTUTILS=stdlib
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install setuptools==67.7.2 setuptools-scm pipenv==2023.7.23
 

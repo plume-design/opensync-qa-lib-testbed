@@ -259,7 +259,14 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "legacy_master": {
+  "6.2.0": {
+    "proj-name": "build_caesar_sdk11_v6.2.0",
+    "fn-prefix": "qcaPIRANHA2_QSDK11_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "legacy-master": {
     "proj-name": "build_caesar_master",
     "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
     "encryption": true,
@@ -273,14 +280,14 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "legacy_native_master": {
+  "legacy-native-master": {
     "proj-name": "build_caesar_native_master",
     "fn-prefix": "openwrt-os-PIRANHA2_QSDK53_NATIVE-ap-fit",
     "encryption": true,
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "native_master": {
+  "native-master": {
     "proj-name": "build_caesar_sdk11_native_master",
     "fn-prefix": "qcaPIRANHA2_QSDK11_NATIVE_fit-norplusnand",
     "encryption": true,
@@ -290,6 +297,13 @@
   "build_device_featurebranch": {
     "proj-name": "build_device_featurebranch/caesar_sdk11",
     "fn-prefix": "qcaPIRANHA2_QSDK11_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "native-build_device_featurebranch": {
+    "proj-name": "build_device_featurebranch/caesar_sdk11_native",
+    "fn-prefix": "qcaPIRANHA2_QSDK11_NATIVE_fit-norplusnand",
     "encryption": true,
     "enc-suffix": "eim",
     "key-suffix": "key"

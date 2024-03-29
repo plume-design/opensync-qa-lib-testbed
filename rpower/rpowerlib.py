@@ -5,8 +5,7 @@ import importlib
 from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from lib_testbed.generic.client.client import Client
 from lib_testbed.generic.util.config import init_fixed_host_clients
-
-RPOWER_TOOL = "/home/plume/tools/rpower"
+from lib_testbed.generic.rpower.util import get_rpower_path
 
 
 class PowerControllerLib:
@@ -145,8 +144,9 @@ class PowerControllerLib:
     def get_pdu_type(rpi_server, ipaddr, username, password, port, pdu_ports):
         if rpi_server is None:
             return "no_rpower_on_rpi_server"
+        rpower_tool = get_rpower_path(rpi_server)
         ret = rpi_server.run_raw(
-            f"{RPOWER_TOOL} -a name --ip-address {ipaddr}:{port} --user-name {username}" f" --password {password}"
+            f"{rpower_tool} -a name --ip-address {ipaddr}:{port} --user-name {username}" f" --password {password}"
         )
         # Min supported RPI server version for a new PDULib is: plume_rpi_server__v2.0-157
         if ret[0]:
@@ -212,7 +212,7 @@ class PowerControllerLib:
         for rpower_unit in self.rpower_units:
             version = rpower_unit.version()
             # for no_rpower_on_rpi_server we get all PDU at once
-            if type(version) == dict:
+            if isinstance(version, dict):
                 response = version
                 break
             response.update({rpower_unit.address: version})
@@ -224,7 +224,7 @@ class PowerControllerLib:
         for rpower_unit in self.rpower_units:
             model = rpower_unit.model()
             # for no_rpower_on_rpi_server we get all PDU at once
-            if type(model) == dict:
+            if isinstance(model, dict):
                 response = model
                 break
             response.update({rpower_unit.address: model})

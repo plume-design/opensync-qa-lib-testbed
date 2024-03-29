@@ -113,6 +113,7 @@ class OSRTFixtureTestObject:
         self.obj = obj
 
     def setup(self, scope, request):
+        self.obj.all_markers = list(request.node.iter_markers())
         match scope:
             case "class" | "module" | "package" | "session":
                 if hasattr(self.obj, "setup_class_handler"):

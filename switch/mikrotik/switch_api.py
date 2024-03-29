@@ -6,7 +6,6 @@ from lib_testbed.generic.switch.generic.switch_api_generic import SwitchApiGener
 class SwitchApi(SwitchApiGeneric):
     def __init__(self, config, switch_unit_cfg):
         super().__init__(config=config, switch_unit_cfg=switch_unit_cfg)
-        self.min_required_version = "7.1.2"  # required for REST API
 
     # Not needed for mikrotik switches
     def restore_rpi_dongle_vlan(self, device_port, pod_name):

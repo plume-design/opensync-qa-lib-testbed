@@ -7,7 +7,7 @@ from lib_testbed.generic.util.logger import log
 
 
 def ovsdb_decode_value(col):
-    if type(col) is not list:
+    if not isinstance(col, list):
         return col
     if col[0] == "uuid":
         return col[1]
@@ -42,7 +42,7 @@ def ovsdb_decode_row(row, table_headings):
 def ovsdb_decode_table(json_dump):
     try:
         ovsdb_table = json.loads(json_dump)
-    except:
+    except Exception:
         log.error(f"Can not decode {json_dump} as JSON")
         return None
     table_name = ovsdb_table["caption"]

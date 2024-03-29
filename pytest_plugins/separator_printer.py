@@ -24,14 +24,15 @@ def print_test_separator(request):
         indent = 4
         separator = "#"
         title = _get_title(request.node)
-        tr = []
+        tr = ""
         automatics = ""
-        for mark in request.node.all_markers:
-            if mark.name == "testrail":
-                tr = mark.kwargs.get("ids", [])
-            if mark.name.startswith("TC_"):
-                automatics = f"{indent * ' '}Automatics: {mark.name}\n"
-        tr = f"{indent * ' '}TC ID: {', '.join(tr)}\n" if tr else ""
+        if qase_id := next((m for m in request.node.iter_markers() if m.name == "qase_id"), None):
+            tr = qase_id.kwargs.get("id", "")
+        elif testrail := next((m for m in request.node.iter_markers() if m.name == "testrail"), None):
+            tr = ", ".join(testrail.kwargs.get("ids", []))
+        if tc_ := next((m for m in request.node.iter_markers() if m.name.startswith("TC_")), None):
+            automatics = f"{indent * ' '}Automatics: {tc_.name}\n"
+        tr = f"{indent * ' '}TC ID: {tr}\n" if tr else ""
 
         log.info(
             f"\n\n{80 * separator}\n"

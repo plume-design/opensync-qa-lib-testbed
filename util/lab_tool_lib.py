@@ -198,7 +198,7 @@ class LabToolLib:
         if cl_type == "server":
             kwargs = {"config": tb_config, "multi_obj": True, "nicknames": ["host"]}
         elif cl_type == "clients":
-            kwargs = {"config": tb_config, "multi_obj": True, "type": "linux|rpi|hydra"}
+            kwargs = {"config": tb_config, "multi_obj": True, "type": "linux|debian|rpi|hydra"}
         else:
             raise Exception("Unsupported client type, Use 'host' or 'clients'")
         try:

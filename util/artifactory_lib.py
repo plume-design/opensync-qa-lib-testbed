@@ -24,87 +24,113 @@ def get_map(model, map_type="build_map.json"):
 
 
 def add_model(cfg, matrix, cmodel, module=None, https=True, **kwargs):
-    m_model = cmodel[0].strip()
-    m_fw_version = cmodel[1].strip()
-    m_resident_gw = cmodel[2].strip()
-
-    native = "native-" if "native" in m_fw_version else ""
-    m_fw_version = m_fw_version.replace("native-", "")
-    version = m_fw_version.split("-")[0]
-    model_map = get_map(m_model)
-    if not model_map:
-        log.error(f"!! Model {m_model} not supported.")
-        sys.exit(23)
-
-    if native + version not in model_map:
-        log.warning(f"Cannot find proper branch for {version} for {m_model}. Trying master branch")
-        version = "master"
-
-    build_data = model_map[native + version]
-    bucket = build_data["s3-bucket"] if "s3-bucket" in build_data else model_map["s3-bucket"]
-    base_name = f"{build_data['fn-prefix']}-{m_fw_version}"
-
-    # for downloadUrl add the first fw version that supports encrypted upgrade
-    if "firstEncryptedBuild" in build_data and build_data["encryption"]:
-        first_raw_version = build_data["firstEncryptedBuild"]
-        first_version = first_raw_version.split("-")[0]
-        if first_version not in model_map:
-            log.error(f"!! Version {first_version} not supported for model {m_model}.")
-            sys.exit(23)
-        first_build_data = model_map[first_version]
-        first_fn_prefix = first_build_data["fn-prefix"]
-        # Get image profile of the desired VM  prod/dev-debug..
-        img_profile = "-".join(m_fw_version.split("-")[3:])
-        first_m_fw_version = f"{first_raw_version}-{img_profile}"
-        first_base_name = f"{first_fn_prefix}-{first_m_fw_version}"
-        img_name = first_base_name + ".img"
-    else:
-        if "img-suffix" in build_data:
-            img_name = f'{base_name}.{build_data["img-suffix"]}'
-        elif "enc-suffix" in build_data:
-            img_name = f'{base_name}.{build_data["enc-suffix"]}'
+    # expected cmodel format: [model, fw_version, residentialGateway, [prerequisiteVersions: (list)]]
+    def get_fw_info(cmodel):
+        m_model = cmodel[0].strip()
+        m_fw_version = cmodel[1].strip()
+        m_resident_gw = cmodel[2]
+        m_prerequisite_versions = []
+        if len(cmodel) > 3:
+            m_prerequisite_versions = cmodel[3]
+        regex = r"((?P<prefix>[a-zA-Z-]*))?(?P<branch>\d.\d.\d)-(?P<build>\d*)-(?P<sha>\w+)-(?P<profile>.*)"
+        fw_match = re.match(regex, m_fw_version)
+        if not fw_match:
+            log.error("Cannot parse %s" % m_fw_version)
+            prefix = "native-" if "native" in m_fw_version else ""
+            m_fw_version = m_fw_version.replace("native-", "")
+            version = m_fw_version.split("-")[0]
+            img_profile = "-".join(m_fw_version.split("-")[3:])
         else:
-            raise Exception("Inappropriate configuration. Set either img-suffix or enc-suffix")
+            fw_parts = fw_match.groupdict()
+            version = fw_parts['branch']
+            prefix = fw_parts['prefix'].lower()
+            m_fw_version = f"{fw_parts['branch']}-{fw_parts['build']}-{fw_parts['sha']}-{fw_parts['profile']}"
+            img_profile = fw_parts['profile']
 
-    s3_url = cfg["artifactory"]["s3_url"]
-    if not https:
-        s3_url = s3_url.replace("https://", "http://")
-    img_url = f"{s3_url}/{bucket}/{img_name}"
+        model_map = get_map(m_model)
+        if not model_map:
+            log.error(f"!! Model {m_model} not supported.")
+            sys.exit(23)
 
-    if build_data["encryption"]:
-        enc_name = f'{base_name}.{build_data["enc-suffix"]}'
-        key_name = f'{enc_name}.{build_data["key-suffix"]}'
-        enc_url = f"{s3_url}/{bucket}/{enc_name}"
-        key_url = f'{cfg["artifactory"]["url"]}/{build_data["proj-name"]}/{key_name}'
+        if prefix + version not in model_map:
+            log.warning(f"Cannot find proper branch for {version} for {m_model}. Trying master branch")
+            version = "master"
 
-    model = dict()
-    model["firmwareVersion"] = m_fw_version
-    model["model"] = m_model
+        build_data = model_map[prefix + version]
+        bucket = build_data["s3-bucket"] if "s3-bucket" in build_data else model_map["s3-bucket"]
+        base_name = f"{build_data['fn-prefix']}-{m_fw_version}"
 
-    if "img-hash" in build_data:
-        hall_fw_version = model["firmwareVersion"].split("-")
-        hall_fw_version[2] = build_data["img-hash"]
-        model["firmwareVersion"] = "-".join(hall_fw_version)
+        # for downloadUrl add the first fw version that supports encrypted upgrade
+        if "firstEncryptedBuild" in build_data and build_data["encryption"]:
+            first_raw_version = build_data["firstEncryptedBuild"]
+            first_version = first_raw_version.split("-")[0]
+            if first_version not in model_map:
+                log.error(f"!! Version {first_version} not supported for model {m_model}.")
+                sys.exit(23)
+            first_build_data = model_map[first_version]
+            first_fn_prefix = first_build_data["fn-prefix"]
+            # Get image profile of the desired VM  prod/dev-debug..
+            first_m_fw_version = f"{first_raw_version}-{img_profile}"
+            first_base_name = f"{first_fn_prefix}-{first_m_fw_version}"
+            img_name = first_base_name + ".img"
+        else:
+            if "img-suffix" in build_data:
+                img_name = f'{base_name}.{build_data["img-suffix"]}'
+            elif "enc-suffix" in build_data:
+                img_name = f'{base_name}.{build_data["enc-suffix"]}'
+            else:
+                raise Exception("Inappropriate configuration. Set either img-suffix or enc-suffix")
 
-    if m_resident_gw.lower() in ["true", "yes", "ok", "correct", "y", "t"]:
-        model["residentialGateway"] = True
-    else:
-        model["residentialGateway"] = False
+        s3_url = cfg["artifactory"]["s3_url"]
+        if not https:
+            s3_url = s3_url.replace("https://", "http://")
+        img_url = f"{s3_url}/{bucket}/{img_name}"
 
-    if test_url(img_url, **kwargs):
-        model["downloadUrl"] = img_url
+        if build_data["encryption"]:
+            enc_name = f'{base_name}.{build_data["enc-suffix"]}'
+            key_name = f'{enc_name}.{build_data["key-suffix"]}'
+            enc_url = f"{s3_url}/{bucket}/{enc_name}"
+            key_url = f'{cfg["artifactory"]["url"]}/{build_data["proj-name"]}/{key_name}'
 
-    if build_data["encryption"] and test_url(enc_url, **kwargs):
-        key = get_enc_key(key_url)
-        model["encryptedDownloadUrl"] = enc_url
-        model["firmwareEncryptionKey"] = key
+        model = dict()
+        model["firmwareVersion"] = m_fw_version
+        model["model"] = m_model
 
-    if module:
-        model["modules"] = [
-            {"filename": f"app_signatures-{module}.tar.gz", "name": "app_signatures", "version": module}
-        ]
+        if "img-hash" in build_data:
+            hall_fw_version = model["firmwareVersion"].split("-")
+            hall_fw_version[2] = build_data["img-hash"]
+            model["firmwareVersion"] = "-".join(hall_fw_version)
 
-    matrix["models"].append(model)
+        if isinstance(m_resident_gw, str):
+            if m_resident_gw.strip().lower() in ["true", "yes", "ok", "correct", "y", "t"]:
+                model["residentialGateway"] = True
+            else:
+                model["residentialGateway"] = False
+        else:
+            model["residentialGateway"] = m_resident_gw
+
+        if test_url(img_url, **kwargs):
+            model["downloadUrl"] = img_url
+
+        if build_data["encryption"] and test_url(enc_url, **kwargs):
+            key = get_enc_key(key_url)
+            model["encryptedDownloadUrl"] = enc_url
+            model["firmwareEncryptionKey"] = key
+
+        if module:
+            model["modules"] = [
+                {"filename": f"app_signatures-{module}.tar.gz", "name": "app_signatures", "version": module}
+            ]
+        if m_prerequisite_versions:
+            model["prerequisiteVersions"] = []
+            for version in m_prerequisite_versions:
+                prerequisite_version = get_fw_info([cmodel[0], version, False, []])
+                model["prerequisiteVersions"].append(prerequisite_version)
+
+        return model
+
+    model_info = get_fw_info(cmodel)
+    matrix["models"].append(model_info)
 
 
 def get_enc_key(url):
@@ -139,7 +165,7 @@ def query_artifactory_for_artifact_list(cfg, build_name, build_number):
 
     data = '{ "buildName":"' + build_name + '", "buildNumber":"' + build_number + '" }'
     log.debug(data)
-    fwjson = []
+    fwjson = {}
     try:
         fwresp = requests.post(artif_url, headers=headers, data=data)
         fwjson = fwresp.json()
@@ -157,12 +183,16 @@ def query_artifactory_for_artifact_list(cfg, build_name, build_number):
 
 def get_artifactory_fw_url(cfg, fw_ver, model, map_type="build_map.json", use_build_map_suffix=False):
     fw_ver = fw_ver.split("-")
+    legacy = ""
+    if "legacy" in fw_ver:
+        legacy = "legacy-"
+        fw_ver.remove("legacy")
     native = ""
     if "native" in fw_ver:
         native = "native-"
         fw_ver.remove("native")
     fw_map_full = get_map(model, map_type)
-    fw_map = fw_map_full[native + fw_ver[0]]
+    fw_map = fw_map_full[legacy + native + fw_ver[0]]
     fw_regex = fw_map.get("fn-regex", fw_map_full.get("fn-regex"))
     # TODO please suggest an alternative to get tar.bz2 from img-suffix in here for "pod gw upgrade" command -
     #  why not simply use img-suffix, enc-suffix when they're provided?

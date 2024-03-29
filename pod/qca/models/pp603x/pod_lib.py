@@ -19,13 +19,9 @@ class PodLib(PodLibGeneric):
         "PH": "0x8260",
     }
 
-    get_connection_flows = PodLibGeneric.get_connection_flows_ecm
-
-    check_traffic_acceleration = PodLibGeneric.check_traffic_acceleration_ecm
-
     def get_region(self, **kwargs):
         # FW above 5.4.X has region entry in Wifi_Radio_State table, so start from there
-        table_check = super().get_region(override_region=False, **kwargs)
+        table_check = super().get_region(override_region=True, **kwargs)
         if table_check[0] == 0:
             return table_check
         response = self.run_command(
@@ -39,8 +35,6 @@ class PodLib(PodLibGeneric):
         return [0, cc_codes[0], ""]
 
     def set_region_three_radios_model(self, region, **kwargs):
-        if region == "EU":
-            region = "GB"
         return super().set_region_three_radios_model(region, **kwargs)
 
     def get_radio_temperature(self, radio_index, **kwargs):
@@ -49,7 +43,7 @@ class PodLib(PodLibGeneric):
             "hwmon214",
             "hwmon221",
         ]
-        if self.run_command(f"ls /sys/class/hwmon/{radio_sensor_map[radio_index]}/temp1_input")[0]:
+        if self.run_command(f"ls /sys/class/hwmon/{radio_sensor_map[radio_index]}/temp1_input", **kwargs)[0]:
             return super().get_radio_temperature(radio_index, **kwargs)
 
         ret = self.run_command(

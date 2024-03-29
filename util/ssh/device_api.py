@@ -79,16 +79,7 @@ class DeviceApi:
         Returns: (str) Device ID
 
         """
-        serial = None
-        devs = self.lib.config.get(device_type)
-        if not devs:
-            return None
-        for dev in devs:
-            if dev.get("name") != device_name:
-                continue
-            serial = dev.get("id")
-            break
-        return serial
+        return self.lib.device.config.get("id")
 
     def wait_available(self, timeout=120, **kwargs):
         response = self.lib.wait_available(timeout=timeout)

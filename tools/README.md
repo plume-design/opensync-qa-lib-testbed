@@ -75,9 +75,3 @@
 - Description: Tool for interacting with testbed switch
 - Usage: `switch {<cmd>|help} [args]`
   - (use `switch -h` to list available commands)
-
-### osrt_snapshot_decoder
-
-- Description: Tool for decoding .poss files
-- Usage: `osrt_snapshot_decoder {<file_path>|help} [args]`
-  - (use `osrt_snapshot_decoder -h` to list available commands)

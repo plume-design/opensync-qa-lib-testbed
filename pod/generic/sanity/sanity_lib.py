@@ -85,7 +85,7 @@ class SanityLib(object):
 
         # init interfaces
         for interface in interfaces:
-            if type(interfaces[interface]) is dict:
+            if isinstance(interfaces[interface], dict):
                 value = [name for iface, name in interfaces[interface].items() if name is not None]
             else:
                 value = interfaces[interface]
@@ -136,7 +136,7 @@ class SanityLib(object):
         """
         for row in self.output:
             if self.outstyle == "simple":
-                regex = re.compile("\033\[[0-9;]+m")  # noqa W605
+                regex = re.compile(r"\033\[[0-9;]+m")  # noqa W605
                 self.print_line("{0: >17}- {1: <25}:{2}".format(row[1], row[0], regex.sub("", row[2])))
             elif self.outstyle == "full":
                 if row[1] == "INFO":
@@ -609,7 +609,6 @@ class SanityLib(object):
                     table_name, "Warning", f"{band_name} Can not check country code - missing info from {table_name}"
                 )
                 continue
-            country_code = country_code.upper()
             self.regulatory_domains.append(country_code)
             # Reference value is first checked band
             if self.regulatory_domains and country_code not in self.regulatory_domains[0]:
@@ -630,7 +629,7 @@ class SanityLib(object):
             ]
             gw_regulatory_domains = list()
             for gw_band in gw_bands:
-                gw_country_code = self.get_country_code(self.gw_tables.get(table_name), gw_band).upper()
+                gw_country_code = self.get_country_code(self.gw_tables.get(table_name), gw_band)
                 if gw_country_code:
                     # (UK and GB) && (GB and EU) are equal
                     gw_country_code = (
@@ -651,7 +650,15 @@ class SanityLib(object):
 
     @staticmethod
     def get_country_code(wifi_radio_state_table, band_name):
-        region_map = {"0x37": "EU", "0x3a": "US", "0x8faf": "JP", "0x14": "CA", "E0": "EU"}
+        region_map = {
+            "0x37": "EU",
+            "0x3a": "US",
+            "0x16": "US",
+            "0x8faf": "JP",
+            "0x14": "CA",
+            "E0": "EU",
+            "US": "US",
+        }
         table_column = ovsdb.ovsdb_find_row(wifi_radio_state_table, "freq_band", band_name)
         if not table_column:
             return None
@@ -668,8 +675,11 @@ class SanityLib(object):
         if country_code.isdigit():
             country_code = region_map.get(hex(int(country_code)))
         else:
+            # Workaround for parsing US country code
+            if re.search(r"US/\d+", country_code):
+                country_code = "US"
             country_code = region_map.get(country_code) if region_map.get(country_code) else country_code
-        return country_code
+        return country_code.upper() if country_code else None
 
     def _ovsdb_sanity_check_wifi_vif_config_table(self):  # noqa
         config_tname = "Wifi_VIF_Config table"
@@ -1558,7 +1568,7 @@ class SanityLib(object):
         if "bluetoothMac" in inv_node_info and _get_mac_from_pmf_report("Bluetooth MAC address") != inv_node_info.get(
             "bluetoothMac", "NONE"
         ):
-            self._create_output("INVENTORY", "ERROR", f"Bluetooth MAC address does not match with inventory")
+            self._create_output("INVENTORY", "ERROR", "Bluetooth MAC address does not match with inventory")
             errs += 1
 
         return True if errs else False

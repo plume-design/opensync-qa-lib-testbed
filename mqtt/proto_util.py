@@ -10,6 +10,8 @@ from lib_testbed.generic.mqtt.wifi_blaster_pb2 import WifiBlastResult
 from lib_testbed.generic.mqtt.adv_data_typing_pb2 import AdtReport
 from lib_testbed.generic.mqtt.lte_info_pb2 import LteInfoReport
 from lib_testbed.generic.mqtt.dpi_stats_pb2 import DpiStatsReport
+from lib_testbed.generic.mqtt.thread_network_info_pb2 import ThreadNetworkScan
+from lib_testbed.generic.mqtt.veego_app_qoe_pb2 import AppQoeReport
 
 
 PROTO_DECODER_MAP = {
@@ -29,6 +31,8 @@ PROTO_DECODER_MAP = {
     "WifiBlaster/": WifiBlastResult(),
     "LteStats/": LteInfoReport(),
     "DpiStats/": DpiStatsReport(),
+    "ThreadNetwork/": ThreadNetworkScan(),
+    "QoE/app_3rd_party/": AppQoeReport(),
 }
 
 

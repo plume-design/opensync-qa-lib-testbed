@@ -13,7 +13,7 @@ class IperfServerLib(ABC):
         pass
 
     @abstractmethod
-    def get_result_from_server(self) -> dict:
+    def get_result_from_server(self, skip_exception: bool = False) -> dict:
         pass
 
     @abstractmethod
@@ -89,6 +89,10 @@ class IperfClientLib(ABC):
     def parse_iperf_results(self, iperf_results: str) -> dict:
         pass
 
+    @abstractmethod
+    def flush_iperf_result(self):
+        pass
+
 
 # Interval (-i) granularity must be an integer, so we ignore everything after the dot in start/stop field.
 # Some iperf2 versions report some small offset for those fields, and do that inconsistently (e.g. report
@@ -147,35 +151,46 @@ class IperfCommon:
     def get_iperf2_results(self, iperf_results: str) -> dict:
         parsed_result = dict(intervals=[])
         intervals = {}
+        flows_ids = []
         for line in iperf_results.splitlines():
             if re.findall(r"local .* port .*", line):
                 if "connected" not in line:
                     log.error("Iperf did not connect to server")
                     parsed_result.update({"error": "Iperf did not connect to server"})
                     break
-                elif intervals:
-                    # Sometimes iperf2 server gets confused and thinks that a second client has connected,
-                    # and then outputs a bunch of intervals with zeros. Stop parsing at second connect.
-                    break
+                elif "connected" in line and not intervals:
+                    # Collect all iperf2 flow IDs which should be considered during parsing results.
+                    # Sometimes in the middle of the traffic run, iperf2 server creates additional
+                    # flow with unexpected results. Skip this results.
+                    if flow_id := re.search(r"\[.*\]", line):
+                        flows_ids.append(flow_id.group())
+                    continue
             if "0.0- 0.0 sec" in line:
                 continue
+
             match = _IPERF_2_RESULT.match(line)
-            if match is not None:
-                limits = float(match["start"]), float(match["end"])
-                interval = intervals.setdefault(limits, {"streams": []})
-                res = {}
-                for datapoint in "start", "end", "bytes":
-                    res[datapoint] = float(match[datapoint])
-                bandwidth = float(match["bandwidth"])
-                if match["unit"] == "Bytes":
-                    res["bits_per_second"] = bandwidth * 8
-                else:
-                    res["bits_per_second"] = bandwidth
-                if match["sum"]:
-                    interval["sum"] = res
-                else:
-                    res["socket"] = match["socket"]
-                    interval["streams"].append(res)
+            if not match:
+                continue
+
+            flow_id = re.search(r"\[.*\]", line).group()
+            if not match["sum"] and flow_id not in flows_ids:
+                continue
+
+            limits = float(match["start"]), float(match["end"])
+            interval = intervals.setdefault(limits, {"streams": []})
+            res = {}
+            for datapoint in "start", "end", "bytes":
+                res[datapoint] = float(match[datapoint])
+            bandwidth = float(match["bandwidth"])
+            if match["unit"] == "Bytes":
+                res["bits_per_second"] = bandwidth * 8
+            else:
+                res["bits_per_second"] = bandwidth
+            if match["sum"]:
+                interval["sum"] = res
+            else:
+                res["socket"] = match["socket"]
+                interval["streams"].append(res)
         # Summary interval "0.0-10.0" needs to come last, after regular interval "9.0-10.0".
         for _, interval in sorted(intervals.items(), key=lambda item: (item[0][1], -item[0][0])):
             # [SUM] line gets omitted when running with only one stream in parallel.

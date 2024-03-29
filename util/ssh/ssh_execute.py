@@ -69,6 +69,9 @@ class SshExecute:
             command = f"PATH=$PATH:{self.ext_path}; {command}"
         return self.execute(command, *args, **kwargs)
 
+    def recover(self):
+        raise NotImplementedError
+
     @staticmethod
     def merge_result(old_result, new_result):
         merged_result = [0, "", ""]
@@ -183,6 +186,11 @@ class SshExecute:
             remote_command_dict[self.device.name] = remote_command_dict[self.device.name].replace(
                 " -o LogLevel=quiet", ""
             )
+            try:
+                log.warning("Trying to recover SSH with the %s device" % self.name)
+                self.recover()
+            except NotImplementedError:
+                pass
             log.warning(f"Retrying latest command: {command}")
             result_dict = self.execute_cmd(remote_command_dict, **new_kwargs)
         if not skip_logging:
@@ -249,3 +257,21 @@ class SshCmd(SshExecute):
         """Copy a file onto device(s)"""
         command = self.device.scp_cmd(file_name, f"{{DEST}}:{location}")
         return self.run_command(command, **kwargs, timeout=timeout, skip_remote=True)
+
+    def put_dir(self, directory, location, **kwargs):
+        """
+        Put for on client(s)
+        Args:
+            directory: (str) local path on computer
+            location: (str) remote path on client
+            **kwargs:
+
+        Returns: (list) [[(int) ret, (str) stdout, (str) stderr]]
+
+        """
+        command = (
+            f"cd {directory}; tar -cf - *  |"
+            + self.device.get_remote_cmd(f"mkdir -p {location}; cd {location}; tar -xof -")
+            + " 2>/dev/null"
+        )
+        return self.run_command(command, **kwargs, timeout=5 * 60, skip_remote=True)

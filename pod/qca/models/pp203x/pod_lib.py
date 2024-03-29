@@ -49,3 +49,69 @@ class PodLib(PodLibGeneric):
             if self.DFS_REGION_MAP[region].lower() == rgm:
                 return [0, region, ""]
         return [1, "", f"Cannot find proper region in DFS_REGION_MAP for {rgm}"]
+
+    def check_traffic_acceleration(
+        self, ip_address, expected_protocol=6, multicast=False, flow_count=1, flex=False, map_t=False, **kwargs
+    ):
+        """
+        Check traffic was accelerated
+        Args:
+            ip_address: (list) IP addresses to check
+            expected_protocol: (int) expected protocol id. 6 for TCP, 17 for UDP
+            multicast: (bool) True to check for acceleration of multicast traffic
+            flow_count: (int) minimum number of expected accelerated flows (connections)
+            flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
+            **kwargs:
+
+        Returns: bool()
+
+        """
+        # On QSDK 11.00 and newer check for flows in both ECM and SFE
+        if self.qsdk_version >= 0x1100:
+            ecm_ok = self.check_traffic_acceleration_ecm(
+                ip_address,
+                expected_protocol=expected_protocol,
+                multicast=multicast,
+                flow_count=flow_count,
+                flex=flex,
+                map_t=map_t,
+                dumps=3,
+                **kwargs,
+            )
+            if not ecm_ok:
+                return False
+        return self.check_traffic_acceleration_sfe(
+            ip_address,
+            expected_protocol=expected_protocol,
+            multicast=multicast,
+            flow_count=flow_count,
+            flex=flex,
+            map_t=map_t,
+            dumps=3,
+            **kwargs,
+        )
+
+    def run_traffic_acceleration_monitor(self, samples: int = 5, interval: int = 5, delay: int = 20, **kwargs) -> dict:
+        """
+        Start making traffic acceleration statistics dumps on the pod in the background
+        Args:
+            samples: (int) number of statistic dumps
+            interval: (int) seconds apart
+            delay: (int) seconds after the method is called.
+            **kwargs:
+
+        Returns: Return (dict) dict(sfe_dump=dict(dump_file="", pid="")) Acceleration statistics dumps details.
+
+        """
+        traffic_acceleration_monitor = dict()
+        # On QSDK 11.00 and newer check for flows in both ECM and SFE
+        if self.qsdk_version >= 0x1100:
+            traffic_acceleration_monitor |= self._run_traffic_acceleration_monitor(
+                acc_name="ecm", acc_tool="ecm_dump.sh", samples=samples, interval=interval, delay=delay
+            )
+
+        traffic_acceleration_monitor |= self._run_traffic_acceleration_monitor(
+            acc_name="sfe", acc_tool="sfe_dump", samples=samples, interval=interval, delay=delay
+        )
+        return traffic_acceleration_monitor

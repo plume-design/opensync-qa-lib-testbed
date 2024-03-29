@@ -4,7 +4,6 @@ import re
 import json
 import configparser
 import logging
-from copy import deepcopy
 
 from filelock import FileLock
 from allure_pytest.listener import AllureListener
@@ -13,7 +12,7 @@ from allure_commons import hookimpl
 from allure_commons.types import AttachmentType
 from allure_commons.model2 import Parameter, Label
 from allure_commons.utils import represent, SafeFormatter
-from lib_testbed.generic.util.common import BASE_DIR
+from lib_testbed.generic.util.common import BASE_DIR, CACHE_DIR, get_modified_params
 from lib_testbed.generic.util.common import is_jenkins, SKIP_RESULT
 from lib_testbed.generic.util.logger import log, LOGGER_NAME, AllureLogger
 
@@ -26,8 +25,11 @@ logging.getLogger("filelock").setLevel(logging.ERROR)
 class AllureUtil:
     def __init__(self, config):
         self.config = config
-        if "config_name" in config.option and config.option.config_name:
-            self.section = config.option.config_name
+        self.option_config = config.option.config_name if "config_name" in config.option else None
+        if location_file := getattr(config, "tb_config", {}).get("location_file"):
+            self.section = os.path.basename(location_file).split(".")[0]
+        elif self.option_config:
+            self.section = self.option_config
         else:
             self.section = DEFAULT_SECTION
         self.lock_timeout = 120
@@ -47,7 +49,7 @@ class AllureUtil:
             return os.path.join(BASE_DIR, "allure-results")
         report_dir = self.config.option.allure_report_dir
         if not report_dir:
-            report_dir = "/tmp/automation/allure-results"
+            report_dir = "%s/allure-results" % CACHE_DIR
         return report_dir
 
     def _get_properties_path(self):
@@ -72,6 +74,7 @@ class AllureUtil:
         config_parser.clear()
         config_parser.add_section(self.section)
         self._write_config(config_parser)
+        return config_parser
 
     def init_categories(self):
         categories_path = os.path.join(self._get_results_dir(), "categories.json")
@@ -91,7 +94,7 @@ class AllureUtil:
     def _set_config(self, name, value):
         config_parser = self._init_and_read_config()
         try:
-            config_parser.set(self.section, name, value)
+            config_parser.set(self.section, self.get_option_name(name), value)
         except configparser.NoSectionError as e:
             log.warning(f"{e}, skip setting config: {name}")
             return
@@ -99,22 +102,24 @@ class AllureUtil:
 
     def _init_and_read_config(self):
         config_parser = configparser.ConfigParser()
-        self._read_config(config_parser)
         try:
-            if self.section == DEFAULT_SECTION:
-                sections = config_parser.sections()
-                if sections:
-                    self.section = sections[0]
+            self._read_config(config_parser)
+            sections = config_parser.sections()
+            if self.section == DEFAULT_SECTION and sections:
+                self.section = sections[0]
+            if self.section not in sections:
+                config_parser.add_section(self.section)
+                self._write_config(config_parser)
             config_parser.items(self.section)
         except Exception:
-            log.warning("Initialize allure environment.properties")
-            self._init()
+            log.exception("Recreate allure file for environment.properties")
+            config_parser = self._init()
         return config_parser
 
     def _get_environment(self, name):
         config_parser = self._init_and_read_config()
         try:
-            value = config_parser.get(self.section, name)
+            value = config_parser.get(self.section, self.get_option_name(name))
         except configparser.NoOptionError:
             value = None
         except configparser.NoSectionError:
@@ -129,22 +134,28 @@ class AllureUtil:
             log.warning(f"{e}, skip getting environment variables")
             return []
 
+    def get_option_name(self, name):
+        if not self.option_config or "," not in self.option_config or self.section not in self.option_config.split(","):
+            return name
+        config_idx = self.option_config.split(",").index(self.section)
+        return f"{name}_{config_idx}"
+
     def get_environment(self, name):
         with FileLock(self._get_lock_file(), timeout=self.lock_timeout):
             config_parser = self._init_and_read_config()
             try:
-                value = config_parser.get(self.section, name)
+                value = config_parser.get(self.section, self.get_option_name(name))
             except configparser.NoOptionError:
                 value = None
             except configparser.NoSectionError:
                 value = None
             return value
 
-    def get_environments(self):
+    def get_environments(self, all_sections=False):
         with FileLock(self._get_lock_file(), timeout=self.lock_timeout):
             config_parser = self._init_and_read_config()
             try:
-                return list(config_parser.items(self.section))
+                return list(config_parser.items()) if all_sections else list(config_parser.items(self.section))
             except configparser.NoSectionError as e:
                 log.warning(f"{e}, skip getting environment variables")
                 return []
@@ -168,7 +179,7 @@ class AllureUtil:
         with FileLock(self._get_lock_file(), timeout=self.lock_timeout):
             config_parser = self._init_and_read_config()
             try:
-                config_parser.remove_option(self.section, name)
+                config_parser.remove_option(self.section, self.get_option_name(name))
             except configparser.NoSectionError:
                 log.warning(f"No {self.section} section in allure environment")
             self._write_config(config_parser)
@@ -239,6 +250,25 @@ class AllureUtil:
                 return env.split(": ")[1]
         return None
 
+    @staticmethod
+    def parse_allure_env(allure_env: [str, str], values_to_parse: list = None) -> str:
+        """Parse all values from allure environment to readable text.
+        If specified values_to_parse consider only provided value names."""
+        env_name = allure_env[0]
+        env_values = allure_env[1].split("<br>")
+        parsed_values = list()
+        for env_value in env_values:
+            if (
+                env_value.startswith("file:")
+                or values_to_parse
+                and not any(value_to_parse in env_value for value_to_parse in values_to_parse)
+            ):
+                continue
+            parsed_values.append(re.sub(r"\<.*?\>", "", env_value))
+        allure_env_values = "\t".join(parsed_values)
+        parsed_allure_env = f"{env_name}: {allure_env_values}"
+        return parsed_allure_env
+
 
 class MyAllureListener(AllureListener):
     import pytest
@@ -266,7 +296,7 @@ class MyAllureListener(AllureListener):
     @hookimpl
     def stop_step(self, uuid, exc_type, exc_val, exc_tb):
         logger = logging.getLogger(LOGGER_NAME)
-        handler = next(l for l in logger.handlers if type(l) is AllureLogger)
+        handler = next(h for h in logger.handlers if type(h) is AllureLogger)
         self.attach_data(
             handler.get_logs_and_clear_buffer(),
             name="log",
@@ -303,52 +333,13 @@ class MyAllureListener(AllureListener):
             self.test_result_parameters[name] = value
 
     @staticmethod
-    def get_modified_params(item):
-        params = deepcopy(item.callspec.params) if hasattr(item, "callspec") else {}
-        id_list = deepcopy(item.callspec._idlist) if hasattr(item, "callspec") else []
-        excluded_params = {}
-        mod_params = deepcopy(params)
-        if len(id_list) != len(params):
-            parametrized_markers = list(item.iter_markers(name="parametrize"))
-            for param_key, param_value in params.items():
-                if param_key in excluded_params:
-                    continue
-                markers = next(
-                    (
-                        markers
-                        for markers in parametrized_markers
-                        if (param_key == markers.args[0] or param_key in markers.args[0])
-                    ),
-                    [],
-                )
-                # TODO: handle also parametrization as @pytest.mark.parametrize(param_1, param_2, [(1, 2)])
-                if markers and (
-                    marker := next(
-                        (
-                            marker
-                            for marker in markers.args[1]
-                            if hasattr(marker, "values") and param_value in marker.values
-                        ),
-                        None,
-                    )
-                ):
-                    param_names = markers.args[0].split(", ")
-                    if len(marker.values) > 1 and len(param_names) > 1:
-                        for i, marker_name in enumerate(param_names[1:], start=1):
-                            excluded_params[marker_name] = marker.values[i]
-            for param in excluded_params:
-                mod_params.pop(param)
-            if len(id_list) != len(mod_params):
-                log.warning(f"Unexpected id_list: {id_list}, params: {params}")
-                mod_params = {}
-        for i, (param_key, param_value) in enumerate(mod_params.items()):
-            params[param_key] = id_list[i]
-        return params, excluded_params
-
-    @staticmethod
     def get_allure_title(item):
-        params, _ = MyAllureListener.get_modified_params(item)
-        if title := allure_title(item):
+        title = allure_title(item)
+        if not title:
+            if mark := item.get_closest_marker("qase_title"):
+                title = mark.kwargs.get("title")
+        if title:
+            params = get_modified_params(item)
             # Override allure title implementation to use parametrize id instead of parametrize value
             return SafeFormatter().format(title, **{**item.funcargs, **params})
         else:
@@ -362,13 +353,10 @@ class MyAllureListener(AllureListener):
         uuid = self._cache.get(item.nodeid)
         test_result = self.allure_logger.get_test(uuid)
 
-        params, excluded_params = self.get_modified_params(item)
+        params = get_modified_params(item)
         for i, (param_key, param_value) in enumerate(params.items()):
             if test_result_param := next((param for param in test_result.parameters if param.name == param_key), None):
                 test_result_param.value = represent(param_value)
-        for i, (param_key, param_value) in enumerate(excluded_params.items()):
-            if test_result_param := next((param for param in test_result.parameters if param.name == param_key), None):
-                test_result.parameters.remove(test_result_param)
 
         if title := self.get_allure_title(item):
             # Override allure title implementation to use parametrize id instead of parametrize value
@@ -455,7 +443,7 @@ class DummyConfig:
             if is_jenkins():
                 self.allure_report_dir = os.path.join(BASE_DIR, "allure-results")
             else:
-                self.allure_report_dir = "/tmp/automation/allure-results"
+                self.allure_report_dir = "%s/allure-results" % CACHE_DIR
             self.allure_keep_env = True
             self._current_idx = 0
             self._option_names = [name for name in list(set(dir(self))) if not name.startswith("_")]

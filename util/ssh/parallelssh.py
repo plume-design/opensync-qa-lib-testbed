@@ -16,7 +16,7 @@ from lib_testbed.generic.util.ssh.screen.screen import parse_screen_output
 from lib_testbed.generic.util.ssh.expect import ExpectHostInfo
 from lib_testbed.generic.util.ssh.cc_rev_ssh import CcReverseSshHostInfo
 from lib_testbed.generic.util.ssh.common import EXECUTE_CMD_TIMEOUT
-from lib_testbed.generic.util.common import BASE_DIR
+from lib_testbed.generic.util.common import BASE_DIR, CACHE_DIR
 
 DEFAULT_SSH_PORT = 22
 DEFAULT_SSH_USER = "root"
@@ -136,14 +136,14 @@ class SSHHostInfo(HostInfo):
             # Darwin has no support for timeout command, add timeout bash script to the path
             timeout_sh = os.path.join(ssh_bin_path, "timeout")
             with open(timeout_sh, "w") as f:
-                f.write("perl -e 'alarm shift; exec @ARGV' \"$@\";".format(config_ssh))
+                f.write("perl -e 'alarm shift; exec @ARGV' \"$@\";".format())
             st = os.stat(timeout_sh)
             os.chmod(timeout_sh, st.st_mode | stat.S_IEXEC)
         path = f'PATH="{ssh_bin_path}:$PATH"'
         path = f"({path} && "
         return path
 
-    def get_ssh_options(self, stdio_forward, forward_agent):
+    def get_ssh_options(self, stdio_forward, forward_agent, override_config_path=True):
         options = {}
         if self.port != DEFAULT_SSH_PORT:
             options["port"] = f" -p{self.port}"
@@ -161,7 +161,7 @@ class SSHHostInfo(HostInfo):
             options["sshpass"] = ""
 
         options["multiplex"] = " -o ControlMaster=no"
-        if not self.chained:
+        if not self.chained and override_config_path:
             if not DISABLE_SSH_MUX and self.name not in ["host"]:
                 # TODO: Resolve problem for host with mux (controlpath is used from config/ssh/config)
                 options["multiplex"] = self.get_multiplex_command()
@@ -186,13 +186,13 @@ class SSHHostInfo(HostInfo):
 
         return options
 
-    def command_wrapper(self, command, stdio_forward=False):
+    def command_wrapper(self, command, stdio_forward=False, override_config_path=True):
         if command:
             command = quote(command)
         if self.netns:
             command = f"sudo ip netns exec {self.netns} {command}"
         proxy_command = self.get_proxy_command(stdio_forward=True)
-        options = self.get_ssh_options(stdio_forward, forward_agent=True)
+        options = self.get_ssh_options(stdio_forward, forward_agent=True, override_config_path=override_config_path)
 
         new_cmd = (
             f"{options['path']}{options['sshpass']}ssh "
@@ -217,7 +217,7 @@ class SSHHostInfo(HostInfo):
         options = self.get_ssh_options(stdio_forward=False, forward_agent=False)
 
         new_cmd = (
-            f"{options['path']}{options['sshpass']}scp -r "
+            f"{options['path']}{options['sshpass']}scp -r -O "
             f"{options['port'].replace('p', 'P')}"
             f"{options['keys']}"
             f"{options['multiplex']}"
@@ -261,8 +261,8 @@ def execute_command(dev_name, cmd, stdin, timeout, **kwargs):  # noqa:C901
 
     thread_id = threading.current_thread().ident
     # make sure directory exists
-    os.makedirs("/tmp/automation", exist_ok=True)
-    file_name = f"/tmp/automation/stderr_{thread_id}"
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    file_name = f"{CACHE_DIR}/stderr_{thread_id}"
     stderr = None
     combine_std = skip_logging = False
     if kwargs:
@@ -358,13 +358,13 @@ def execute_commands(command_dict, timeout=EXECUTE_CMD_TIMEOUT, **kwargs):
         stdin = "".join(stdin)
     for node, command in command_dict.items():
         retval, stdout, stderr = execute_command(dev_name=node, cmd=command, stdin=stdin, timeout=timeout, **kwargs)
-        retval = retval.decode() if type(retval) is bytes else retval
-        if type(stdout) is bytes:
+        retval = retval.decode() if isinstance(retval, bytes) else retval
+        if isinstance(stdout, bytes):
             try:
                 stdout = stdout.decode()
             except UnicodeDecodeError:
                 pass
-        stderr = stderr.decode() if type(stderr) is bytes else stderr
+        stderr = stderr.decode() if isinstance(stderr, bytes) else stderr
         if "sshpass: not found" in stderr:
             log.error(stderr)
         results[node] = [retval, stdout, stderr]

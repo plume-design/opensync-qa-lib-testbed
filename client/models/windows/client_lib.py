@@ -597,9 +597,11 @@ class ClientLib(ClientLibGeneric):
         return self.strip_stdout_result(self.run_command(cmd))[1]
 
     def _create_windows_wifi_profile(self, ssid, psk, key_mgmt):
+        # Remove all existed windows network profiles to be sure the client won't be associated to wrong network.
+        self.run_command("netsh wlan delete profile name=* i=*")
         cmd = (
             f'$PW = ConvertTo-SecureString "{psk}" -AsPlainText -Force; '
-            f"Set-WiFiProfile -ProfileName {ssid} -ConnectionMode manual "
+            f"Set-WiFiProfile -ProfileName {ssid} -ConnectionMode auto "
             f"-Authentication {key_mgmt} "
             f"-Password $PW -Encryption AES"
         )

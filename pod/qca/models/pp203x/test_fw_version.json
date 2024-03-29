@@ -9,5 +9,6 @@
   "capabilities_released_fw": "2.4.3-73-g32935a2-dev-debug",
   "wano_persistent_storage": "3.4.1-97-gae574c-dev-debug",
   "wano_ovsdb_storage": "4.2.0-72-gf9f067-dev-debug",
-  "ltm_not_support_fw": "5.4.0-29-g29ca7c-dev-debug"
+  "ltm_not_support_fw": "5.4.0-29-g29ca7c-dev-debug",
+  "mac_prioritization_fw": "3.4.1-88-g852841-dev-debug"
 }

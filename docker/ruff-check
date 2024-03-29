@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+if [ -z "${OPENSYNC_ROOT}" ]; then
+    OPENSYNC_ROOT="./"
+fi
+
+ruff format --config="$OPENSYNC_ROOT/pyproject.toml" $(git diff --name-only --diff-filter=d  HEAD~10 | grep .py)

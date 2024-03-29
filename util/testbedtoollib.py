@@ -141,7 +141,6 @@ class TestBedToolLib:
             "sanity",
             "server",
             "switch",
-            "osrt_snapshot_decoder",
         ]
         tools_whitelist = [
             tool
@@ -200,16 +199,14 @@ class TestBedToolLib:
 
         log.warning("Restoring testbed and its location to default state")
 
-        # Consider uprise testbeds based on USTB only
-        if ("UPRISE" in self.tb_config.get("capabilities", [])) and (
-            self.tb_config["ssh_gateway"].get("location_file")
-        ):
-            from lib.util.uprisetoollib import UpRiseToolLib
+        # Consider MDU testbeds based on USTB only
+        if ("MDU" in self.tb_config.get("capabilities", [])) and (self.tb_config["ssh_gateway"].get("location_file")):
+            from lib.util.mdutoollib import MduToolLib
 
-            uprise_tool = UpRiseToolLib(config=self.tb_config)
+            mdu_tool = MduToolLib(config=self.tb_config)
             ustb_name = config.get_location_name(self.tb_config)
-            log.warning("Moving UpRise location back to HomePass")
-            uprise_tool.move_to_homepass(cfg_name=ustb_name)
+            log.warning("Moving MDU location back to HomePass")
+            mdu_tool.move_to_homepass(cfg_name=ustb_name)
             _print_state("Successful")
             return
 

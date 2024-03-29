@@ -104,12 +104,12 @@ class DeviceSsh:
                 )
             return parallelssh.SSHHostInfo(host, user, port, chained_ssh, netns, sshpass, name=self.name, opts=opts_str)
 
-    def get_remote_cmd(self, command, skip_ns=False):
+    def get_remote_cmd(self, command, skip_ns=False, override_config_path=True):
         # here different wrappers can be added to command, like ssh, chained ssh, uart, expect
         host_info = self._parse_host_info()
         if skip_ns and getattr(host_info, "netns", None):
             host_info.netns = ""
-        return host_info.command_wrapper(command)
+        return host_info.command_wrapper(command, override_config_path=override_config_path)
 
     def get_last_hop_cmd(self, command):
         host_info = self._parse_host_info()

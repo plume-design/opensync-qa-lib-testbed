@@ -7,13 +7,16 @@ import random
 import re
 from typing import TypedDict
 from pathlib import Path
+
+import requests
 import yaml
 import subprocess
 from cryptography.fernet import Fernet
+from lib_testbed.generic.util import local_storage
 from lib_testbed.generic.util.common import DeviceCommon
 from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from lib_testbed.generic.util.logger import log
-from lib_testbed.generic.util.common import BASE_DIR
+from lib_testbed.generic.util.common import BASE_DIR, CACHE_DIR
 
 CONFIG_DIR = "config"
 LOCATIONS_DIR = "locations"
@@ -21,7 +24,7 @@ LOBS_DIR = "labs"
 DEPLOYMENTS_DIR = "deployments"
 SPHERES_DIR = "spheres"
 MISCS_DIR = "miscs"
-TOKEN_DIR = "/tmp/automation/tokens"
+TOKEN_DIR = CACHE_DIR / "tokens"
 MODEL_PROPERTIES_DIR = "model_properties"
 MODEL_INTERNAL_DIR = "internal"
 MODEL_REFERENCE_DIR = "reference"
@@ -38,6 +41,7 @@ IPTV_HOST_CLIENT_NAME = "iptv_host"
 S2S_VPN_HOST_CLIENT_NAME = "s2s_vpn_host"
 P2S_VPN_HOST_CLIENT_NAME = "p2s_vpn_host"
 MOTION_HOST_CLIENT_NAME = "motion_host"
+WAG_HOST_CLIENT_NAME = "wag_host"
 IPERF_CLIENT_TYPE = "iperf_host"
 FIXED_HOST_CLIENTS = [
     LOCAL_HOST_CLIENT_NAME,
@@ -46,6 +50,7 @@ FIXED_HOST_CLIENTS = [
     S2S_VPN_HOST_CLIENT_NAME,
     P2S_VPN_HOST_CLIENT_NAME,
     MOTION_HOST_CLIENT_NAME,
+    WAG_HOST_CLIENT_NAME,
 ]
 RANDOM_KEY = b"GZWKEhHGNopxRdOHS4H4IyKhLQ8lwnyU7vRLrM3sebY="
 
@@ -187,6 +192,7 @@ def get_deployment(config, default_deployment=None):
 
     """
     deployment_name = config.get(TBCFG_PROFILE)
+    serial = config["Nodes"][0]["id"]
     if not deployment_name:
         raise OpenSyncException("Missing profile setting in config file")
     if deployment_name == "auto":
@@ -196,10 +202,21 @@ def get_deployment(config, default_deployment=None):
             raise OpenSyncException(
                 "Inventory API does not exist", "Change auto profile in location config to deployment name"
             )
-        conf = load_file(find_default_deployment_file(config))
-        inv = inventory.Inventory.fromurl(conf["inventory_url"], conf["inv_user"], conf["inv_pwd"])
-        serial = config["Nodes"][0]["id"]
-        deployment_name = inv.get_node(serial).get("deployment")
+        if local_storage.inv_available:
+            if serial in local_storage.node_deployment_cache:
+                deployment_name = local_storage.node_deployment_cache[serial]
+            else:
+                conf = load_file(find_default_deployment_file(config))
+                inv = inventory.Inventory.fromurl(conf["inventory_url"], conf["inv_user"], conf["inv_pwd"])
+                try:
+                    deployment_name = inv.get_node(serial).get("deployment")
+                    local_storage.node_deployment_cache[serial] = deployment_name
+                except requests.exceptions.ConnectTimeout:
+                    local_storage.inv_available = False
+                    # deployment is auto and cannot be discovered from Inventory: enter the if below
+                    deployment_name = None
+        else:
+            deployment_name = None
         if not deployment_name:
             if default_deployment:
                 deployment_name = default_deployment
@@ -215,7 +232,7 @@ def get_misc_files():
         config_dir = Path(get_config_dir())
         miscs_dir = config_dir.joinpath(MISCS_DIR)
         if not miscs_dir.is_dir():
-            miscs_dir = min(Path(BASE_DIR).glob(f"**/{MISCS_DIR}"))
+            miscs_dir = min(Path(BASE_DIR).glob(f"**/{MISCS_DIR}"), default=miscs_dir)
         misc_files = [file.as_posix() for file in miscs_dir.iterdir()]
         return misc_files
     except FileNotFoundError:
@@ -234,7 +251,9 @@ def attach_capabilities_cfg_to_nodes(config):
         # capabilities can be also overwritten in the location config
         capab = get_model_capabilities(node["model"])
         node["capabilities"] = dict_deep_update(capab, node.get("capabilities", {}))
-        node["model_org"] = node["model"]
+        # Don't overwrite model_org when the key already exists
+        if not node.get("model_org"):
+            node["model_org"] = node["model"]
         node["model"] = DeviceCommon.convert_model_name(node["model_org"])
         update_device_host_cfg(device_config=node, capabilities_config=node["capabilities"])
 
@@ -446,28 +465,28 @@ def load_tb_config(  # noqa: C901
         if include:
             config = merge(config, include)
 
-    if not config.get("email") and "UPRISE" not in config.get("capabilities", []):
+    if not config.get("email") and "MDU" not in config.get("capabilities", []):
         config["email"] = config.get("default_email")
         config["password"] = config.get("default_password")
         if "user_name" not in config:
             config["user_name"] = config.get("default_user_name", "")
 
-    update_uprise_config(config=config)
+    update_mdu_config(config=config)
     init_fixed_host_clients(tb_config=config)
 
     return config
 
 
-def update_uprise_config(config):
-    if "UPRISE" not in config.get("capabilities", []):
+def update_mdu_config(config):
+    if "MDU" not in config.get("capabilities", []):
         return
     for location_cfg in config["locations"]:
         # Update locations according to used nodes
-        location_cfg["Nodes"] = get_uprise_location_nodes(base_config=config, uprise_loc_cfg=location_cfg)
+        location_cfg["Nodes"] = get_mdu_location_nodes(base_config=config, mdu_loc_cfg=location_cfg)
         # Update locations according to used clients
-        location_cfg["Clients"] = get_uprise_location_clients(base_config=config, uprise_loc_cfg=location_cfg)
+        location_cfg["Clients"] = get_mdu_location_clients(base_config=config, mdu_loc_cfg=location_cfg)
         # Update locations according to default property
-        location_cfg["PropertyConfig"] = get_uprise_location_property(base_config=config, uprise_loc_cfg=location_cfg)
+        location_cfg["PropertyConfig"] = get_mdu_location_property(base_config=config, mdu_loc_cfg=location_cfg)
 
 
 def init_fixed_host_clients(tb_config):
@@ -494,7 +513,10 @@ def init_fixed_host_clients(tb_config):
 
     if not any(client for client in tb_config["Clients"] if client.get("name") == MOTION_HOST_CLIENT_NAME):
         turntable_host = tb_config.get(MOTION_HOST_CLIENT_NAME, ssh_gateway)
-        tb_config["Clients"].append(_generate_remote_config(turntable_host, MOTION_HOST_CLIENT_NAME, "rpi"))
+        tb_config["Clients"].append(_generate_remote_config(turntable_host, MOTION_HOST_CLIENT_NAME, "rpi_server"))
+
+    if not any(client for client in tb_config["Clients"] if client.get("name") == WAG_HOST_CLIENT_NAME):
+        tb_config["Clients"].append(_generate_host_config(ssh_gateway, WAG_HOST_CLIENT_NAME, "wag"))
 
     if not next(filter(lambda client_cfg: client_cfg["name"] == REMOTE_HOST_CLIENT_NAME, tb_config["Clients"]), None):
         remote_host = tb_config.get("iperf3_check")
@@ -521,11 +543,18 @@ def _generate_host_config(ssh_gateway_config, client_name, namespace_name=None, 
 
 def _generate_remote_config(remote_host_config, client_name, default_type):
     client_type = remote_host_config.get("type", default_type)
+    client_cfg = get_model_capabilities(client_type, device_type="client")
+    ssh_gateway = {
+        "user": client_cfg.get("username"),
+        "pass": client_cfg.get("password"),
+    }
+    ssh_gateway.update(remote_host_config)
     host_configuration = {
         "name": client_name,
-        "ssh_gateway": remote_host_config,
+        "ssh_gateway": ssh_gateway,
         "type": client_type,
         "hostname": remote_host_config.get("hostname"),
+        "capabilities": client_cfg,
         IPERF_CLIENT_TYPE: False,
     }
     return host_configuration
@@ -542,36 +571,36 @@ def set_iperf_host(tb_config):
     iperf_client_cfg[IPERF_CLIENT_TYPE] = True
 
 
-def get_uprise_location_nodes(base_config, uprise_loc_cfg):
+def get_mdu_location_nodes(base_config, mdu_loc_cfg):
     location_nodes = list()
     for node in base_config["Nodes"]:
-        if node["default_location"] != uprise_loc_cfg["user_name"]:
+        if node["default_location"] != mdu_loc_cfg["user_name"]:
             continue
         location_nodes.append(node)
     return location_nodes
 
 
-def get_uprise_location_clients(base_config, uprise_loc_cfg):
+def get_mdu_location_clients(base_config, mdu_loc_cfg):
     location_clients = list()
     for client in base_config["Clients"]:
-        if client["default_location"] != uprise_loc_cfg["user_name"]:
+        if client["default_location"] != mdu_loc_cfg["user_name"]:
             continue
         location_clients.append(client)
     return location_clients
 
 
-def get_uprise_location_property(base_config, uprise_loc_cfg):
-    default_uprise_property = dict()
-    for uprise_property in base_config["properties"]:
-        if uprise_property["property_name"] != uprise_loc_cfg["default_property"]:
+def get_mdu_location_property(base_config, mdu_loc_cfg):
+    default_mdu_property = dict()
+    for mdu_property in base_config["properties"]:
+        if mdu_property["property_name"] != mdu_loc_cfg["default_property"]:
             continue
-        default_uprise_property = uprise_property
+        default_mdu_property = mdu_property
         break
-    return default_uprise_property
+    return default_mdu_property
 
 
 def get_location_name(config):
-    # USTB based uprise config
+    # MDU location based on USTB config
     if location_file := config.get("ssh_gateway", {}).get("location_file"):
         return os.path.basename(location_file).split(".")[0]
     elif location_file := config.get("location_file"):
@@ -608,14 +637,15 @@ def get_model_capabilities(model, device_type="node"):
         band = "2.4G" if band == "24g" else band.upper()
         supported_bands.append(band)
     capab["supported_bands"] = supported_bands
-    # in case of regex signs in bhaul names copy key as re_*
-    backhaul_ap_24g = list(capab["interfaces"]["backhaul_ap"].values())[0]
-    if backhaul_ap_24g is not None and any([char in backhaul_ap_24g for char in ["(", ")", "?", "*"]]):
-        capab["interfaces"]["re_backhaul_ap"] = capab["interfaces"]["backhaul_ap"].copy()
-        for band, mode in capab["interfaces"]["backhaul_ap"].items():
-            if mode is None:
-                continue
-            capab["interfaces"]["backhaul_ap"][band] = re.sub(r"\(|\)|\?|\*", "", mode)
+    # in case of regex signs in bhaul or home names copy key as re_*
+    for iface_group in ["backhaul_ap", "home_ap"]:
+        iface_ap_24g = list(capab["interfaces"][iface_group].values())[0]
+        if iface_ap_24g is not None and any([char in iface_ap_24g for char in ["(", ")", "?", "*"]]):
+            capab["interfaces"][f"re_{iface_group}"] = capab["interfaces"][iface_group].copy()
+            for band, mode in capab["interfaces"][iface_group].items():
+                if mode is None:
+                    continue
+                capab["interfaces"][iface_group][band] = re.sub(r"\(|\)|\?|\*", "", mode)
 
     # if device does not support DFS, remove DFS channels from its capabilities
     if capab["dfs"]:
@@ -686,8 +716,10 @@ def update_config_with_admin_creds(config):
         return
     if enc_pwd := config.pop("admin_enc_pwd", None):
         config["admin_pwd"] = decrypt_admin_password(enc_pwd)
-    if enc_uprise_pwd := config.pop("uprise_enc_pwd", None):
-        config["uprise_pwd"] = decrypt_admin_password(enc_uprise_pwd)
+    if enc_mdu_pwd := config.pop("mdu_enc_pwd", None):
+        config["mdu_pwd"] = decrypt_admin_password(enc_mdu_pwd)
+    if enc_m2m_pwd := config.pop("warden_m2m_enc_pwd", None):
+        config["warden_m2m_pwd"] = decrypt_admin_password(enc_m2m_pwd)
 
     try:
         from lib.cloud.cloud import PROD_DEPLOYMENTS
@@ -721,25 +753,25 @@ def get_device_cfg(device_obj):
     return device_obj.lib.device.config
 
 
-def get_uprise_network_creds(location_cfg, location_name, network_type="home"):
-    uprise_location = get_uprise_loc_cfg(location_cfg, location_name)
+def get_mdu_network_creds(location_cfg, location_name, network_type="home"):
+    mdu_location = get_mdu_loc_cfg(location_cfg, location_name)
     ssid, psk = None, None
-    for uprise_network in uprise_location["Networks"]:
-        if uprise_network["alias"] != network_type:
+    for mdu_network in mdu_location["Networks"]:
+        if mdu_network["alias"] != network_type:
             continue
-        ssid, psk = uprise_network["ssid"], uprise_network["key"]
+        ssid, psk = mdu_network["ssid"], mdu_network["key"]
         break
     return ssid, psk
 
 
-def get_uprise_loc_cfg(location_cfg, location_name):
-    target_uprise_location = {}
-    for uprise_location in location_cfg["locations"]:
-        if uprise_location["user_name"] != location_name:
+def get_mdu_loc_cfg(location_cfg, location_name):
+    target_mdu_location = {}
+    for mdu_location in location_cfg["locations"]:
+        if mdu_location["user_name"] != location_name:
             continue
-        target_uprise_location = uprise_location
+        target_mdu_location = mdu_location
         break
-    return target_uprise_location
+    return target_mdu_location
 
 
 class YamlLoader(yaml.SafeLoader):
@@ -771,7 +803,7 @@ class YamlLoader(yaml.SafeLoader):
         return "".join([str(i) for i in seq])
 
 
-class YamlUpriseLoader(YamlLoader):
+class YamlMduLoader(YamlLoader):
     @staticmethod
     def load_ustb_cfg(cfg_name: str, root_path: str) -> dict:
         ustb_cfg_path = os.path.join(root_path, f"{cfg_name}.yaml")
@@ -784,52 +816,54 @@ class YamlUpriseLoader(YamlLoader):
         return re.findall(f"(?<={key}: ).+", buffer_cfg)
 
     def ustb_nodes(self, ustb_name):
-        ustb_cfg = YamlUpriseLoader.load_ustb_cfg(ustb_name.value, self._root)
-        uprise_locations = YamlUpriseLoader.get_values_from_buffer("user_name", self.buffer)
-        assert len(uprise_locations) == len(ustb_cfg["Nodes"])
-        uprise_base_node_name = "gw-uprise-{}"
+        ustb_cfg = YamlMduLoader.load_ustb_cfg(ustb_name.value, self._root)
+        mdu_locations = YamlMduLoader.get_values_from_buffer("user_name", self.buffer)
+        assert len(mdu_locations) == len(ustb_cfg["Nodes"])
+        mdu_base_node_name = "gw-mdu-{}"
         for i, ustb_node in enumerate(ustb_cfg["Nodes"]):
-            ustb_node["name"] = uprise_base_node_name.format(i + 1)
-            ustb_node["default_location"] = uprise_locations[i]
+            ustb_node["name"] = mdu_base_node_name.format(i + 1)
+            ustb_node["default_location"] = mdu_locations[i]
             ustb_node.pop("switch", None)
         return ustb_cfg["Nodes"]
 
     def ustb_clients(self, ustb_name):
-        ustb_cfg = YamlUpriseLoader.load_ustb_cfg(ustb_name.value, self._root)
-        uprise_locations = YamlUpriseLoader.get_values_from_buffer("user_name", self.buffer)
-        uprise_isolation_groups = YamlUpriseLoader.get_values_from_buffer("isolation_group", self.buffer)
-        uprise_clients = list()
+        ustb_cfg = YamlMduLoader.load_ustb_cfg(ustb_name.value, self._root)
+        mdu_locations = YamlMduLoader.get_values_from_buffer("user_name", self.buffer)
+        mdu_isolation_groups = YamlMduLoader.get_values_from_buffer("isolation_group", self.buffer)
+        mdu_clients = list()
         wifi_clients = [
-            client for client in ustb_cfg["Clients"] if client.get("wifi") and client["type"] in ["linux", "rpi"]
+            client
+            for client in ustb_cfg["Clients"]
+            if client.get("wifi") and client["type"] in ["linux", "rpi", "debian"]
         ]
-        assert len(wifi_clients) >= len(uprise_locations)
-        uprise_base_client_name = "w1-uprise-{}"
+        assert len(wifi_clients) >= len(mdu_locations)
+        mdu_base_client_name = "w1-mdu-{}"
         for i, wifi_client in enumerate(wifi_clients):
-            wifi_client["name"] = uprise_base_client_name.format(i + 1)
-            wifi_client["default_location"] = uprise_locations[i]
-            wifi_client["isolation_groups"] = uprise_isolation_groups[i]
-            uprise_clients.append(wifi_client)
-            if i + 1 == len(uprise_locations):
+            wifi_client["name"] = mdu_base_client_name.format(i + 1)
+            wifi_client["default_location"] = mdu_locations[i]
+            wifi_client["isolation_groups"] = mdu_isolation_groups[i]
+            mdu_clients.append(wifi_client)
+            if i + 1 == len(mdu_locations):
                 break
-        return uprise_clients
+        return mdu_clients
 
     def ustb_rpower(self, ustb_name):
-        ustb_cfg = YamlUpriseLoader.load_ustb_cfg(ustb_name.value, self._root)
-        ustb_nodes_map_to_uprise = dict(gw="gw-uprise-1", l1="gw-uprise-2", l2="gw-uprise-3")
+        ustb_cfg = YamlMduLoader.load_ustb_cfg(ustb_name.value, self._root)
+        ustb_nodes_map_to_mdu = dict(gw="gw-mdu-1", l1="gw-mdu-2", l2="gw-mdu-3")
         for ustb_rpower in ustb_cfg["rpower"]:
-            uprise_aliases = list()
+            mdu_aliases = list()
             for rpower_alias in ustb_rpower["alias"]:
-                uprise_alias_name = ustb_nodes_map_to_uprise.get(rpower_alias["name"])
-                if not uprise_alias_name:
+                mdu_alias_name = ustb_nodes_map_to_mdu.get(rpower_alias["name"])
+                if not mdu_alias_name:
                     continue
-                rpower_alias["name"] = uprise_alias_name
-                uprise_aliases.append(rpower_alias)
-            if uprise_aliases:
-                ustb_rpower["alias"] = uprise_aliases
+                rpower_alias["name"] = mdu_alias_name
+                mdu_aliases.append(rpower_alias)
+            if mdu_aliases:
+                ustb_rpower["alias"] = mdu_aliases
         return ustb_cfg["rpower"]
 
     def ustb_ssh_gateway(self, ustb_name):
-        ustb_cfg = YamlUpriseLoader.load_ustb_cfg(ustb_name.value, self._root)
+        ustb_cfg = YamlMduLoader.load_ustb_cfg(ustb_name.value, self._root)
         ssh_gw_config = ustb_cfg["ssh_gateway"]
         ssh_gw_config["location_file"] = os.path.join(self._root, f"{ustb_name.value}.yaml")
         return ssh_gw_config
@@ -837,10 +871,10 @@ class YamlUpriseLoader(YamlLoader):
 
 YamlLoader.add_constructor("!include", YamlLoader.include)
 YamlLoader.add_constructor("!join", YamlLoader.join)
-YamlLoader.add_constructor("!ustb_nodes", YamlUpriseLoader.ustb_nodes)
-YamlLoader.add_constructor("!ustb_clients", YamlUpriseLoader.ustb_clients)
-YamlLoader.add_constructor("!ustb_rpower", YamlUpriseLoader.ustb_rpower)
-YamlLoader.add_constructor("!ustb_ssh_gateway", YamlUpriseLoader.ustb_ssh_gateway)
+YamlLoader.add_constructor("!ustb_nodes", YamlMduLoader.ustb_nodes)
+YamlLoader.add_constructor("!ustb_clients", YamlMduLoader.ustb_clients)
+YamlLoader.add_constructor("!ustb_rpower", YamlMduLoader.ustb_rpower)
+YamlLoader.add_constructor("!ustb_ssh_gateway", YamlMduLoader.ustb_ssh_gateway)
 
 # type checking for tb_config
 _pass = TypedDict("_pass", {"pass": str})
@@ -858,6 +892,7 @@ class TbConfig(TypedDict):
     tb_maintainer: str
     capabilities: list
     profile: str
+    deployment_id: str
     ssh_gateway: ssh_gateway
     Nodes: list[Node]
     Clients: list[Client]

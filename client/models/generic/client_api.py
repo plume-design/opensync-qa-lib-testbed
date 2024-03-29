@@ -2,12 +2,11 @@ import re
 import time
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.allure_util import AllureUtil
-from distutils.version import StrictVersion
 
 from lib_testbed.generic.util.request_handler import parse_request
 from lib_testbed.generic.util.ssh.device_api import DeviceApi
 from lib_testbed.generic.util.object_resolver import ObjectResolver
-from lib_testbed.generic.util.common import mark_failed_recovery_attempt
+from lib_testbed.generic.util.common import mark_failed_recovery_attempt, compare_fw_versions
 
 
 class ClientApi(DeviceApi):
@@ -16,8 +15,10 @@ class ClientApi(DeviceApi):
         self.lib = self.initialize_device_lib(**kwargs)
         self.iface = self.lib.iface
         self.log_catcher = self.lib.log_catcher
-        self.min_required_version = "1.0.1"
+        device_config = getattr(self.lib.device, "config", {})
+        self.min_required_version = device_config.get("capabilities", {}).get("min_fw_version", "1.0.1")
         self.skip_init = kwargs.pop("skip_init", False)
+        self.is_connected = None
 
     @parse_request
     def setup_class_handler(self, request):
@@ -86,7 +87,7 @@ class ClientApi(DeviceApi):
         except AttributeError:
             log.warning(f"Cannot get version from: '{version}'")
             ver = "100.0.0"
-        assert StrictVersion(ver) >= StrictVersion(self.min_required_version), (
+        assert compare_fw_versions(ver, self.min_required_version, ">="), (
             f"FW on the client {self.lib.name} "
             f"is older than {self.min_required_version}, please upgrade to the latest"
         )
@@ -257,11 +258,19 @@ class ClientApi(DeviceApi):
             timeout=timeout,
             **kwargs,
         )
+        self.is_connected = result[0] == 0
         return self.get_stdout(result, **kwargs)
 
     def eth_disconnect(self, ifname=None, disable_unused_ports=True, **kwargs):
         """Disconnect client from all Ethernet pod ports."""
+        # Make sure is_connected flag is set. For some of cases the client is connected via switch_api
+        # where the flag is not updated (`SwitchLib` doesn't know about `ClientApi` objects)
+        if self.is_connected is None:
+            self.is_connected = self.lib.switch.is_eth_client_connected(self.nickname)
+        if not self.is_connected:
+            return ""
         result = self.lib.eth_disconnect(ifname, disable_unused_ports=disable_unused_ports, **kwargs)
+        self.is_connected = result[0] != 0
         return self.get_stdout(result, **kwargs)
 
     def connect(
@@ -321,11 +330,16 @@ class ClientApi(DeviceApi):
         if result[0]:
             result[2] += result[1]
             result[1] = ""
+        else:
+            self.is_connected = True
         return self.get_stdout(result, **kwargs)
 
     def disconnect(self, ifname=None, **kwargs):
         """Connect client(s) to network with wpa_supplicant"""
+        if not self.is_connected:
+            return ""
         result = self.lib.disconnect(ifname, **kwargs)
+        self.is_connected = result[0] != 0
         return self.get_stdout(result, **kwargs)
 
     def start_dhcp_client(self, ifname="", cf=None, ipv4=True, ipv6=False, ipv6_stateless=False, timeout=20, **kwargs):
@@ -495,7 +509,6 @@ class ClientApi(DeviceApi):
 
     def set_mac(self, interface, new_mac, **kwargs):
         response = self.lib.set_mac(interface, new_mac, **kwargs)
-        setattr(self.lib, f"{interface}_mac", new_mac)
         return self.get_stdout(response, **kwargs)
 
     def restore_mac_address(self, ifname, **kwargs):

@@ -49,15 +49,15 @@ case ${node_model} in
         ;;
     "PP203X")
         echo -n "PP203X (SuperPod):  "
-        home_ap="home-ap-24 "
-        ap_list="home-ap-l50 home-ap-u50"
-        for manager in ${ap_list}; do
-            out="$(ovsh s Wifi_VIF_Config --where if_name=="$manager" 2>&1)"
+        home_ap=""
+        ap_list="home-ap-24 home-ap-l50 home-ap-u50 h-24 h-l5 h-u5"
+        for ap_iface in ${ap_list}; do
+            out="$(ovsh s Wifi_VIF_Config --where if_name=="$ap_iface" 2>&1)"
             if [[ $? -eq 0 ]]; then
-                home_ap="$home_ap $manager"
+                home_ap="$home_ap $ap_iface"
             fi
         done
-        bhaul_ap="bhaul-ap-24 bhaul-ap-l50 bhaul-ap-u50 b-ap-24 b-ap-l50 b-ap-u50"
+        bhaul_ap="bhaul-ap-24 bhaul-ap-l50 bhaul-ap-u50 b-ap-24 b-ap-l50 b-ap-u50 b-24 b-l5 b-u5"
         bhaul_sta="bhaul-sta-24 bhaul-sta-l50 bhaul-sta-u50"
         ;;
     "PP302Z")
@@ -111,8 +111,22 @@ case ${node_model} in
         ;;
     "PP603X")
         echo -n "PP603X (Attila):  "
-        home_ap="home-ap-24 home-ap-50 home-ap-60"
-        bhaul_ap="b-ap-24 b-ap-50 b-ap-60"
+        home_ap=""
+        ap_list="home-ap-24 home-ap-50 home-ap-60 h-24 h-50 h-60"
+        for ap_iface in ${ap_list}; do
+            out="$(ovsh s Wifi_VIF_Config --where if_name=="$ap_iface" 2>&1)"
+            if [[ $? -eq 0 ]]; then
+                home_ap="$home_ap $ap_iface"
+            fi
+        done
+        bhaul_ap="b-ap-24 b-ap-50 b-ap-60 b-24 b-50 b-60"
+        bhaul_sta="bhaul-sta-24 bhaul-sta-50 bhaul-sta-60"
+        bh_sta_identifier="bhaul-sta-24|bhaul-sta-50|bhaul-sta-60"
+        ;;
+    "PP703X")
+        echo -n "PP703X (Barca):  "
+        home_ap="h-24 h-50 h-60"
+        bhaul_ap="b-24 b-50 b-60"
         bhaul_sta="bhaul-sta-24 bhaul-sta-50 bhaul-sta-60"
         bh_sta_identifier="bhaul-sta-24|bhaul-sta-50|bhaul-sta-60"
         ;;

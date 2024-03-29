@@ -28,8 +28,8 @@ class Msg:
         pattern = re.compile(regex)
         end_time = time.time() + timeout
         while time.time() < end_time:
-            # give at least 5 seconds for log reading to complete
-            remaining = max(end_time - time.time(), 5)
+            # give at least 5 seconds for log reading to complete and max 20 sec
+            remaining = min(20, max(end_time - time.time(), 5))
             try:
                 resp = self._cmd(timeout=remaining, cursor=cursor, **kwargs)
             except Exception as e:
@@ -43,7 +43,7 @@ class Msg:
                 cursor = resp[-1]["cursor"]
             time.sleep(0.5)
         else:
-            raise LogEmpty(f"Timeout while waiting for log message after {timeout}sec")
+            raise LogEmpty(f"Timeout while waiting for log message with regex {regex} after {timeout} sec")
         return matching
 
     def _cmd(self, **kwargs):

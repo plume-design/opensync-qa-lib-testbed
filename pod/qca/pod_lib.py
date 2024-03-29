@@ -1,9 +1,11 @@
+import collections
 import functools
 import re
 import time
 import xmltodict
 from lib_testbed.generic.util.logger import log
 import lib_testbed.generic.util.common as common_util
+from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from lib_testbed.generic.pod.generic.pod_lib import PodLib as PodLibGeneric
 
 
@@ -241,7 +243,7 @@ class PodLib(PodLibGeneric):
         return self.get_connection_flows_sfe(ip, **kwargs)
 
     def check_traffic_acceleration(
-        self, ip_address, expected_protocol=6, multicast=False, flow_count=1, flex=False, **kwargs
+        self, ip_address, expected_protocol=6, multicast=False, flow_count=1, flex=False, map_t=False, **kwargs
     ):
         """
         Check traffic was accelerated
@@ -251,29 +253,31 @@ class PodLib(PodLibGeneric):
             multicast: (bool) True to check for acceleration of multicast traffic
             flow_count: (int) minimum number of expected accelerated flows (connections)
             flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
             **kwargs:
 
         Returns: bool()
 
         """
-        # On QSDK 11.00 and newer check for flows in both ECM and SFE
+        # On QSDK 11.00 and newer check for flows in ECM
         if self.qsdk_version >= 0x1100:
-            ecm_ok = self.check_traffic_acceleration_ecm(
+            return self.check_traffic_acceleration_ecm(
                 ip_address,
                 expected_protocol=expected_protocol,
                 multicast=multicast,
                 flow_count=flow_count,
                 flex=flex,
+                map_t=map_t,
                 **kwargs,
             )
-            if not ecm_ok:
-                return False
+        # Otherwise check for flows in SFE
         return self.check_traffic_acceleration_sfe(
             ip_address,
             expected_protocol=expected_protocol,
             multicast=multicast,
             flow_count=flow_count,
             flex=flex,
+            map_t=map_t,
             **kwargs,
         )
 
@@ -295,7 +299,7 @@ class PodLib(PodLibGeneric):
         flows = []
         if sfe_dump["sfe_ipv4"].get("connections"):
             # in case of single element direct dict is returned
-            if type(sfe_dump["sfe_ipv4"]["connections"].get("connection")) == list:
+            if isinstance(sfe_dump["sfe_ipv4"]["connections"].get("connection"), list):
                 out = sfe_dump["sfe_ipv4"]["connections"].get("connection", [])
             else:
                 out = [sfe_dump["sfe_ipv4"]["connections"]["connection"]]
@@ -333,38 +337,59 @@ class PodLib(PodLibGeneric):
             assert self.DFS_REGION_MAP[region].lower() in self.run_command(f"pmf -r -{radio}")[1].lower()
         return res
 
-    def get_connection_flows_sfe_dump(self, ip_address="", **kwargs):
+    def get_connection_flows_sfe_dump(self, ip_addresses=(), protocol=6, **kwargs) -> list:
         """
         Get connection flow dump from device
         Args:
-            ip_address: (str) optional, get entries only for target IP address
+            ip_addresses: list[str] optional, get entries only for target IP addresses
+            protocol: (int) expected protocol id. 6 for TCP, 17 for UDP
             **kwargs:
 
         Returns: list() list of connection flows
 
         """
-        # Update interface id with 0000 prefix
-        if ":" in ip_address:
-            ip_address = common_util.get_full_ipv6_address(abbreviated_ipv6_addr=ip_address)
         connection_flows = self.run_command("sfe_dump", **kwargs)
         connection_flows = self.get_stdout(connection_flows, **kwargs)
-        connection_flows = xmltodict.parse("<sfe_dump>\n" + connection_flows + "\n</sfe_dump>")["sfe_dump"]
+        return self.parse_sfe_flows(connection_flows, ip_addresses, protocol)
+
+    @staticmethod
+    def parse_sfe_flows(sfe_dump: str, ip_addresses: list = (), protocol: int = 6) -> list:
+        # Update interface id with 0000 prefix
+        ip_addresses = set(common_util.get_full_ipv6_address(addr) if ":" in addr else addr for addr in ip_addresses)
+        connection_flows = xmltodict.parse("<sfe_dump>\n" + sfe_dump + "\n</sfe_dump>")["sfe_dump"]
         connection_flow_list = list()
         for connection_type in ["sfe_ipv4", "sfe_ipv6"]:
-            if not (connection_type_flows := connection_flows[connection_type].get("connections")):
-                continue
-            if isinstance(connection_type_flows["connection"], dict):
-                connection_type_flows["connection"] = [connection_type_flows["connection"]]
-            for connection_flow in connection_type_flows["connection"]:
-                connection_flow = dict(connection_flow)
-                client_flow = re.search(ip_address, str(connection_flow))
-                if ip_address and not client_flow:
+            ip_type_connection_flows = connection_flows[connection_type]
+            if isinstance(ip_type_connection_flows, dict):
+                ip_type_connection_flows = [ip_type_connection_flows]
+            for ip_type_connection_flow in ip_type_connection_flows:
+                if not (connection_type_flows := ip_type_connection_flow.get("connections")):
                     continue
-                connection_flow_list.append(connection_flow)
+                if isinstance(connection_type_flows["connection"], dict):
+                    connection_type_flows["connection"] = [connection_type_flows["connection"]]
+                for connection_flow in connection_type_flows["connection"]:
+                    connection_flow = dict(connection_flow)
+                    # Ignore flows for protocols we don't care about, e.g. for iperf control connection
+                    # (which is always TCP) when testing UDP.
+                    if int(connection_flow.get("@protocol", 0)) != protocol:
+                        continue
+                    for addr_attr in ("@src_ip", "@dest_ip", "@src_ip_xlate", "@dest_ip_xlate"):
+                        if connection_flow.get(addr_attr) in ip_addresses:
+                            connection_flow_list.append(connection_flow)
+                            break
         return connection_flow_list
 
     def check_traffic_acceleration_sfe(
-        self, ip_address, expected_protocol=6, multicast=False, flow_count=1, flex=False, **kwargs
+        self,
+        ip_address,
+        expected_protocol=6,
+        multicast=False,
+        flow_count=1,
+        flex=False,
+        map_t=False,
+        dumps=5,
+        sfe_dump_file: str = None,
+        **kwargs,
     ):
         """
         Check traffic was accelerated
@@ -374,38 +399,73 @@ class PodLib(PodLibGeneric):
             multicast: (bool) True to check for acceleration of multicast traffic
             flow_count: (int) minimum number of expected accelerated flows (connections)
             flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
+            dumps: (int): How many traffic dumps / samples to check
+            sfe_dump_file: (str) Path to ecm dump file - if provided then consider this file instead of collecting
+             acceleration data
             **kwargs:
 
         Returns: bool()
 
         """
-        # QCA platforms handle end-to-end tracking, so just one IP needs to be checked
-        ip_address = ip_address[0]
-        all_connection_flows = list()
-        for i in range(5):
-            connection_flows = self.get_connection_flows_sfe_dump(ip_address, **kwargs)
-            all_connection_flows.extend(connection_flows)
-            time.sleep(4)
-        assert all_connection_flows, (
-            f"Not found any connection flows for {ip_address} address, " f"for {self.get_nickname()} device"
-        )
+        # IPv4 and IPv6 portions of MAP-T traffic should both be accelerated
+        if map_t:
+            flow_count = flow_count * 2
+            ip_addresses = ip_address
+        else:
+            # QCA platforms handle end-to-end tracking, so just one IP needs to be checked
+            ip_addresses = [ip_address[0]]
+
+        parsed_connections_dump = list()
+        if not sfe_dump_file:
+            for i in range(dumps):
+                connection_flows = self.get_connection_flows_sfe_dump(
+                    ip_addresses, protocol=expected_protocol, **kwargs
+                )
+                parsed_connections_dump.extend(connection_flows)
+                log.info(f"Number of accelerated connections in sfe dump {i + 1}: {len(connection_flows)}")
+                time.sleep(4)
+        else:
+            sfe_dump = self.get_stdout(self.run_command(f"cat {sfe_dump_file}"))
+            parsed_connections_dump.extend(self.parse_sfe_flows(sfe_dump, ip_addresses))
+
+        grouped_connection_flows = collections.defaultdict(list)
+        for connection_flow in parsed_connections_dump:
+            src_addr = connection_flow.get("@src_ip_xlate", connection_flow.get("@src_ip", ""))
+            src_port = int(connection_flow.get("@src_port_xlate", connection_flow.get("@src_port", 0)))
+            dst_addr = connection_flow.get("@dest_ip_xlate", connection_flow.get("@dest_ip", ""))
+            dst_port = int(connection_flow.get("@dest_port_xlate", connection_flow.get("@dest_port", 0)))
+            grouped_connection_flows[src_addr, src_port, dst_addr, dst_port].append(connection_flow)
+
+        return self.verify_sfe_acceleration(grouped_connection_flows, flow_count)
+
+    def verify_sfe_acceleration(self, grouped_connection_flows: dict, flow_count: int = 1) -> bool:
         status = True
-        # <L4_protocol> should be equal to 6 for tcp or 17 for udp
+        if len(grouped_connection_flows) < flow_count:
+            log.error(f"Less than {flow_count} accelerated connections in sfe dump: {len(grouped_connection_flows)}")
+            status = False
+
         # With each iteration, the value of src_rx_pkts, src_rx_bytes, dest_rx_pkts, and dest_rx_bytes should increase.
-        for connection_flow in all_connection_flows:
-            connection_protocol = connection_flow.get("@protocol", 0)
-            if expected_protocol != int(connection_protocol):
-                # Ignore flows for protocol we don't care about, e.g. for iperf control connection
-                # (which is always TCP) when testing UDP.
-                continue
-            for key_to_check in ["@src_rx_pkts", "@src_rx_bytes", "@dest_rx_pkts", "@dest_rx_bytes"]:
-                value = connection_flow.get(key_to_check, 0)
-                if not value:
-                    log.error(
-                        f"Value of {key_to_check} did not increased of the connection flow,"
-                        f" for {self.get_nickname()} device"
-                    )
-                    status = False
+        for connection, connection_flows in grouped_connection_flows.items():
+            previous_values = collections.defaultdict(int)
+            for connection_flow in connection_flows:
+                for key_to_check in ["@src_rx_pkts", "@src_rx_bytes", "@dest_rx_pkts", "@dest_rx_bytes"]:
+                    value = int(connection_flow.get(key_to_check, -1))
+                    previous_value = previous_values[key_to_check]
+                    if value < previous_value:
+                        flows = "\n".join(str(flow) for flow in connection_flows)
+                        log.error(
+                            f"Value of sfe {key_to_check} did not increase for {connection} connection"
+                            f" on {self.get_nickname()} device:\n{flows}"
+                        )
+                        status = False
+                        break
+                    previous_values[key_to_check] = value
+                else:
+                    continue
+                break
+            else:
+                log.info(f"{connection} connection on {self.get_nickname()} is sfe accelerated")
         return status
 
     def get_connection_flows_ecm(self, ip, **kwargs):
@@ -427,11 +487,11 @@ class PodLib(PodLibGeneric):
         log.info(f"{self.get_nickname()} has {len(flows)} flows for {ip}")
         return flows
 
-    def get_connection_flows_ecm_dump(self, ip_address="", **kwargs):
+    def get_connection_flows_ecm_dump(self, ip_addresses: list = (), **kwargs) -> list:
         """
         Get connection flow dump from device
         Args:
-            ip_address: (str) optional, get entries only for target IP address
+            ip_addresses: list[str] optional, get entries only for target IP addresses
             **kwargs:
 
         Returns: list() list of connection flows
@@ -439,23 +499,19 @@ class PodLib(PodLibGeneric):
         """
         connection_flows = self.run_command("ecm_dump.sh", **kwargs)
         connection_flows = self.get_stdout(connection_flows, **kwargs)
-        all_connection_ids = list(set(re.findall(r"conns.conn.\d+", connection_flows)))
-        connection_flow_list = list()
-        if ":" in ip_address:
-            ip_address = common_util.get_full_ipv6_address(abbreviated_ipv6_addr=ip_address)
-        # Group flows into list
-        for connection_id in all_connection_ids:
-            connection_flow = "\n".join(
-                [flow_entry for flow_entry in connection_flows.splitlines() if connection_id in flow_entry]
-            )
-            client_flow = re.search(ip_address, connection_flow)
-            if ip_address and not client_flow:
-                continue
-            connection_flow_list.append(connection_flow)
-        return connection_flow_list
+        return self.parse_ecm_flows(connection_flows, ip_addresses)
 
     def check_traffic_acceleration_ecm(  # noqa: C901
-        self, ip_address, expected_protocol=6, multicast=False, flow_count=1, flex=False, **kwargs
+        self,
+        ip_address,
+        expected_protocol=6,
+        multicast=False,
+        flow_count=1,
+        flex=False,
+        map_t=False,
+        dumps=5,
+        ecm_dump_file: str = None,
+        **kwargs,
     ):
         """
         Check traffic was accelerated
@@ -465,24 +521,53 @@ class PodLib(PodLibGeneric):
             multicast: (bool) True to check for acceleration of multicast traffic
             flow_count: (int) minimum number of expected accelerated flows (connections)
             flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
+            dumps: (int): How many traffic dumps / samples to check,
+            ecm_dump_file: (str) Path to ecm dump file - if provided then consider this file instead of collecting
+             acceleration data
             **kwargs:
 
         Returns: bool
 
         """
-        # QCA platforms handle end-to-end tracking, so just one IP needs to be checked
-        ip_address = ip_address[0]
-        all_connection_dumps = list()
-        for i in range(5):
-            connection_flows = self.get_connection_flows_ecm_dump(ip_address, **kwargs)
-            all_connection_dumps.append(connection_flows)
-            time.sleep(4)
+        # IPv4 and IPv6 portions of MAP-T traffic should both be accelerated
+        if map_t:
+            flow_count = flow_count * 2
+            ip_addresses = ip_address
+        else:
+            # QCA platforms track flows end-to-end, so just one IP needs to be checked
+            ip_addresses = [ip_address[0]]
+        parsed_connections_dump = list()
+        if not ecm_dump_file:
+            for i in range(dumps):
+                connection_flows = self.get_connection_flows_ecm_dump(ip_addresses, **kwargs)
+                parsed_connections_dump.append(connection_flows)
+                time.sleep(4)
+        else:
+            ecm_dump = self.get_stdout(self.run_command(f"cat {ecm_dump_file}"))
+            parsed_connections_dump.append(self.parse_ecm_flows(ecm_dump, ip_addresses))
+        return self.verify_ecm_acceleration(parsed_connections_dump, flow_count)
 
+    @staticmethod
+    def parse_ecm_flows(ecm_dump: str, ip_addresses: list = ()):
+        all_connection_ids = list(set(re.findall(r"conns.conn.\d+", ecm_dump)))
+        connection_flow_list = list()
+        ip_addresses = [common_util.get_full_ipv6_address(addr) if ":" in addr else addr for addr in ip_addresses]
+        # Group flows into list
+        for connection_id in all_connection_ids:
+            connection_flow = "\n".join(
+                [flow_entry for flow_entry in ecm_dump.splitlines() if connection_id in flow_entry]
+            )
+            if any(ip_address in connection_flow for ip_address in ip_addresses):
+                connection_flow_list.append(connection_flow)
+        return connection_flow_list
+
+    @staticmethod
+    def verify_ecm_acceleration(connection_dump: list, flow_count: int = 1) -> bool:
         status = True
         flows = {}
         pr_accel_flows_counter = []
-        # first dump contains data before traffic starts, so skip it
-        for all_connection_flows in all_connection_dumps[1:]:
+        for all_connection_flows in connection_dump:
             # There should be at least 4 flows where all the pr.accel classifiers are "wanted"
             flow_with_all_wanted_pr_accel = 0
             for connection_flow in all_connection_flows:
@@ -569,5 +654,83 @@ class PodLib(PodLibGeneric):
             return output
         bi_value = common_util.get_digits_value_from_text(value_to_take="get_bintval:", text_response=output[1])
         if not bi_value:
-            return [1, "", f"Can not get Beacon Interval value"]
+            return [1, "", "Can not get Beacon Interval value"]
         return [0, str(bi_value), ""]
+
+    def run_traffic_acceleration_monitor(self, samples: int = 5, interval: int = 5, delay: int = 20, **kwargs) -> dict:
+        """
+        Start making traffic acceleration statistics dumps on the pod in the background
+        Args:
+            samples: (int) number of statistic dumps
+            interval: (int) seconds apart
+            delay: (int) seconds after the method is called.
+            **kwargs:
+
+        Returns: Return (dict) dict(sfe_dump=dict(dump_file="", pid="")) Acceleration statistics dumps details.
+
+        """
+        # On QSDK 11.00 and newer check for flows in ECM
+        if self.qsdk_version >= 0x1100:
+            return self._run_traffic_acceleration_monitor(
+                acc_name="ecm", acc_tool="ecm_dump.sh", samples=samples, interval=interval, delay=delay
+            )
+
+        # Otherwise check for flows in SFE
+        else:
+            return self._run_traffic_acceleration_monitor(
+                acc_name="sfe", acc_tool="sfe_dump", samples=samples, interval=interval, delay=delay
+            )
+
+    def check_traffic_acceleration_dump(
+        self,
+        acceleration_dump: dict,
+        ip_address: list,
+        expected_protocol: int = 6,
+        multicast: bool = False,
+        flow_count: int = 1,
+        flex: bool = False,
+        map_t: bool = False,
+        **kwargs,
+    ) -> bool:
+        """
+        Check traffic was accelerated
+        Args:
+            acceleration_dump: (dict) Acceleration dump details from run_traffic_acceleration_monitor()
+            ip_address: (list) IP addresses to check
+            expected_protocol: (int) expected protocol id. 6 for TCP, 17 for UDP
+            multicast: (bool) True to check for acceleration of multicast traffic
+            flow_count: (int) minimum number of expected accelerated flows (connections)
+            flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
+            **kwargs:
+
+        Returns: bool()
+
+        """
+        acceleration_status = True
+        for acc_name, acc_monitor_details in acceleration_dump.items():
+            acc_dump_file = acc_monitor_details["dump_file"]
+            match acc_name:
+                case "ecm":
+                    acceleration_status &= self.check_traffic_acceleration_ecm(
+                        ip_address=ip_address,
+                        expected_protocol=expected_protocol,
+                        multicast=multicast,
+                        flow_count=flow_count,
+                        flex=flex,
+                        map_t=map_t,
+                        ecm_dump_file=acc_dump_file,
+                    )
+                case "sfe":
+                    acceleration_status &= self.check_traffic_acceleration_sfe(
+                        ip_address=ip_address,
+                        expected_protocol=expected_protocol,
+                        multicast=multicast,
+                        flow_count=flow_count,
+                        flex=flex,
+                        map_t=map_t,
+                        sfe_dump_file=acc_dump_file,
+                    )
+                case _:
+                    raise OpenSyncException(f"Unknown acceleration tool: {acc_name}. Allowed tools for QCA: sfe, ecm")
+        return acceleration_status

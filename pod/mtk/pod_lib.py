@@ -2,6 +2,8 @@ import re
 import time
 from typing import Union
 from lib_testbed.generic.util.logger import log
+import lib_testbed.generic.util.common as common_util
+from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from lib_testbed.generic.pod.generic.pod_lib import PodLib as PodLibGeneric
 
 MANAGER_RESTART_TIMEOUT = 80  # default for DM Manager, and other non-SM Managers
@@ -52,9 +54,7 @@ class PodLib(PodLibGeneric):
         Returns: list(retval, stdout, stderr)
 
         """
-        response = self.run_command(
-            f"echo -n 1 > /sys/kernel/debug/ieee80211/{phy_radio_name}/mt76/radar_trigger", **kwargs
-        )
+        self.run_command(f"echo -n 1 > /sys/kernel/debug/ieee80211/{phy_radio_name}/mt76/radar_trigger", **kwargs)
         return [0, "", ""]
 
     # optional
@@ -188,6 +188,115 @@ class PodLib(PodLibGeneric):
         self.last_cmd["name"] = "unknown"
         return [0, "", ""]
 
+    def check_traffic_acceleration(
+        self,
+        ip_address,
+        expected_protocol=6,
+        multicast=False,
+        flow_count=1,
+        flex=False,
+        map_t=False,
+        dumps=5,
+        **kwargs,
+    ) -> bool:
+        """
+        Check traffic was accelerated
+        Args:
+            ip_address: (list) IP addresses to check
+            expected_protocol: (int) expected protocol id. 6 for TCP, 17 for UDP
+            multicast: (bool) True to check for acceleration of multicast traffic
+            flow_count: (int) minimum number of expected accelerated flows (connections)
+            flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
+            dumps: (int): How many traffic dumps / samples to check
+             acceleration data
+            **kwargs:
+
+        Returns: bool()
+
+        """
+        return self.check_traffic_acceleration_nf_conntrack(
+            ip_address=ip_address,
+            expected_protocol=expected_protocol,
+            multicast=multicast,
+            flow_count=flow_count,
+            flex=flex,
+            map_t=map_t,
+            dumps=dumps,
+        )
+
+    def get_connection_flows_nf_conntrack(self, ip_addresses: list, **kwargs) -> list:
+        response = self.run_command("cat /proc/net/nf_conntrack | grep OFFLOAD", **kwargs)
+        nf_conntrack_dump = self.get_stdout(response, skip_exception=True)
+        return self.parse_nf_conntrack_flows(nf_conntrack_dump, ip_addresses)
+
+    # TODO: Update this method to parse all relevant values from the flow entry,
+    #  then do a cleanup for check_traffic_acceleration_nf_conntrack()
+    @staticmethod
+    def parse_nf_conntrack_flows(nf_conntrack_dump: str, ip_addresses: list) -> list:
+        ip_addresses = [common_util.get_full_ipv6_address(addr) if ":" in addr else addr for addr in ip_addresses]
+        connection_flow_list = list()
+        for connection_flow in nf_conntrack_dump.splitlines():
+            if any(ip_address in connection_flow for ip_address in ip_addresses):
+                connection_flow_list.append(connection_flow)
+        return connection_flow_list
+
+    def check_traffic_acceleration_nf_conntrack(
+        self,
+        ip_address,
+        expected_protocol=6,
+        multicast=False,
+        flow_count=1,
+        flex=False,
+        map_t=False,
+        dumps=5,
+        nf_conntrack_dump_file: str = None,
+        **kwargs,
+    ) -> bool:
+        """
+        Check traffic was accelerated
+        Args:
+            ip_address: (list) IP addresses to check
+            expected_protocol: (int) expected protocol id. 6 for TCP, 17 for UDP
+            multicast: (bool) True to check for acceleration of multicast traffic
+            flow_count: (int) minimum number of expected accelerated flows (connections)
+            flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
+            dumps: (int): How many traffic dumps / samples to check
+            nf_conntrack_dump_file: (str) Path to ecm dump file - if provided then consider this file instead of collecting
+             acceleration data
+            **kwargs:
+
+        Returns: bool()
+
+        """
+        parsed_connections_dump = list()
+        if not nf_conntrack_dump_file:
+            for i in range(dumps):
+                connection_flows = self.get_connection_flows_nf_conntrack(ip_address, **kwargs)
+                parsed_connections_dump.extend(connection_flows)
+                time.sleep(4)
+        else:
+            nf_conntrack_dump = self.get_stdout(self.run_command(f"cat {nf_conntrack_dump_file}"))
+            parsed_connections_dump.extend(self.parse_nf_conntrack_flows(nf_conntrack_dump, ip_address))
+
+        status = False
+        for connection_flow in parsed_connections_dump:
+            # Check the protocol
+            tcp_or_udp = False  # tcp is false, udp is true
+            elements = connection_flow.split(" ")
+            for line in elements:
+                if "ib1" in line:  # check ib1 bit30 to indicate tcp or udp
+                    value = line[4:]
+                    tcp_or_udp = int(value, 16) & (1 << 30) != 0
+
+            if not tcp_or_udp and expected_protocol == 6:  # tcp
+                status = True
+            elif tcp_or_udp is True and expected_protocol == 17:  # udp
+                status = True
+
+        return status
+
     def kill_manager(self, wait_for_restart=False, soft_kill=False, **kwargs):
         """
         Kill and restart service managers - Override for MTK, requires 'ps ux', 'kill -11'
@@ -240,7 +349,7 @@ class PodLib(PodLibGeneric):
 
         manager_paths = [f"{osp}/bin/{manager_name}" for manager_name in managers_name]
         for manager_path in manager_paths:
-            matched_processes = self.get_stdout(self.run_command(f"ps ux | grep {manager_path}", **kwargs)).split("\n")[
+            matched_processes = self.get_stdout(self.run_command(f"ps | grep {manager_path}", **kwargs)).split("\n")[
                 :-1
             ]
             manager_processes = [process_name for process_name in matched_processes if "grep" not in process_name]
@@ -276,3 +385,83 @@ class PodLib(PodLibGeneric):
 
         output = self.run_command(cmd, **kwargs)
         return self.strip_stdout_result(output)
+
+    def run_traffic_acceleration_monitor(self, samples: int = 5, interval: int = 5, delay: int = 20, **kwargs) -> dict:
+        """
+        Start making traffic acceleration statistics dumps on the pod in the background
+        Args:
+            samples: (int) number of statistic dumps
+            interval: (int) seconds apart
+            delay: (int) seconds after the method is called.
+            **kwargs:
+
+        Returns: Return (dict) dict(sfe_dump=dict(dump_file="", pid="")) Acceleration statistics dumps details.
+
+        """
+        return self._run_traffic_acceleration_monitor(
+            acc_name="nf_conntrack",
+            acc_tool="cat /proc/net/nf_conntrack | grep OFFLOAD",
+            samples=samples,
+            interval=interval,
+            delay=delay,
+        )
+
+    def check_traffic_acceleration_dump(
+        self,
+        acceleration_dump: dict,
+        ip_address: list,
+        expected_protocol: int = 6,
+        multicast: bool = False,
+        flow_count: int = 1,
+        flex: bool = False,
+        map_t: bool = False,
+        **kwargs,
+    ) -> bool:
+        """
+        Check traffic was accelerated
+        Args:
+            acceleration_dump: (dict) Acceleration dump details from run_traffic_acceleration_monitor()
+            ip_address: (list) IP addresses to check
+            expected_protocol: (int) expected protocol id. 6 for TCP, 17 for UDP
+            multicast: (bool) True to check for acceleration of multicast traffic
+            flow_count: (int) minimum number of expected accelerated flows (connections)
+            flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
+            **kwargs:
+
+        Returns: bool()
+
+        """
+        acceleration_status = True
+        for acc_name, acc_monitor_details in acceleration_dump.items():
+            acc_dump_file = acc_monitor_details["dump_file"]
+            match acc_name:
+                case "nf_conntrack":
+                    acceleration_status &= self.check_traffic_acceleration_nf_conntrack(
+                        ip_address=ip_address,
+                        expected_protocol=expected_protocol,
+                        multicast=multicast,
+                        flow_count=flow_count,
+                        flex=flex,
+                        map_t=map_t,
+                        nf_conntrack_dump_file=acc_dump_file,
+                    )
+                case _:
+                    raise OpenSyncException(
+                        f"Unknown acceleration tool: {acc_name}. Allowed tools for MTK: nf_conntrack"
+                    )
+        return acceleration_status
+
+    def get_client_tx_rate(self, ifname: str, client_mac: str, **kwargs):
+        """
+        Get SNR level of the connected client.
+        Args:
+            ifname: (str) Name of interface where is associated a client
+            client_mac: (str) Client mac address
+            **kwargs:
+        Returns: int
+        """
+        cmd = f"iw dev {ifname} station get {client_mac} " '| awk "/tx bytes/{{printf "%f", $3 * 8 / 10**6}}"'
+
+        output = self.run_command(cmd, **kwargs)
+        return output

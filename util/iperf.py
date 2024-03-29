@@ -72,13 +72,16 @@ class Iperf:
         port: int = None,
         bind_host: str = "",
     ) -> None:
+        # By design Iperf is merging new results with old results.
+        # Clear old iperf results to resolve this problem.
+        self.flush_iperf_results()
         self.client.start_client(server_ip, duration, reverse, extra_param, port, bind_host)
 
     def get_result_from_client(self, timeout: int = None, skip_exception: bool = False) -> dict:
         return self.client.get_result_from_client(timeout, skip_exception)
 
-    def get_result_from_server(self) -> dict:
-        return self.server.get_result_from_server()
+    def get_result_from_server(self, skip_exception: bool = False) -> dict:
+        return self.server.get_result_from_server(skip_exception=skip_exception)
 
     def export_result_to_csv(self, filename: str = None, attach_to_allure: bool = True) -> None:
         self.client.export_result_to_csv(filename, attach_to_allure)
@@ -152,3 +155,7 @@ class Iperf:
             limited_bitrate = "10M" if self.protocol == "tcp" else "1M"
         log.info(f"Limiting bitrate for {self.server.nickname} server to {limited_bitrate} value")
         return limited_bitrate
+
+    def flush_iperf_results(self):
+        self.server.flush_iperf_result()
+        self.client.flush_iperf_result()

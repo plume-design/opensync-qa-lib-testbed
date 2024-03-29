@@ -11,21 +11,20 @@ class ClientTool(ClientToolGeneric):
         download_locally=True,
         version=None,
         restore_files=None,
-        **kwargs
+        **kwargs,
     ):
         """
         Upgrade device with FW from fw_path or download build version from the artifactory
 
         You can also pick FW version based on the latest or stable release.
         """
-        if type(restore_cfg) is not bool:
+        if not isinstance(restore_cfg, bool):
             restore_cfg = eval(restore_cfg)
-        if type(force) is not bool:
+        if not isinstance(force, bool):
             force = eval(force)
-        if type(download_locally) is not bool:
+        if not isinstance(download_locally, bool):
             download_locally = eval(download_locally)
         results = self.lib.upgrade(
             fw_path, restore_cfg, force, http_address, download_locally, version, restore_files, **kwargs
         )
-        self.lib.run_command("rm -R /tmp/automation")
         return results

@@ -5,7 +5,10 @@ import os
 import allure
 import pyshark
 
+from pyshark.packet import packet
+
 from lib_testbed.generic.client.models.generic.client_api import ClientApi
+from lib_testbed.generic.util.common import threaded
 from lib_testbed.generic.util.logger import log
 
 
@@ -66,13 +69,33 @@ def sniff_packets_on_client(
     return local_sniff_file_path
 
 
-def load_pyshark_packets(file_path: str | pathlib.Path, pyshark_filter: str) -> pyshark.FileCapture:
+def load_pyshark_packets(file_path: str | pathlib.Path, pyshark_filter: str) -> list[packet.Packet]:
     """Utility function to log and load sniffed packets using pyshark"""
     log.info("Pyshark filter: %s", pyshark_filter)
-    packets = pyshark.FileCapture(str(file_path), display_filter=pyshark_filter, only_summaries=False)
-    packets.load_packets()
+    packets = parse_capture_file(str(file_path), display_filter=pyshark_filter, only_summaries=False)
     log.info("Captured %s packets matching the filter", len(packets))
     return packets
+
+
+def parse_capture_file(*args, **kwargs) -> list[packet.Packet]:
+    """
+    Return list of pyshark packets parsed from pcap file.
+
+    The file is parsed in a separate thread, to not interfere with main thread signal handling.
+
+    Args:
+        *args, **kwargs: Same args that are accepted by pyshark.FileCapture
+
+    Returns: (list) of packets found in pcap file
+    """
+    future = _parse_capture_file(*args, **kwargs)
+    return future.result()
+
+
+@threaded
+def _parse_capture_file(*args, **kwargs):
+    with pyshark.FileCapture(*args, **kwargs) as capture:
+        return list(capture)
 
 
 def attach_capture_file_to_allure(file_path: str | pathlib.Path) -> None:

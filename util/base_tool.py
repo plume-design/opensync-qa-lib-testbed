@@ -5,20 +5,24 @@ import traceback
 import logging
 import argparse
 import json
+import fnmatch
 import operator
 import collections
 from typing import Any, Callable, Dict
 import terminaltables
 from pathlib import Path
+
+from lib_testbed.generic.rpower.rpower import Rpower
 from lib_testbed.generic.util import config
 from lib_testbed.generic.util.ssh.parallelssh import get_success_names
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.logger import LOGGER_NAME
+from lib_testbed.generic.util.opensyncexception import OpenSyncException
 
 HELP_DOC_OFFSET = 60
-BASE_DIR = Path(__file__).absolute().parents[3].as_posix()
-if os.path.exists(os.path.join(BASE_DIR, "lib_testbed/generic/tools/")):
-    TOOLS_DIR = os.path.join(BASE_DIR, "lib_testbed/generic/tools/")
+BASE_DIR = Path(__file__).absolute().parents[3]
+if (BASE_DIR / "lib_testbed/generic/tools").exists():
+    TOOLS_DIR = BASE_DIR / "lib_testbed/generic/tools"
 else:
     raise FileNotFoundError(f"Missing tools/ folder in {BASE_DIR}/lib_testbed/generic/")
 
@@ -314,10 +318,16 @@ class BaseTool:
 
 class ClientPodTool(BaseTool):
     def modify_initial_args(self, args):
+        """Modify sys args before parsing kicks in to fill in all and perform client/pod name matching."""
         super().modify_initial_args(args)
         last_opt_param = self.get_latest_index_of_optional_parameter(args)
+        all_clients_list = self.client_list + self.node_list + ["host", "all"]
+        matched_clients = fnmatch.filter(all_clients_list, args[last_opt_param + 1])  # wildcard client matching
+        if matched_clients:
+            args[last_opt_param + 1] = ",".join(matched_clients)
+            return
         if (last_opt_param + 1) == len(args) or not any(
-            client in args[last_opt_param + 1] for client in self.client_list + self.node_list + ["host", "all"]
+            client in args[last_opt_param + 1] for client in all_clients_list
         ):
             args.insert(1, "all")
 
@@ -347,8 +357,7 @@ class ClientPodTool(BaseTool):
             self.tb_config = config.load_tb_config(skip_deployment=True)
         return self.tb_config
 
-    @staticmethod
-    def format_output(cmd, response, obj, json_output):
+    def format_output(self, cmd, response, obj, json_output):
         if cmd == "help":
             response = [0, response, ""]
             if obj.multi_devices:
@@ -401,6 +410,19 @@ class ClientPodTool(BaseTool):
                     out[1] = str(out[1])
                 stdout = "\n".join(out[1].splitlines())
                 stderr = "\n".join(out[2].splitlines())
+                if ret_value != 0:  # not all commands return 255 when can't establish ssh connection
+                    if stderr:
+                        stderr += "\n"
+                    try:
+                        rpower = Rpower().create_obj(module_name="rpower", config=self.get_config())
+                        status = rpower.status(name)
+                        stderr += f"RPOWER STATUS {name}: {status[name]}"
+                    except OpenSyncException:
+                        stderr += "Could not establish RPOWER STATUS, rpower is not accessible."
+                    except AssertionError:
+                        stderr += f"Could not establish RPOWER STATUS for device{name}"
+                    except Exception as e:  # in the case we can't connect, we just raise bare Exception
+                        stderr += f"Could not establish connection to RPOWER. Original error: {e}."
                 table.append([name, ret_value, stdout, stderr])
             table = sorted(table, key=operator.itemgetter(0))
             table.insert(0, ["NAME", "$?", "STDOUT", "STDERR"])
@@ -430,6 +452,16 @@ class ClientPodTool(BaseTool):
         for arg in args:
             if arg in commands:
                 return args.index(arg)
+
+    def check_if_correct_command_called(self):
+        """Add error handling for wildcard matching, call parent method to perform other checks."""
+        if self.parsed_args.cmd not in self.commands:
+            log.info(
+                "If you used wildcard name matching your shell might have matched some files in your cwd. "
+                'Verify if your wildcard does not match any files. Try client "*" connect, instead of '
+                "client * connect."
+            )
+        return super().check_if_correct_command_called()
 
     @property
     def client_list(self):

@@ -2,7 +2,6 @@
 import logging
 from lib_testbed.generic.util.logger import log, LOGGER_NAME, update_logger_with_stream_handler  # noqa: E402
 from lib_testbed.generic.pod.pod import Pod  # noqa: E402
-from lib_testbed.generic.util.config import get_model_capabilities
 
 GW_NAME = "gw"
 

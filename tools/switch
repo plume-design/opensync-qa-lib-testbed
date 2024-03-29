@@ -120,8 +120,10 @@ if __name__ == "__main__":
 
     if len(args) > 1:
         if args[1] in switch_commands:
-            if nodes[0].lower() == 'all':
-                nodes = [switch_tool.get_list_of_all_port_names()]
+            if nodes[0].lower() == "all":
+                nodes = switch_tool.get_list_of_all_port_names()
+            if len(nodes) > 1:
+                nodes = [nodes]
 
             cmd = args[1]
             cmd_args = nodes
@@ -169,7 +171,8 @@ if __name__ == "__main__":
         table = format_output(rets)
         print(terminaltables.DoubleTable(table).table)
         successful_nodes = parallelssh.select_items(rets)
-        if len(successful_nodes) == len(nodes):
+        len_nodes = len(nodes[0]) if isinstance(nodes[0], list) else len(nodes)
+        if len(successful_nodes) == len_nodes:
             exit(0)
         elif len(successful_nodes) == 0:
             exit(1)

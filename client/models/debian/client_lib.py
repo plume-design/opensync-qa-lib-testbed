@@ -13,6 +13,7 @@ from distutils.version import StrictVersion
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.client.models.generic.client_lib import ClientLib as ClientLibGeneric
 from lib_testbed.generic.client.models.rpi.client_tool import ClientTool
+from lib_testbed.generic.client.models.generic.client_lib import UPGRADE_DIR, UPGRADE_LOCAL_CACHE_DIR
 
 
 class ClientLib(ClientLibGeneric):
@@ -46,7 +47,7 @@ class ClientLib(ClientLibGeneric):
         Returns: (ret_val, std_out, str_err)
 
         """
-        self.run_command("rm -R /tmp/automation/")
+        self.run_command("rm -R %s" % UPGRADE_DIR)
         # short sleep to spread threads in time
         time.sleep(random.randint(1, 10) / 10)
         debian_upgrade = DebianClientUpgrade(
@@ -54,7 +55,11 @@ class ClientLib(ClientLibGeneric):
         )
         if http_address:
             if debian_upgrade.device_type not in http_address:
-                return [20, "", f"Provided Debian image is not intended for {debian_upgrade.device_type}"]
+                return [
+                    20,
+                    "",
+                    f"Provided upgrade package is not intended for {debian_upgrade.device_type}: {http_address}",
+                ]
             fw_path = debian_upgrade.download_image_from_url(http_address)
         if fw_path and not os.path.isabs(fw_path):
             fw_path = os.path.abspath(fw_path)
@@ -111,9 +116,6 @@ class ClientLib(ClientLibGeneric):
         return self.run_command("sudo /home/plume/dhcp/dhcp_reservation.py", timeout=300, **kwargs)
 
 
-UPGRADE_DIR = "/tmp/automation/"
-
-
 class DebianClientUpgrade:
     lock = Lock()
     upgrade_script = "upgrade-image"
@@ -131,7 +133,7 @@ class DebianClientUpgrade:
             self.lib.set_skip_ns_flag(status=True)
         self.restore_cfg = restore_cfg
         self.restore_files = restore_files
-        self.device_type = self.get_client_type()
+        self.device_type, self.brix_type = self.get_client_type()
         self.client_name = self.lib.get_nickname()
         self.upgrade_thread = self.get_upgrade_thread()
         self.current_version = ""
@@ -145,19 +147,28 @@ class DebianClientUpgrade:
             return [2, "", "Upgrade is supported since version >= 1.2.23. Upgrade your device manually"]
         return [0, version[1], ""]
 
-    def get_client_type(self):
+    def get_client_type(self) -> tuple[str, bool]:
+        """
+        Return tuple of "client-type", is_brix_client.
+        """
         version = self.lib.get_stdout(self.lib.version(timeout=10), skip_exception=True)
+        if version.startswith("plume_"):
+            # We removed 'plume_' prefix from new RPi testbed images. This is a workaround for old versions
+            # of upgrade-rpi script, which check that the current client-type is present in the upgrade package.
+            self.lib.run_command("sudo sed -i 's/^plume_//' /.version")
+            version = self.lib.get_stdout(self.lib.version(timeout=10), skip_exception=True)
         if self.type_version_separator not in version:
-            # brix-client can be upgraded to debian-client if its disk was reflashed after
-            # version 1.2.23 (it then uses debian-client compatible partitioning scheme).
             hostname = self.lib.get_stdout(self.lib.run_command("hostname"), skip_exception=True)
             mount_points = self.lib.get_stdout(self.lib.run_command("mount -t ext4"), skip_exception=True)
-            if "brix-client" in hostname and "/altroot" in mount_points:
-                # Workaround, don't restore hostname when upgrading brix-client to debian-client
-                self.restore_cfg = False
-                return "debian-client"
-            return ""
-        return version.partition(self.type_version_separator)[0]
+            if "brix-client" in hostname:
+                # brix-client can be upgraded to debian-client if its disk was reflashed after
+                # version 1.2.23 (it then uses debian-client compatible partitioning scheme).
+                if "/altroot" in mount_points:
+                    return "debian-client", True
+                else:
+                    return "", True
+            return "", False
+        return version.partition(self.type_version_separator)[0], False
 
     def get_upgrade_thread(self):
         if not self.device_type:
@@ -218,7 +229,8 @@ class DebianClientUpgrade:
         self.store_files.append({"fileName": file_name, "outPath": out_path})
 
     def store_configs(self, store_path):
-        if self.restore_cfg:
+        if self.restore_cfg and not self.brix_type:
+            # Don't restore hostname when upgrading brix-client, we want it to end up named debian-client
             self.get_file(file_path="/etc/hosts", store_path=store_path, file_name="hosts", out_path="/etc/")
 
         if "server" in self.device_type:
@@ -332,7 +344,8 @@ class DebianClientUpgrade:
                 break
             time.sleep(10)
 
-        if client_hostname:
+        if client_hostname and not self.brix_type:
+            # Don't restore hostname when upgrading brix-client, we want it to end up named debian-client
             self.lib.set_hostname(client_hostname)
 
         for store_file in self.store_files:
@@ -375,7 +388,7 @@ class DebianClientUpgrade:
         download_urls = [http_address, f"{http_address}.{self.checksum_type}.save"]
         expected_files = [file_name.split("/")[-1] for file_name in download_urls]
         if self.download_locally:
-            fw_path = f"{UPGRADE_DIR}upgrade_{self.device_type}"
+            fw_path = UPGRADE_LOCAL_CACHE_DIR / f"upgrade_{self.device_type}"
             self.download_image_locally(download_urls, fw_path, expected_files)
         else:
             fw_path = UPGRADE_DIR
@@ -429,6 +442,13 @@ class DebianClientUpgrade:
 
         """
         if not self.device_type:
+            if self.brix_type:
+                return [
+                    15,
+                    "",
+                    "Upgrade not possible, brix client uses old disk partitioning scheme, "
+                    "disk needs to be physically reflashed",
+                ]
             return [10, "", "Upgrade tool is intended for RPI\\Debian clients only"]
 
         if "server" in self.device_type and self.lib.name != "host":
@@ -440,7 +460,7 @@ class DebianClientUpgrade:
         self.current_version = self.lib.get_stdout(self.current_version)
 
         if fw_path is None:
-            fw_path = f"{UPGRADE_DIR}upgrade_{self.device_type}"
+            fw_path = UPGRADE_LOCAL_CACHE_DIR / f"upgrade_{self.device_type}"
             download_urls = self.get_latest_image_urls(self.device_type, version=version)
             expected_files = [file_name.split("/")[-1] for file_name in download_urls]
             target_version = re.findall(self.version_pattern, " ".join(expected_files))[0]
@@ -470,6 +490,7 @@ class DebianClientUpgrade:
 
         image_name = os.path.basename(fw_path)
         target_fw_type, _, rest = image_name.removeprefix("upgrade_").partition(self.type_version_separator)
+        target_fw_type = target_fw_type.removeprefix("plume_")
         target_version = re.findall(self.version_pattern, rest)[0]
 
         if self.download_locally and not os.path.exists(fw_path):
@@ -520,13 +541,21 @@ class DebianClientUpgrade:
         self.upload_files_to_client(client_hostname, store_path)
         # Even though upgrade is finished successfully return code is 255
         upgrade_result[0] = 0
+        self.lib.run_command(f"rm -rf {UPGRADE_DIR}")
+
+        if self.brix_type:
+            # Brix clients (often? always?) need an additional reboot to properly load updated Intel Wi-Fi firmware
+            reboot_result = self.lib.reboot()
+            upgrade_result = self.lib.merge_result(upgrade_result, reboot_result)
+            self.wait_for_reboot()
+
         return upgrade_result
 
     def get_latest_image_urls(self, device_type, build_name=None, max_retry=10, version=None):
         """
         Get the latest device image for target device type
         Args:
-            device_type: (str) device type, debian-server, perf-client, plume_rpi_server, ...
+            device_type: (str) device type, debian-server, perf-client, rpi_server, ...
             build_name: (str) build name, default: self.build_name
             max_retry: (int) max attempts to get an image for the target device type
             version: (str) version to download from the artifactory (or get latest or stable version)
@@ -577,7 +606,7 @@ class DebianClientUpgrade:
 
         if device_type not in build_info.text:
             raise Exception(
-                f"Can not find properly raspberry image for {device_type} after checked last 10 builds "
+                f"Can not find suitable upgrade package for {device_type} after checking last 10 builds "
                 f"from {build_name} project"
             )
 

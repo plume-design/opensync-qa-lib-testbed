@@ -1,6 +1,7 @@
+import functools
 import time
 
-RPOWER_TOOL = "/home/plume/tools/rpower"
+from lib_testbed.generic.rpower.util import get_rpower_path
 
 
 class CommonPduLib:
@@ -20,6 +21,10 @@ class CommonPduLib:
         ) = (server_object, rpower_devices, pod_names, client_names, address, user, password, port, tb_config)
         if "rpower_timestamps" not in self.tb_config:
             self.tb_config["rpower_timestamps"] = dict()
+
+    @functools.cached_property
+    def rpower_tool(self):
+        return get_rpower_path(self.server_object)
 
     def get_devices_to_execute(self, device_names):
         if isinstance(device_names, str):
@@ -68,7 +73,7 @@ class PduLib(CommonPduLib):
             f" --pdu-type {self.get_name()} --user-name {self.user} --password {self.password} "
             f"--ip-address {self.address}:{self.port}"
         )
-        return self.strip_stdout(self.server_object.run_raw(f"{RPOWER_TOOL} -p {ports} -a {action_name} {args}"))
+        return self.strip_stdout(self.server_object.run_raw(f"{self.rpower_tool} -p {ports} -a {action_name} {args}"))
 
     def execute_requests(self, device_names, action_name):
         device_names = self.get_devices_to_execute(device_names)
@@ -95,15 +100,20 @@ class PduLib(CommonPduLib):
             return results
         response_stdout = response_output[1].split("\n")
         assert len(response_stdout) == len(device_names), f"Did not get responses from all devices: {device_names}"
-        for device_name in device_names:
+        for i, device_name in enumerate(device_names):
             pdu_device_port = self.get_pdu_device_port(device_name)
             for stdout_port in response_stdout:
-                if str(pdu_device_port) not in stdout_port:
-                    continue
-                results[device_name] = (
-                    [0, stdout_port, ""] if "failed" not in stdout_port.lower() else [1, "", stdout_port]
-                )
-                break
+                if response_output[0] == 0:
+                    # keeping this for backwards compatibility when the exit code was zero
+                    if str(pdu_device_port) not in stdout_port:
+                        continue
+                    results[device_name] = (
+                        [0, stdout_port, ""] if "failed" not in stdout_port.lower() else [1, "", stdout_port]
+                    )
+                    break
+                else:
+                    # get stdout and stderr if the exit code is not zero.
+                    results[device_name] = [response_output[0], response_stdout[i], response_output[2].split("\n")[i]]
         return results
 
     def on(self, device_names):

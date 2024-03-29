@@ -144,15 +144,11 @@ class MqttClient:
         topic = MqttResolver.get_hero_stats_topic(self.config, device_id, lid)
         return self.collect(topic, on_message_cb, timeout, wait, max_messages)
 
-    def collect_fcm_flows(
-        self, device_id, lid, on_message_cb, timeout=5 * 60, wait=True, max_messages=None, topic=None
-    ):
+    def collect_fcm_flows(self, device_id, lid, on_message_cb, timeout=5 * 60, wait=True, max_messages=None):
         topic = MqttResolver.get_fcm_flows_topic(self.config, device_id, lid)
         return self.collect(topic, on_message_cb, timeout, wait, max_messages)
 
-    def collect_fcm_lan_stats(
-        self, device_id, lid, on_message_cb, timeout=5 * 60, wait=True, max_messages=None, topic=None
-    ):
+    def collect_fcm_lan_stats(self, lid, on_message_cb, timeout=5 * 60, wait=True, max_messages=None, topic=None):
         if not topic:
             topic = MqttResolver.get_fcm_lan_stats_topic(self.config, lid)
         return self.collect(topic, on_message_cb, timeout, wait, max_messages)
@@ -181,6 +177,10 @@ class MqttClient:
 
     def collect_dpi_stats(self, device_id, lid, on_message_cb, timeout=5 * 60, wait=True, max_messages=None):
         topic = MqttResolver.get_dpi_stats_topic(self.config, device_id, lid)
+        return self.collect(topic, on_message_cb, timeout, wait, max_messages)
+
+    def collect_app_qoe_stats(self, device_id, lid, on_message_cb, timeout=5 * 60, wait=True, max_messages=None):
+        topic = MqttResolver.get_app_qoe_stats_topic(self.config, device_id, lid)
         return self.collect(topic, on_message_cb, timeout, wait, max_messages)
 
     # The callback for when the client receives a CONNACK response from the server.
@@ -509,6 +509,10 @@ class MqttResolver:
         return f'DpiStats/{config["deployment_id"]}/{loc_id}/{device_id}'
 
     @staticmethod
+    def get_app_qoe_stats_topic(config, device_id, loc_id):
+        return f'QoE/app_3rd_party/{config["deployment_id"]}/{device_id}/{loc_id}'
+
+    @staticmethod
     def resolve_mqtt_topic(config, lid, topic_template):
         dpl_id = config["deployment_id"]
         zk_hosts = config.get("zk_hosts")
@@ -731,14 +735,15 @@ class MqttFakeStats:
         return mqtt_messages
 
     @staticmethod
-    def generate_fake_interference_msg(pods_serial, mqtt_message, busy, bands=None):
+    def generate_fake_interference_msg(pods_serial, mqtt_message, busy, bands: list = None, channels: list = None):
         """
         Method for generate fake interference
         Args:
             pods_serial: (list) [(str)] Serial of pods where we want to generate fake mqtt message
             mqtt_message: (list) [(str)] Mqtt message
-            bands: (list) Bands where we want to generate fake mqtt message 5G or 2G or all
             busy: (int) Interference in percents scope: 0 - 100
+            bands: (list) Bands where we want to generate fake mqtt message 5G or 2G or all
+            channels: (list) Channel list to change interference level on them, if None change all channels
         Returns: (list) [(dict)] List of fake mqtt messages
 
         """
@@ -755,6 +760,8 @@ class MqttFakeStats:
                 for band in bands:
                     if band in survey["band"]:
                         for interference in survey["surveyList"]:
+                            if channels and interference["channel"] not in channels:
+                                continue
                             interference["busy"] = busy
                             interference["busyRx"] = busy
             fake_mqtt.append(mqtt_message.copy())
