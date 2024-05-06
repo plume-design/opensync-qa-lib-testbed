@@ -72,7 +72,7 @@ RUN chown root:root ${CHROMEDRIVER_PATH} \
     && rm -rf /tmp/chrome
 
 # -- Install Jmeter
-RUN wget --no-check-certificate https://dlcdn.apache.org//jmeter/binaries/apache-jmeter-5.5.tgz \
+RUN wget --no-check-certificate https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.5.tgz \
     && tar xf apache-jmeter-5.5.tgz -C /opt \
     && mv /opt/apache-jmeter-5.5 /opt/jmeter \
     && ln -s /opt/jmeter/bin/jmeter /usr/local/bin/jmeter \
