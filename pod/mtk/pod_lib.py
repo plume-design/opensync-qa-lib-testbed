@@ -44,16 +44,24 @@ class PodLib(PodLibGeneric):
         return driver_data_rate
 
     # mandatory for DFS testing: tests/dfs
-    def trigger_single_radar_detected_event(self, phy_radio_name, **kwargs):
+    def trigger_single_radar_detected_event(
+        self, phy_radio_name, segment_id: int = None, chirp: int = None, freq_offest: int = None, **kwargs
+    ):
         """
         Trigger radar detected event
         Args:
             phy_radio_name: (str): Phy radio name
+            segment_id: (int): Segment ID - optional
+            chirp: (int) Chirp information - optional
+            freq_offest: (int) Frequency offset - optional
             **kwargs:
 
         Returns: list(retval, stdout, stderr)
 
         """
+        if segment_id or chirp or freq_offest:
+            raise NotImplementedError
+
         self.run_command(f"echo -n 1 > /sys/kernel/debug/ieee80211/{phy_radio_name}/mt76/radar_trigger", **kwargs)
         return [0, "", ""]
 
@@ -82,7 +90,7 @@ class PodLib(PodLibGeneric):
         Returns: (list) flow list
 
         """
-        response = self.run_command("conntrack -L", **kwargs)
+        response = self.run_command("cat /proc/net/nf_conntrack | grep OFFLOAD", **kwargs)
         dump = self.get_stdout(response, skip_exception=True)
         if not dump:
             return []
@@ -286,9 +294,8 @@ class PodLib(PodLibGeneric):
             tcp_or_udp = False  # tcp is false, udp is true
             elements = connection_flow.split(" ")
             for line in elements:
-                if "ib1" in line:  # check ib1 bit30 to indicate tcp or udp
-                    value = line[4:]
-                    tcp_or_udp = int(value, 16) & (1 << 30) != 0
+                if "udp" in line:
+                    tcp_or_udp = True
 
             if not tcp_or_udp and expected_protocol == 6:  # tcp
                 status = True
@@ -465,3 +472,14 @@ class PodLib(PodLibGeneric):
 
         output = self.run_command(cmd, **kwargs)
         return output
+
+    def get_client_pmk(self, client_mac, **kwargs):
+        iface_list = " ".join(self.capabilities.get_home_ap_ifnames(return_type=list))
+        cmd = (
+            f"sh -c 'for iface in {iface_list}; do hostapd_cli -i $iface "
+            f"-p /var/run/hostapd-$(cat /sys/class/net/$iface/phy80211/name) pmksa | grep {client_mac} "
+            f"| cut -c 21-52 | grep -v FAIL; done'"
+        )
+        # due to many ifaces ret code might be invalid
+        pmk = self.get_stdout(self.strip_stdout_result(self.run_command(cmd, **kwargs)), skip_exception=True)
+        return [0 if pmk else 1, pmk, f"No PMK for {client_mac}" if not pmk else ""]

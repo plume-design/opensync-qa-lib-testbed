@@ -222,20 +222,19 @@ class ClientLib(ClientLibGeneric):
     def prepare_bt(self, iface=None, **kwargs):
         raise NotImplementedError
 
-    def get_wlan_iface(self, **kwargs) -> List[str]:
+    def get_wlan_iface(self, **kwargs) -> str:
         """
         Get all WLAN interfaces, if force=True get interface name directly from device
         Returns: (list) interfaces
 
         """
         force = kwargs.pop("force", False)
-        cmd_get_eth_interfaces = '(Get-NetAdapter).Name | Select-String -Pattern "Wi-Fi"'
 
         if hasattr(self, "wlan_iface") and not force:
             iface = self.wlan_iface
         else:
-            iface = self.get_stdout(self.strip_stdout_result(self.run_command(cmd_get_eth_interfaces, **kwargs)))
-            self.wlan_iface = iface
+            primary_wifi_iface_details = self.iface.get_primary_wifi_iface_details()
+            self.wlan_iface = iface = primary_wifi_iface_details["name"]
 
         return iface
 
@@ -337,7 +336,7 @@ class ClientLib(ClientLibGeneric):
         ipv4=True,
         ipv6=False,
         ipv6_stateless=False,
-        timeout=10,
+        timeout=20,
         reuse=False,
         static_ip=None,
         clear_dhcp=True,
@@ -551,6 +550,7 @@ class ClientLib(ClientLibGeneric):
         if not ifname:
             return [1, "", "Missing wlan interface"]
 
+        self.run_command(f'Enable-NetAdapter -Name "{ifname}"')
         key_mgmt = self._define_wifi_key_mgmt(key_mgmt=key_mgmt, ssid=ssid)
         log.info(
             f"Connect clients {self.device.name} iface: {ifname} to ssid: {ssid}, bssid: {bssid}, "
@@ -561,7 +561,7 @@ class ClientLib(ClientLibGeneric):
 
         output = self._connect_to_wlan(ssid)
         log.info("Waiting for connection established")
-        if not wait_for(partial(self._is_wifi_connected, ifname), 60, 5.0)[0]:
+        if not wait_for(partial(self._is_wifi_connected), 60, 5.0)[0]:
             return [1, "", "Client is not connected to WiFi"]
 
         if bssid:
@@ -596,15 +596,16 @@ class ClientLib(ClientLibGeneric):
         )
         return self.strip_stdout_result(self.run_command(cmd))[1]
 
-    def _create_windows_wifi_profile(self, ssid, psk, key_mgmt):
+    def _create_windows_wifi_profile(self, ssid, psk, key_mgmt: str = None):
         # Remove all existed windows network profiles to be sure the client won't be associated to wrong network.
         self.run_command("netsh wlan delete profile name=* i=*")
         cmd = (
             f'$PW = ConvertTo-SecureString "{psk}" -AsPlainText -Force; '
             f"Set-WiFiProfile -ProfileName {ssid} -ConnectionMode auto "
-            f"-Authentication {key_mgmt} "
             f"-Password $PW -Encryption AES"
         )
+        if key_mgmt:
+            cmd += f" -Authentication {key_mgmt} "
         self.run_command(cmd)
 
     def _define_wifi_key_mgmt(self, key_mgmt: str, ssid: str) -> str:
@@ -616,12 +617,20 @@ class ClientLib(ClientLibGeneric):
 
     def _get_used_wpa_mode(self, ssid: str, timeout: int = 60) -> str | None:
         wpa_mode = None
+        encoding_fix = False
         time_to_wait = timeout + time.time()
         while time_to_wait > time.time():
             self.run_command("Search-WiFiNetwork")
-            scan_result = self.strip_stdout_result(
-                self.run_command("Get-WiFiAvailableNetwork | Format-Table -AutoSize | Out-String -Width 10000")
+            scan_result = self.run_command(
+                "Get-WiFiAvailableNetwork | Format-Table -AutoSize | Out-String -Width 10000"
             )
+            if isinstance(scan_result[1], bytes) and not encoding_fix:
+                log.warning("Powershell encoding issue detected. Forcing encoding to UTF-8...")
+                self._change_powershell_encoding()
+                encoding_fix = True
+                time_to_wait = timeout + time.time()
+                continue
+            scan_result = self.strip_stdout_result(scan_result)
             for line in scan_result[1].splitlines():
                 if ssid not in line:
                     continue
@@ -637,6 +646,7 @@ class ClientLib(ClientLibGeneric):
         if not ifname:
             return [1, "", "Missing wlan interface"]
 
+        self.run_command("netsh wlan delete profile name=* i=*")
         cmd = f'netsh wlan disconnect interface="{ifname}"'
 
         return self.strip_stdout_result(self.run_command(cmd))
@@ -658,14 +668,9 @@ class ClientLib(ClientLibGeneric):
             parameter = "open"
         return parameter
 
-    def _is_wifi_connected(self, ifname):
-        cmd = f"(Get-NetAdapter -Name {ifname}).status"
-        output = self.strip_stdout_result(self.run_command(cmd))
-        if output[1] == "Up":
-            result = True
-        else:
-            result = False
-        return result
+    def _is_wifi_connected(self) -> bool:
+        wifi_iface_details = self.iface.get_primary_wifi_iface_details()
+        return wifi_iface_details["state"] == "connected"
 
     def make_dir(self, path, **kwargs):
         path = path.replace("/", "\\")
@@ -718,6 +723,54 @@ class ClientLib(ClientLibGeneric):
             return "unknown"
         return client_bssid.group()
 
+    def _change_powershell_encoding(self):
+        """Force change powershell encoding to be able to use unicodes."""
+        # Set UTF-8 for powershell profile
+        self.run_command(
+            "'$OutputEncoding = [console]::InputEncoding = [console]::OutputEncoding = "
+            "New-Object System.Text.UTF8Encoding' + [Environment]::Newline + "
+            "(Get-Content -Raw $PROFILE -ErrorAction SilentlyContinue) | Set-Content -Encoding utf8 $PROFILE"
+        )
+        # Set UTF-8 encoding in registry
+        self.run_command("reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage /t REG_SZ /v ACP /d 65001 /f")
+        self.run_command(
+            "reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage /t REG_SZ /v OEMCP /d 65001 /f"
+        )
+        self.run_command(
+            "reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage /t REG_SZ /v MACCP /d 65001 /f"
+        )
+        self.run_command("shutdown /r")
+        # Wait for reboot
+        wait_for(lambda: self.uptime(retry=False, skip_logging=True)[0], timeout=120, tick=10)
+        self.wait_available(timeout=120)
+
 
 class ClientIface(Iface):
-    pass
+    def get_wifi_interfaces(self) -> list:
+        all_wifi_interfaces = self.lib.get_stdout(
+            self.lib.strip_stdout_result(self.lib.run_command("netsh wlan show interfaces"))
+        ).split("\r\n\r\n")
+        parsed_wifi_interfaces = list()
+        keys_to_parse = ["name", "type", "state"]
+        for interface_details in all_wifi_interfaces:
+            if "Name" not in interface_details:
+                continue
+            parsed_interface_details = dict()
+            for key_to_parse in keys_to_parse:
+                for interface_entry in interface_details.splitlines():
+                    if key_to_parse in interface_entry.lower():
+                        if parsed_value := re.search(r"(?<=: ).*", interface_entry):
+                            parsed_interface_details[key_to_parse] = parsed_value.group()
+                        break
+            parsed_wifi_interfaces.append(parsed_interface_details)
+
+        return parsed_wifi_interfaces
+
+    def get_primary_wifi_iface_details(self) -> dict:
+        all_wifi_interfaces = self.get_wifi_interfaces()
+        primary_wifi_iface = next(
+            filter(lambda wifi_iface: (wifi_iface["type"] == "Primary"), all_wifi_interfaces), None
+        )
+        if not primary_wifi_iface:
+            raise Exception(f"Not found any primary Wi-F interface. All Wi-Fi interfaces:\n{all_wifi_interfaces}")
+        return primary_wifi_iface

@@ -16,4 +16,7 @@ def framework_cache_management(request):
 
     # clear cache directory by removing files older than 7 days
     log.info("Cleaning framework cache directory")
-    subprocess.call(["find", CACHE_DIR, "-type", "f", "-mtime", "+7", "-delete"], stdout=None)
+    subprocess.call(
+        ["find", CACHE_DIR, "-type", "f", "-mtime", "+7", "-not", "-path", f"{CACHE_DIR}/.local*", "-delete"],
+        stdout=None,
+    )

@@ -12,6 +12,7 @@ DEVICE_TIMEOUT = 60 * 60
 
 class DeviceApi:
     def __init__(self, **kwargs):
+        self.start_class_handler = True
         self.lib = None
 
     def get_device_dir(self):
@@ -40,6 +41,7 @@ class DeviceApi:
 
     @parse_request
     def teardown_class_handler(self, request):
+        self.start_class_handler = True
         self.lib.free_device()
 
     @parse_request
@@ -85,6 +87,10 @@ class DeviceApi:
         response = self.lib.wait_available(timeout=timeout)
         return self.lib.get_stdout(response, **kwargs)
 
+    def wait_unavailable(self, timeout=120, **kwargs):
+        response = self.lib.wait_unavailable(timeout=timeout)
+        return self.lib.get_stdout(response, **kwargs)
+
 
 class DevicesApi:
     def __init__(self, obj_list, **kwargs):
@@ -115,11 +121,11 @@ class DevicesApi:
     @classmethod
     def getattr(cls, self_obj, attr_name):
         def is_ssh_exception(results):
-            if type(results) == SshException:
+            if isinstance(results, SshException):
                 return True
             if isinstance(results, list):
                 for result in results:
-                    if type(result) == SshException:
+                    if isinstance(result, SshException):
                         return True
             return False
 
@@ -133,7 +139,7 @@ class DevicesApi:
             stderrs = []
 
             for result in results:
-                if type(result) != SshException:
+                if not isinstance(result, SshException):
                     continue
                 ssh_exception = result
                 names.append(ssh_exception.name)

@@ -178,6 +178,9 @@ class TestBedToolLib:
         try:
             from lib.cloud.custbase import CustBase
             from lib.cloud.userbase import UserBase
+            from lib.util.tb_recovery import TbRecovery
+            from lib_testbed.generic.rpower.rpowerlib import PowerControllerApi
+            from lib_testbed.generic.switch.switch_api_resolver import SwitchApiResolver
         except (ModuleNotFoundError, OpenSyncException):
             log.error("Cloud modules are not available, cannot perform recovery")
             _print_state("Failed")
@@ -214,15 +217,17 @@ class TestBedToolLib:
         gw_pod = _pod_factory.Pod().resolve_obj(name="gw", role="gw", config=self.tb_config, multi_obj=False)
         gw_pod.set_wano_cfg({})
         # Use a (fake) node/test with none of the location, wan_connection, ... marks, so that
-        # cloud_recovery puts the testbed and its location into a state that is close enough to
-        # default. Calling cloud.setup_class_handler() is enough to get cloud_recovery to run.
+        # tb_recovery puts the testbed and its location into a state that is close enough to default.
         admin = CustBase(name="admin", role="admin", config=self.tb_config)
         user = UserBase(name="user", role="user", conf=self.tb_config)
         admin.own_markers = user.own_markers = {"session": []}
         admin.all_markers = user.all_markers = []
         admin.ub, user.cb = user, admin
         admin.initialize()
-        admin.cloud_recovery.run(force=True)
+        rpower = PowerControllerApi(self.tb_config)
+        switch = SwitchApiResolver(**{"config": self.tb_config})
+        tb_recovery = TbRecovery(user, rpower, switch, scope="testbed_tool", all_markers=[], own_markers=[])
+        tb_recovery.run()
 
         if self.tb_config.get("runtime_lte_only_uplink", False):
             log.warning("Restoring uplink connection for GW, after LTE run")

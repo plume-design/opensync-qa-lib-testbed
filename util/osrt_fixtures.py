@@ -13,13 +13,14 @@ tb_config which is of scope session (parse the config file once).
     The fixtures can't be used across classes defined in a single
     module. Avoid mixing test classes and test functions!
 """
+
 import urllib
 import pytest
 from copy import deepcopy
 
 from lib_testbed.generic.client.models.generic.client_api import ClientApi
 from lib_testbed.generic.pod.generic.pod_api import PodApi
-from lib_testbed.generic.util.ssh.device_api import DeviceApi
+from lib_testbed.generic.util.ssh.device_api import DeviceApi, DevicesApi
 from lib_testbed.generic.rpower.rpowerlib import PowerControllerApi
 from lib_testbed.generic.switch.generic.switch_api_generic import SwitchApiGeneric
 from lib_testbed.generic.util.fixture_utils import OSRTFixtureTestObject, safe_setup
@@ -116,7 +117,7 @@ def modify_config_for_local_mqtt_broker(tb_config, tb_config_orig) -> TbConfig:
 @pytest.fixture(scope="session")
 def rpower_session(tb_config, request) -> PowerControllerApi:
     """Session-scoped rpower object"""
-    rpower_obj = _rpower_factory.Rpower().create_obj(module_name="rpower", config=tb_config)
+    rpower_obj = _rpower_factory.Rpower().create_obj(module_name="rpower", request=request, config=tb_config)
     with safe_setup(OSRTFixtureTestObject(rpower_obj), scope="session", request=request):
         yield rpower_obj
 
@@ -141,7 +142,7 @@ def rpower(rpower_module, request) -> PowerControllerApi:
 @pytest.fixture(scope="session")
 def switch_session(tb_config, request) -> SwitchApiGeneric:
     """Session-scoped switch object"""
-    switch_obj = _switch_factory.Switch().create_obj(module_name="switch", config=tb_config)
+    switch_obj = _switch_factory.Switch().create_obj(module_name="switch", request=request, config=tb_config)
     with safe_setup(OSRTFixtureTestObject(switch_obj), scope="session", request=request):
         yield switch_obj
 
@@ -164,11 +165,17 @@ def switch(switch_module, request) -> SwitchApiGeneric:
 
 
 @pytest.fixture(scope="session")
-def w1_session(tb_config, request) -> ClientApi:
+def _w1_object(tb_config, request) -> ClientApi:
+    """Returns w1 client session object."""
+    w1 = _client_factory.Client().resolve_obj(name="w1", config=tb_config, wifi=True, multi_obj=False, request=request)
+    return w1
+
+
+@pytest.fixture(scope="session")
+def w1_session(_w1_object, request) -> ClientApi:
     """``w1`` wifi client, session-scoped"""
-    client = _client_factory.Client().resolve_obj(name="w1", config=tb_config, wifi=True, multi_obj=False)
-    with safe_setup(OSRTFixtureTestObject(client), scope="session", request=request):
-        yield client
+    with safe_setup(OSRTFixtureTestObject(_w1_object), scope="session", request=request):
+        yield _w1_object
 
 
 @pytest.fixture(scope="module")
@@ -186,11 +193,17 @@ def w1(w1_module, request) -> ClientApi:
 
 
 @pytest.fixture(scope="session")
-def w2_session(tb_config, request) -> ClientApi:
+def _w2_object(tb_config, request) -> ClientApi:
+    """Returns w2 client session object."""
+    w2 = _client_factory.Client().resolve_obj(name="w2", config=tb_config, wifi=True, multi_obj=False, request=request)
+    return w2
+
+
+@pytest.fixture(scope="session")
+def w2_session(_w2_object, request) -> ClientApi:
     """``w2`` wifi client, session-scoped"""
-    client = _client_factory.Client().resolve_obj(name="w2", config=tb_config, wifi=True, multi_obj=False)
-    with safe_setup(OSRTFixtureTestObject(client), scope="session", request=request):
-        yield client
+    with safe_setup(OSRTFixtureTestObject(_w2_object), scope="session", request=request):
+        yield _w2_object
 
 
 @pytest.fixture(scope="module")
@@ -208,11 +221,17 @@ def w2(w2_module, request) -> ClientApi:
 
 
 @pytest.fixture(scope="session")
-def w3_session(tb_config, request) -> ClientApi:
+def _w3_object(tb_config, request) -> ClientApi:
+    """Returns w3 client session object."""
+    w3 = _client_factory.Client().resolve_obj(name="w3", config=tb_config, wifi=True, multi_obj=False, request=request)
+    return w3
+
+
+@pytest.fixture(scope="session")
+def w3_session(_w3_object, request) -> ClientApi:
     """``w3`` wifi client, session-scoped"""
-    client = _client_factory.Client().resolve_obj(name="w3", config=tb_config, wifi=True, multi_obj=False)
-    with safe_setup(OSRTFixtureTestObject(client), scope="session", request=request):
-        yield client
+    with safe_setup(OSRTFixtureTestObject(_w3_object), scope="session", request=request):
+        yield _w3_object
 
 
 @pytest.fixture(scope="module")
@@ -230,11 +249,17 @@ def w3(w3_module, request) -> ClientApi:
 
 
 @pytest.fixture(scope="session")
-def e1_session(tb_config, request) -> ClientApi:
+def _e1_object(tb_config, request) -> ClientApi:
+    """Returns e1 client session object."""
+    e1 = _client_factory.Client().resolve_obj(name="e1", config=tb_config, eth=True, multi_obj=False, request=request)
+    return e1
+
+
+@pytest.fixture(scope="session")
+def e1_session(_e1_object, request) -> ClientApi:
     """``e1`` ethernet client, session-scoped"""
-    client = _client_factory.Client().resolve_obj(name="e1", config=tb_config, eth=True, multi_obj=False)
-    with safe_setup(OSRTFixtureTestObject(client), scope="session", request=request):
-        yield client
+    with safe_setup(OSRTFixtureTestObject(_e1_object), scope="session", request=request):
+        yield _e1_object
 
 
 @pytest.fixture(scope="module")
@@ -252,11 +277,19 @@ def e1(e1_module, request) -> ClientApi:
 
 
 @pytest.fixture(scope="session")
-def e2_session(tb_config, request) -> ClientApi:
+def _e2_object(tb_config, request) -> ClientApi:
+    """Returns e2 client session object."""
+    e2 = _client_factory.Client().resolve_obj(
+        name="e2", config=tb_config, vlan="351", eth=True, multi_obj=False, request=request
+    )
+    return e2
+
+
+@pytest.fixture(scope="session")
+def e2_session(_e2_object, request) -> ClientApi:
     """``e2`` ethernet client, vlan351, session-scoped"""
-    client = _client_factory.Client().resolve_obj(name="e2", config=tb_config, vlan="351", eth=True, multi_obj=False)
-    with safe_setup(OSRTFixtureTestObject(client), scope="session", request=request):
-        yield client
+    with safe_setup(OSRTFixtureTestObject(_e2_object), scope="session", request=request):
+        yield _e2_object
 
 
 @pytest.fixture(scope="module")
@@ -274,11 +307,19 @@ def e2(e2_module, request) -> ClientApi:
 
 
 @pytest.fixture(scope="session")
-def e3_session(tb_config, request) -> ClientApi:
+def _e3_object(tb_config, request) -> ClientApi:
+    """Returns e3 client session object."""
+    e3 = _client_factory.Client().resolve_obj(
+        name="e3", config=tb_config, vlan="352", eth=True, multi_obj=False, request=request
+    )
+    return e3
+
+
+@pytest.fixture(scope="session")
+def e3_session(_e3_object, request) -> ClientApi:
     """``e3`` ethernet client, vlan 352, session-scoped."""
-    client = _client_factory.Client().resolve_obj(name="e3", config=tb_config, vlan="352", eth=True, multi_obj=False)
-    with safe_setup(OSRTFixtureTestObject(client), scope="session", request=request):
-        yield client
+    with safe_setup(OSRTFixtureTestObject(_e3_object), scope="session", request=request):
+        yield _e3_object
 
 
 @pytest.fixture(scope="module")
@@ -296,11 +337,45 @@ def e3(e3_module, request) -> ClientApi:
 
 
 @pytest.fixture(scope="session")
-def server_session(tb_config, request) -> ClientApi:
+def _bt1_object(tb_config, request) -> ClientApi:
+    """Returns bt client session object."""
+    bt = _client_factory.Client().resolve_obj(name="bt1", config=tb_config, bt=True, multi_obj=False, request=request)
+    return bt
+
+
+@pytest.fixture(scope="session")
+def bt1_session(_bt1_object, request) -> ClientApi:
+    """``bt1`` bluetooth client, session-scoped."""
+    with safe_setup(OSRTFixtureTestObject(_bt1_object), scope="session", request=request):
+        yield _bt1_object
+
+
+@pytest.fixture(scope="module")
+def bt1_module(bt1_session, request) -> ClientApi:
+    """``bt1`` bluetooth client, module-scoped"""
+    with safe_setup(OSRTFixtureTestObject(bt1_session), scope="module", request=request):
+        yield bt1_session
+
+
+@pytest.fixture(scope="function")
+def bt1(bt1_module, request) -> ClientApi:
+    """``bt1`` bluetooth client."""
+    with safe_setup(OSRTFixtureTestObject(bt1_module), scope="function", request=request):
+        yield bt1_module
+
+
+@pytest.fixture(scope="session")
+def _host_object(tb_config, request) -> ClientApi:
+    """Returns host client session object."""
+    server = _client_factory.Client().resolve_obj(name="host", config=tb_config, nickname="host", request=request)
+    return server
+
+
+@pytest.fixture(scope="session")
+def server_session(_host_object, request) -> ClientApi:
     """OSRT server object, session-scoped."""
-    client = _client_factory.Client().resolve_obj(name="host", config=tb_config, nickname="host")
-    with safe_setup(OSRTFixtureTestObject(client), scope="session", request=request):
-        yield client
+    with safe_setup(OSRTFixtureTestObject(_host_object), scope="session", request=request):
+        yield _host_object
 
 
 @pytest.fixture(scope="module")
@@ -318,11 +393,104 @@ def server(server_session, request) -> ClientApi:
 
 
 @pytest.fixture(scope="session")
-def gw_session(tb_config, request) -> PodApi:
+def _iptv_host_object(tb_config, request) -> ClientApi:
+    """Returns iptv_host client session object."""
+    iptv_host = _client_factory.Client().resolve_obj(
+        name="iptv_host", config=tb_config, nickname="iptv_host", request=request
+    )
+    return iptv_host
+
+
+@pytest.fixture(scope="session")
+def _s2s_vpn_host_object(tb_config, request) -> ClientApi:
+    """Returns s2s_vpn_host client session object."""
+    s2s_vpn_host = _client_factory.Client().resolve_obj(
+        name="s2s_vpn_host", config=tb_config, nickname="s2s_vpn_host", request=request
+    )
+    return s2s_vpn_host
+
+
+@pytest.fixture(scope="session")
+def _p2s_vpn_host_object(tb_config, request) -> ClientApi:
+    """Returns p2s_vpn_host client session object."""
+    p2s_vpn_host = _client_factory.Client().resolve_obj(
+        name="p2s_vpn_host", config=tb_config, nickname="p2s_vpn_host", request=request
+    )
+    return p2s_vpn_host
+
+
+@pytest.fixture(scope="session")
+def _motion_host_object(tb_config, request) -> ClientApi:
+    """Returns motion_host client session object."""
+    motion_host = _client_factory.Client().resolve_obj(
+        name="motion_host", config=tb_config, nickname="motion_host", request=request
+    )
+    return motion_host
+
+
+@pytest.fixture(scope="session")
+def _wag_host_object(tb_config, request) -> ClientApi:
+    """Returns wag_host client session object."""
+    wag_host = _client_factory.Client().resolve_obj(
+        name="wag_host", config=tb_config, nickname="wag_host", request=request
+    )
+    return wag_host
+
+
+@pytest.fixture(scope="session")
+def wag_host_session(_wag_host_object, request) -> ClientApi:
+    """Client object for wag namespace on testbed server, session-scoped."""
+    with safe_setup(OSRTFixtureTestObject(_wag_host_object), scope="session", request=request):
+        yield _wag_host_object
+
+
+@pytest.fixture(scope="module")
+def wag_host_module(wag_host_session, request) -> ClientApi:
+    """Client object for wag namespace on testbed server, module-scoped"""
+    with safe_setup(OSRTFixtureTestObject(wag_host_session), scope="module", request=request):
+        yield wag_host_session
+
+
+@pytest.fixture(scope="function")
+def wag_host(wag_host_session, request) -> ClientApi:
+    """Client object for wag namespace on testbed server."""
+    with safe_setup(OSRTFixtureTestObject(wag_host_session), scope="function", request=request):
+        yield wag_host_session
+
+
+@pytest.fixture(scope="session")
+def _iperf_host_object(tb_config, request) -> ClientApi:
+    """Returns iperf_host client session object."""
+    iperf_host = _client_factory.Client().resolve_obj(
+        name="iperf_host", config=tb_config, nickname="iperf_host", request=request
+    )
+    return iperf_host
+
+
+@pytest.fixture(scope="session")
+def _dummy_client_object(tb_config, request) -> ClientApi:
+    """Dummy client object for devices without mgmt access"""
+    return _client_factory.Client().create_dummy_client_obj(tb_config)
+
+
+@pytest.fixture(scope="session")
+def _dummy_pod_object(tb_config, request) -> PodApi:
+    """Dummy pod object for devices without mgmt access"""
+    return _pod_factory.Pod().create_dummy_pod_obj(tb_config)
+
+
+@pytest.fixture(scope="session")
+def _gw_object(tb_config, request) -> PodApi:
+    """Returns gw pod session object."""
+    gw = _pod_factory.Pod().resolve_obj(name="gw", index=0, config=tb_config, multi_obj=False, request=request)
+    return gw
+
+
+@pytest.fixture(scope="session")
+def gw_session(request, _gw_object) -> PodApi:
     """Pod ``gw`` object, session-scoped."""
-    gw = _pod_factory.Pod().resolve_obj(name="gw", index=0, config=tb_config, multi_obj=False)
-    with safe_setup(OSRTFixtureTestObject(gw), scope="session", request=request):
-        yield gw
+    with safe_setup(OSRTFixtureTestObject(_gw_object), scope="session", request=request):
+        yield _gw_object
 
 
 @pytest.fixture(scope="module")
@@ -340,11 +508,17 @@ def gw(gw_module, request) -> PodApi:
 
 
 @pytest.fixture(scope="session")
-def l1_session(tb_config, request) -> PodApi:
+def _l1_object(tb_config, request) -> PodApi:
+    """Returns l1 pod session object."""
+    leaf = _pod_factory.Pod().resolve_obj(name="l1", index=1, config=tb_config, multi_obj=False, request=request)
+    return leaf
+
+
+@pytest.fixture(scope="session")
+def l1_session(request, _l1_object) -> PodApi:
     """Pod ``l1``, leaf, session-scoped"""
-    leaf = _pod_factory.Pod().resolve_obj(name="l1", index=1, config=tb_config, multi_obj=False)
-    with safe_setup(OSRTFixtureTestObject(leaf), scope="session", request=request):
-        yield leaf
+    with safe_setup(OSRTFixtureTestObject(_l1_object), scope="session", request=request):
+        yield _l1_object
 
 
 @pytest.fixture(scope="module")
@@ -362,11 +536,17 @@ def l1(l1_module, request) -> PodApi:
 
 
 @pytest.fixture(scope="session")
-def l2_session(tb_config, request) -> PodApi:
+def _l2_object(tb_config, request) -> PodApi:
+    """Returns l2 pod session object."""
+    leaf = _pod_factory.Pod().resolve_obj(name="l2", index=2, config=tb_config, multi_obj=False, request=request)
+    return leaf
+
+
+@pytest.fixture(scope="session")
+def l2_session(request, _l2_object) -> PodApi:
     """Pod ``l2``, leaf, session-scoped"""
-    leaf = _pod_factory.Pod().resolve_obj(name="l2", index=2, config=tb_config, multi_obj=False)
-    with safe_setup(OSRTFixtureTestObject(leaf), scope="session", request=request):
-        yield leaf
+    with safe_setup(OSRTFixtureTestObject(_l2_object), scope="session", request=request):
+        yield _l2_object
 
 
 @pytest.fixture(scope="module")
@@ -384,44 +564,44 @@ def l2(l2_module, request) -> PodApi:
 
 
 @pytest.fixture(scope="session")
-def pods_session(tb_config, request) -> PodApi:
+def pods_session(tb_config, request) -> DevicesApi:
     """Pods object containing all pods from the config. Session-scoped."""
-    pods = _pod_factory.Pods().resolve_obj(config=tb_config, multi_obj=True)
+    pods = _pod_factory.Pods().resolve_obj_by_fixture(request=request, config=tb_config, multi_obj=True)
     with safe_setup(OSRTFixtureTestObject(pods), scope="session", request=request):
         yield pods
 
 
 @pytest.fixture(scope="module")
-def pods_module(pods_session, request) -> PodApi:
+def pods_module(pods_session, request) -> DevicesApi:
     """Pods object containing all pods from the config. Module-scoped."""
     with safe_setup(OSRTFixtureTestObject(pods_session), scope="module", request=request):
         yield pods_session
 
 
 @pytest.fixture(scope="function")
-def pods(pods_module, request) -> PodApi:
+def pods(pods_module, request) -> DevicesApi:
     """Pods object containing all pods from the config. All functions are run in parallel on all pods."""
     with safe_setup(OSRTFixtureTestObject(pods_module), scope="function", request=request):
         yield pods_module
 
 
 @pytest.fixture(scope="session")
-def leafs_session(tb_config, request) -> PodApi:
+def leafs_session(tb_config, request) -> DevicesApi:
     """Leafs object containing all leafs from the config. Session-scoped."""
-    leafs = _pod_factory.Pods().resolve_obj(role="leaf", config=tb_config)
+    leafs = _pod_factory.Pods().resolve_obj_by_fixture(role="leaf", request=request, config=tb_config, multi_obj=True)
     with safe_setup(OSRTFixtureTestObject(leafs), scope="session", request=request):
         yield leafs
 
 
 @pytest.fixture(scope="module")
-def leafs_module(leafs_session, request) -> PodApi:
+def leafs_module(leafs_session, request) -> DevicesApi:
     """Leafs object containing all leafs from the config. Module-scoped."""
     with safe_setup(OSRTFixtureTestObject(leafs_session), scope="module", request=request):
         yield leafs_session
 
 
 @pytest.fixture(scope="function")
-def leafs(leafs_module, request) -> PodApi:
+def leafs(leafs_module, request) -> DevicesApi:
     """Leafs object containing all leafs from the config. All functions are run in parallel on all leafs."""
     with safe_setup(OSRTFixtureTestObject(leafs_module), scope="function", request=request):
         yield leafs_module
@@ -549,3 +729,14 @@ def connect_client(connect_wifi_client, connect_eth_client):
             return connect_eth_client(client_obj, **kwargs)
 
     yield _connect_client
+
+
+@pytest.fixture(scope="function")
+def continuous_ping(request):
+    """Start continuous ping on wireless or wired client"""
+
+    def _continuous_ping(client_obj: ClientApi, **kwargs):
+        client_obj.start_continuous_ping(**kwargs)
+        request.addfinalizer(lambda: client_obj.stop_continuous_ping(skip_exception=True))
+
+    return _continuous_ping

@@ -8,7 +8,6 @@ echo_debug()
 export DOCKER_TAG=${DOCKER_TAG:-'trident'}
 SKIP_DOCKER_START=${SKIP_DOCKER_START:-}
 DOCKER_START_FLAG=${DOCKER_START_FLAG:-"-ai"}
-DOCKER_SKIP_FULL=${DOCKER_SKIP_FULL:-"$(uname -a | grep -iq armv7l && echo 'true' || echo '')"}
 DOCKER_CONTAINER_NAME=${DOCKER_CONTAINER_NAME:-}
 DOCKER_HOSTNAME=${DOCKER_HOSTNAME:-"$(hostname | cut -d '.' -f1)-docker"}
 DOCKER_HOSTNAME=$(echo "$DOCKER_HOSTNAME" | head -c 64)
@@ -21,10 +20,12 @@ DOCKER_EXTRA_DOCKERFILE=${DOCKER_EXTRA_DOCKERFILE:-}
 # Enable BuildKit, so that we can use "RUN --mount=type=cache ..." in Dockerfiles.
 export DOCKER_BUILDKIT=1
 
+
 # Create framework cache directory
 FRAMEWORK_CACHE_DIR="$OPENSYNC_ROOT/.framework_cache"
-echo_debug "Creating framework cache directory: $FRAMEWORK_CACHE_DIR"
-mkdir -p "${FRAMEWORK_CACHE_DIR}/allure-results" "${FRAMEWORK_CACHE_DIR}/.local" "${FRAMEWORK_CACHE_DIR}/.pyenv"
+VIRTUAL_ENV="/tmp/.venv/"
+mkdir -p "${FRAMEWORK_CACHE_DIR}" "${FRAMEWORK_CACHE_DIR}/allure-results" "${FRAMEWORK_CACHE_DIR}/.local" 
+mkdir -p "${FRAMEWORK_CACHE_DIR}/.pyenv" "${FRAMEWORK_CACHE_DIR}/completions"
 
 PWDF="/etc/passwd"
 GRPF="/etc/group"
@@ -84,8 +85,7 @@ delete_grp_file()
 
 clean_framework_cache_dir()
 {
-    echo_debug "Cleaning $FRAMEWORK_CACHE_DIR by removing files older than 7 days"
-    find $FRAMEWORK_CACHE_DIR -type f -mtime +7 -delete
+    find $FRAMEWORK_CACHE_DIR -type f -mtime +7 ! -path '*/.local/*' ! -path '*/log_tumbler/*' -delete
 }
 
 if [ -z "${OPENSYNC_ROOT}" ]; then
@@ -152,17 +152,7 @@ fi
     echo building docker $DOCKER_TAG ... >&2
     # First build base docker file to get latest TRIDENT image
     docker build $QUIET_BUILD --network=host --tag "$DOCKER_TAG-base" . -f Dockerfile.base >&2
-    # Install pipenv packages separately from packages in Dockerfile.full, since full packages
-    # only make sense on desktop and other beefy computers, where GUI programs can be run,
-    # and get skipped on e.g. RPI. At the same time we want to install pipenv packages last,
-    # since those change most often, hence why we have the image split into three Dockerfiles,
-    # not just two.
-    if [ "${DOCKER_SKIP_FULL}" = "true" ]; then
-        docker tag "${DOCKER_TAG}-base" "${DOCKER_TAG}-full"
-    else
-        docker build $QUIET_BUILD --network=host --tag "$DOCKER_TAG-full" --build-arg PARENT_IMAGE="${DOCKER_TAG}-base" . -f Dockerfile.full >&2
-    fi
-    docker build $QUIET_BUILD --network=host --tag "$DOCKER_TAG" --build-arg PARENT_IMAGE="${DOCKER_TAG}-full" . -f Dockerfile.pip >&2
+    docker build $QUIET_BUILD --network=host --tag "$DOCKER_TAG" --build-arg PARENT_IMAGE="${DOCKER_TAG}-base" . -f Dockerfile.full >&2
 
     if [ -n "${DOCKER_EXTRA_DOCKERFILE}" ]; then
         DOCKER_EXTRA_CONTEXT=$(dirname "${DOCKER_EXTRA_DOCKERFILE}")
@@ -189,7 +179,7 @@ if [ -e "$SSH_AUTH_SOCK" ]; then
 fi
 
 _MOUNT_CUR_DIR=
-if [ "$OPENSYNC_ROOT" != "$(pwd)" ]; then
+if [ "$OPENSYNC_ROOT" != "$(pwd)" ] && [ "$HOME" != "$(pwd)" ]; then
     _MOUNT_CUR_DIR="-v$(pwd):$(pwd)"
 fi
 
@@ -216,7 +206,29 @@ export PYTHONPATH="$OPENSYNC_ROOT:$PYTHONPATH"
 export PYTHON_PATH="$OPENSYNC_ROOT:$PYTHON_PATH"
 export PATH="$TOOLS_DIR:$PATH"
 export SHELL=/bin/bash
-exec "$@"'
+uv venv --seed -q $VIRTUAL_ENV
+uv pip sync "$OPENSYNC_ROOT/requirements.txt" -q
+. "$VIRTUAL_ENV/bin/activate"
+# redirecting errors in case qase/extra tools are not available:
+uv pip install -q --no-deps \
+    -e $OPENSYNC_ROOT/lib/qase-python/qase-python-commons/ \
+    -e $OPENSYNC_ROOT/lib/qase-python/qase-pytest/ \
+    -e $OPENSYNC_ROOT/lib/qase-python/qaseio/ > /dev/null 2>&1
+uv pip install -q --no-deps -e $OPENSYNC_ROOT > /dev/null 2>&1
+uv pip install -q --no-deps -e $OPENSYNC_ROOT/lib_testbed/generic/tools/osrt_cli_tools > /dev/null 2>&1
+uv pip install -q --no-deps -e $TOOLS_DIR/osrt_cloud_tools > /dev/null 2>&1
+uv pip install -q --no-deps -e $OPENSYNC_ROOT/lib/tools/osrt_extra_cli_tools > /dev/null 2>&1
+if [ -f ~/.bashrc ]; then
+  cp ~/.bashrc "$FRAMEWORK_CACHE_DIR/bashrc"
+else
+  touch "$FRAMEWORK_CACHE_DIR/bashrc"
+fi
+process-osrt-bash-complete-scripts "$FRAMEWORK_CACHE_DIR/completions" "$FRAMEWORK_CACHE_DIR/bashrc"
+test -z "$1" && osrt --help
+test -z "$1" || set -- -c '"'"'"$@"'"'"' - "$@"
+echo "export PATH=$VIRTUAL_ENV/bin:$PATH" >> "$FRAMEWORK_CACHE_DIR/bashrc"
+/bin/bash --rcfile "$FRAMEWORK_CACHE_DIR/bashrc" "$@"
+'
 
 if [ -n "${SKIP_DOCKER_START}" ]; then
     return 0
@@ -246,18 +258,22 @@ id=$(docker $DOCKER_COMMAND \
         --env CLOUD_SMOKE_PASS \
         --env OPENSYNC_ROOT \
         --env FRAMEWORK_CACHE_DIR \
+        --env UV_CACHE_DIR=/var/cache/uv \
         --env TOOLS_DIR \
         --env DISPLAY=$DISPLAY \
         --env QT_X11_NO_MITSHM=1 \
+        --env VIRTUAL_ENV \
         --workdir "$(pwd)" \
-        -v/"$OPENSYNC_ROOT":"$OPENSYNC_ROOT"\
-        -v"$MPWDF":/etc/passwd \
-        -v"$MGRPF":/etc/group \
-        -v$HOME:$HOME \
-        -v"${FRAMEWORK_CACHE_DIR}/.local":"$HOME/.local" \
-        -v/tmp/.X11-unix:/tmp/.X11-unix \
-        -v/dev/shm:/dev/shm \
-        -v"${FRAMEWORK_CACHE_DIR}/.pyenv":"$HOME/.pyenv" \
+        -v/"$OPENSYNC_ROOT":"$OPENSYNC_ROOT":delegated \
+        -v"$MPWDF":/etc/passwd:cached \
+        -v"$MGRPF":/etc/group:cached \
+        -v$HOME:$HOME:delegated \
+        -v"${FRAMEWORK_CACHE_DIR}/.local":"$HOME/.local":delegated \
+        -v/tmp/.X11-unix:/tmp/.X11-unix:cached \
+        -v/dev/shm:/dev/shm:cached \
+        -v"${FRAMEWORK_CACHE_DIR}/.pyenv":"$HOME/.pyenv":delegated \
+        -v"trident-uv-cache-${USER}":"/var/cache/uv":delegated \
+        -v"${VIRTUAL_ENV}" \
         --shm-size 1G \
         $_MOUNT_CUR_DIR \
         $_MOUNT_ROOT \

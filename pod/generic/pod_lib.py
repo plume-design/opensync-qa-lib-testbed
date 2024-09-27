@@ -55,6 +55,7 @@ class PodLib(PodBase):
         "HK": "0x8158",
         "KR": "0x005f",
         "PH": "0x8260",
+        "MA": "0x81F8",
     }
 
     def __init__(self, **kwargs):
@@ -283,6 +284,11 @@ class PodLib(PodBase):
         """Display type of node(s)"""
         return self.strip_stdout_result(self.ovsdb.get_raw(table="AWLAN_Node", select="model", **kwargs))
 
+    def is_owm(self):
+        """Checks whether the One Wi-Fi Manager is running"""
+        owm_pid = self.get_managers_list("owm")
+        return bool(owm_pid)
+
     def add_to_acl(self, bridge, mac):
         self.ovsdb.set_value(
             table="Wifi_VIF_Config", where=[f"if_name=={bridge}"], value={"mac_list_type": "whitelist"}
@@ -332,16 +338,18 @@ class PodLib(PodBase):
 
         return [0, "Leaf" if result else "GW", ""]
 
-    def get_ips(self, iface, **kwargs):
+    def get_ips(self, iface, ipv6_prefix: str = None, **kwargs):
         """get ipv4 and ipv6 address for desired interface"""
         ip_adds = {"ipv4": False, "ipv6": False}
-        get_int = f"ip addr show {iface}"
-        result = self.run_command(get_int, **kwargs)
-        for res in result[1].splitlines():
-            if "inet " in res:
-                ip_adds["ipv4"] = res.strip().split(" ")[1].split("/")[0].strip()
-            if "inet6 " in res:
-                ip_adds["ipv6"] = res.strip().split(" ")[1].split("/")[0].strip()
+        result = self.get_stdout(self.run_command(f"ip --oneline address show dev {iface}", **kwargs))
+        if result and re.search("inet", result.strip()):
+            for ip_entry in result.splitlines():
+                if "inet " in ip_entry and (ipv4_address := re.search("(?<=inet).+(?=/)", ip_entry)):
+                    ip_adds["ipv4"] = ipv4_address.group().strip().split(" peer ")[0]
+                if ipv6_prefix and ipv6_prefix not in ip_entry:
+                    continue
+                if "inet6 " in ip_entry and (ipv6_address := re.search("(?<=inet6).+(?=/)", ip_entry)):
+                    ip_adds["ipv6"] = ipv6_address.group().strip().split(" peer ")[0]
         return [0, ip_adds, ""]
 
     def get_logs(self, directory=None, **kwargs):
@@ -429,8 +437,9 @@ class PodLib(PodBase):
 
     def upgrade_from_artifactory(self, image: str, use_build_map_suffix: bool = False, *args, **kwargs):
         filename = self.artifactory.download_proper_version(image, use_build_map_suffix=use_build_map_suffix)
+        if not filename:
+            return [5, "", "Cannot upgrade as filename is unknown"]
         filepath = os.path.join(self.artifactory.tmp_dir, filename)
-
         return self.upgrade_from_local_file(filepath, *args, **kwargs)
 
     def upgrade_from_local_file(self, image: str, *args, **kwargs):
@@ -439,7 +448,6 @@ class PodLib(PodBase):
             if cur_ver in image:
                 return [0, cur_ver, ""]
         kwargs.pop("skip_if_the_same", "")
-        log.info("Upgrading with %s", image)
         skip_version_check = False
         erase_certs = False
         image_file = os.path.basename(image)
@@ -458,8 +466,10 @@ class PodLib(PodBase):
         if not dec_passwd and image[-3:] != "img":
             raise Exception("Use img file for unencrypted image")
 
-        self.run_command("mkdir -p /tmp/pfirmware", **kwargs)
-        self.put_file(image, "/tmp/pfirmware")
+        fw_device_dir = "/tmp/pfirmware"
+        self.run_command(f"mkdir -p {fw_device_dir}", **kwargs)
+        log.info(f"Putting {image} to {fw_device_dir} directory")
+        self.put_file(image, fw_device_dir)
         remote_md5sum = self.run_command(f'md5sum /tmp/pfirmware/{image_file} | cut -d" " -f1', **kwargs)
         remote_md5sum = self.get_stdout(remote_md5sum)
         local_md5sum = os.popen(f'md5sum {image} | cut -d" " -f1').read().strip()
@@ -468,11 +478,13 @@ class PodLib(PodBase):
         if md5sum != local_md5sum:
             return [1, "", f"Failed MD5sum image: {local_md5sum} node: {md5sum} "]
 
+        log.info("Upgrading with %s", image)
         # determine which command should be used for upgrade
         if dec_passwd:
             upg_comm = f"safeupdate  -u {target_file_name} -P {dec_passwd}"
         else:
             upg_comm = f"safeupdate  -u {target_file_name}"
+        log.debug("Upgrade command: %s", upg_comm)
 
         if erase_certs:
             self.erase_certificates()
@@ -1178,6 +1190,26 @@ class PodLib(PodBase):
                 return [0, line.replace("Speed:", "").strip(), ""]
         return [2, "Unknown", "Unknown"]
 
+    def set_eth_link_speed(self, iface, speed, duplex, **kwargs):
+        """
+        Set ethernet link speed with ethtool
+        Args:
+            iface: (str) interface name
+            speed: (int) requested port speed
+            duplex: (str) half or full
+
+        Returns: (list) [ret_code, STDOUT, STDERR]
+        """
+        vc = ".vc" if self.get_stdout(self.run_command("ifconfig | grep eth0.vc"), skip_exception=True) else ""
+        log.info(
+            "Setting link status on interface %s%s speed %d duplex %s",
+            iface,
+            vc,
+            speed,
+            duplex,
+        )
+        return self.run_command(f"ethtool -s {iface}{vc} speed {speed} duplex {duplex}", **kwargs)
+
     # TODO: to remove
     def wait_eth_connection_ready(self, timeout, **kwargs):
         # TODO: change ovsdb call with wait operation when implemented
@@ -1275,7 +1307,9 @@ class PodLib(PodBase):
             response = responses[-1]
         return response
 
-    def trigger_single_radar_detected_event(self, phy_5g_radio, **kwargs):
+    def trigger_single_radar_detected_event(
+        self, phy_5g_radio, segment_id: int = None, chirp: int = None, freq_offest: int = None, **kwargs
+    ):
         raise NotImplementedError
 
     def get_partition_dump(self, partition, **kwargs):
@@ -1361,6 +1395,9 @@ class PodLib(PodBase):
         keys_str = self.run_command(f"cat /var/run/hostapd-{if_name}.pskfile", **kwargs)[1]
         key_passphrase_list = re.findall(r"keyid=(\S*)\s\S*\s(\S*)", keys_str)
         return dict(key_passphrase_list) if key_passphrase_list is not None else None
+
+    def get_client_pmk(self, client_mac, **kwargs):
+        raise NotImplementedError
 
     # optional needed for checking interference level around testbed in the testbed_validator script
     def get_radios_interference(self, **kwargs):
@@ -2087,6 +2124,10 @@ class PodLib(PodBase):
         acc_monitor_pid = self.get_stdout(self.strip_stdout_result(self.run_command(ecm_monitor_cmd, **kwargs)))
         return {acc_name: {"dump_file": acc_dump_file, "pid": acc_monitor_pid}}
 
+    def set_sub_channel_marking(self, ifname: str, state: int, **kwargs):
+        """Set sub channel marking on specified interface."""
+        raise NotImplementedError
+
 
 class PodIface(Iface):
     def get_name(self):
@@ -2502,7 +2543,14 @@ class Ovsdb:
             return False
         return True if list(filter(self.re_mac_filter.search, where)) else False
 
-    def get_json_table(self, table, where: Union[str, list] = None, select: Union[str, list] = None, **kwargs):
+    def get_json_table(
+        self,
+        table,
+        where: Union[str, list] = None,
+        select: Union[str, list] = None,
+        return_list: bool = False,
+        **kwargs,
+    ):
         result = self.lib.get_stdout(
             self.lib.run_command(
                 f"ovsh -j s {table} {self.generate_where(where)} {self.generate_select(select)}", **kwargs
@@ -2512,6 +2560,11 @@ class Ovsdb:
         if not result:
             return None
         result = json.loads(result)
+        # Force list return
+        if return_list:
+            if not isinstance(result, list):
+                result = [result]
+            return result
         return result[0] if len(result) == 1 and isinstance(result, list) else result
 
     @staticmethod
@@ -2552,7 +2605,7 @@ class Ovsdb:
                 continue
 
             try:
-                if value_type == str:
+                if value_type is str:
                     if re.match(r"^\[\"set\",\[.*?\]\]$", line) is not None:
                         result.append(self.parse_raw(list, line))
                         continue
@@ -2571,15 +2624,15 @@ class Ovsdb:
 
                 if value_type is None:
                     result.append(value)
-                elif value_type == dict and isinstance(value, list) and len(value) > 1:
+                elif value_type is dict and isinstance(value, list) and len(value) > 1:
                     if value[0] != "map":
                         raise ValueError(f"Type mismatch. Expected map; got {value[0]}")
                     result.append(self.ovsdb_map_to_python_dict(value))
-                elif value_type == list and isinstance(value, list) and len(value) > 1:
+                elif value_type is list and isinstance(value, list) and len(value) > 1:
                     if value[0] != "set":
                         raise ValueError(f"Type mismatch. Expected set; got {value[0]}")
                     result.append(value[1])
-                elif value_type == list and (isinstance(value, int) or isinstance(value, str)):
+                elif value_type is list and (isinstance(value, int) or isinstance(value, str)):
                     result.append(value)
                 elif value_type == UUID and isinstance(value, list) and len(value) > 1:
                     if re.match(r"^\[\"set\",\[.*?\]\]$", line) is not None:
@@ -2589,9 +2642,9 @@ class Ovsdb:
                     if value[0] != "uuid":
                         raise ValueError(f"Type mismatch. Expected uuid; got {value[0]}")
                     result.append(self.ovsdb_uuid_to_python_uuid(value[1]))
-                elif value_type == bool and isinstance(value, str):
+                elif value_type is bool and isinstance(value, str):
                     result.append(bool(distutils.util.strtobool(value)))
-                elif value_type == type(value):
+                elif value_type is type(value):
                     result.append(value)
                 else:
                     raise ValueError(f"Can not convert {type(value).__name__} to {value_type.__name__}")
@@ -2604,7 +2657,7 @@ class Ovsdb:
             result = result[0]
 
         # join the rows together as we got multiple lines as a raw_data from ovsh
-        if value_type == str and len(result) > 1 and result[0] and isinstance(result[0], list):
+        if value_type is str and len(result) > 1 and result[0] and isinstance(result[0], list):
             result = [item for row in result for item in row]
 
         return result
@@ -2652,7 +2705,9 @@ class Ovsdb:
             f"{self.generate_where(where, **kwargs)}"
         )
         result = self.lib.run_command(cmd, skip_exception=skip_exception, **kwargs)
-        if result[0] == 1 and "ERROR: Upsert: more than one row matched" in result[2]:
+        if result[0] == 1 and (
+            "ERROR: Upsert: more than one row matched" in result[2] or "constraint violation" in result[2]
+        ):
             cmd = (
                 f"ovsh u {table} "
                 f"{self.generate_values_str(value, skip_exception=skip_exception, **kwargs)} "
@@ -2661,6 +2716,31 @@ class Ovsdb:
             result = self.lib.run_command(cmd, skip_exception=skip_exception, **kwargs)
 
         return result
+
+    def update_value(self, value: dict, table: str, where: Union[str, list] = None, skip_exception=False, **kwargs):
+        """Update a value or multiple values in a ovsdb table.
+
+        Example usage - Python call:
+
+        .. code-block:: py
+
+            gw.ovsdb.update_value(
+                {"st_server": "192.168.200.1", "test_type": "IPERF3_C"}, table="Wifi_Speedtest_Config"
+            )
+
+        is equivalent to the terminal call:
+
+        .. code-block:: sh
+
+            ovsh u Wifi_Speedtest_Config test_type:=IPERF3_C st_server:=192.168.200.1
+
+        """
+        cmd = (
+            f"ovsh u {table} "
+            f"{self.generate_values_str(value, skip_exception=skip_exception, operator=':')} "
+            f"{self.generate_where(where)}"
+        ).rstrip()
+        return self.lib.run_command(cmd, skip_exception=skip_exception, **kwargs)
 
     # TOD0: merge with the default set_value method once get possibility to test
     def set_value_wifi_blast(self, value: dict, table: str, where: Union[str, list] = None, skip_exception=False):
@@ -2706,8 +2786,56 @@ class Ovsdb:
             cmd = f"ovsh u {table} {self.generate_where(where)} {select}:{action}:'[\"map\",[{value}]]'"
         return self.lib.run_command(cmd, skip_exception=skip_exception, **kwargs)
 
-    def generate_values_str(self, values, skip_exception=False, **kwargs):
-        operator = kwargs.pop("operator", None)
+    def wait_for_value(
+        self,
+        table: str,
+        value: dict,
+        where: str | list = None,
+        timeout: int = 60,
+        skip_exception: bool = False,
+        **kwargs,
+    ) -> list[int, str, str]:
+        """
+        Waits for a specified value to be present in the selected OVSDB table.
+
+        Args:
+            table (str): The name of the table to query.
+            value (dict): A dictionary containing the fields and values to match.
+            where (str | list): Optional. A string or a list of strings representing additional conditions for the query.
+            timeout (int): Optional. The maximum timeout in seconds for the query.
+            skip_exception (bool): Optional. If True, exceptions will be skipped when running the command.
+            **kwargs: Additional keyword arguments to pass to the method.
+
+        Examples:
+
+        .. code-block:: py
+
+            # wait for the Wifi_VIF_State column with the bhaul_ap_24 interface name to have
+            # the 'enabled' filed set to 'True'
+            object.wait_for_value(
+                table="Wifi_VIF_State",
+                value={"enabled": True},
+                where="if_name==bhaul-ap-24",
+            )
+
+            # calling this method will cause the following command to be executed on the device:
+            # ovsh --timeout 60000 w Wifi_VIF_State enabled:=true -w if_name==bhaul-ap-24
+
+        Returns:
+            (list): The exit code, standard output and standard error of the executed command.
+        """
+        cmd = (
+            f"ovsh --timeout {timeout * 1000} w {table} "
+            f"{self.generate_values_str(value, skip_exception=skip_exception, **kwargs)} "
+            f"{self.generate_where(where, **kwargs)}"
+        )
+
+        return self.lib.run_command(cmd, skip_exception=skip_exception, timeout=timeout, **kwargs)
+
+    def generate_values_str(self, values: dict, skip_exception: bool = False, operator: str = None) -> str:
+        """Generate getter/setter argument for ovsh based on the values dict.
+        Depending on context this might mean a ``k==v``, ``k~=v``, or ``k:=v`` for ``ovsh`` call.
+        """
         return " ".join(
             [
                 f'{k}{operator if operator else "~" if isinstance(v, str) else ":"}'
@@ -2762,7 +2890,14 @@ class Ovsdb:
 
         return f'\'["uuid","{value}"]\''
 
-    def python_value_to_ovsdb_value(self, value, skip_exception=False):
+    def python_value_to_ovsdb_value(
+        self, value: dict | list | UUID | bool | int | str, skip_exception: bool = False
+    ) -> str:
+        """Converts a value of python type into ovsdb value as string.
+
+        Raises a :py:exc:`ValueError` if value can't be converted.
+        Optionally skips string quotations when the argument skip_str_quote is True.
+        """
         if isinstance(value, dict):
             value = self.python_dict_to_ovsdb_map(value)
         elif isinstance(value, list):

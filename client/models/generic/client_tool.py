@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.pod.pod import Pod
@@ -117,9 +117,9 @@ class ClientTool:
         (exit code 0)"""
         return self.lib.ping_check(count=count, fqdn_check=fqdn_check, v6=v6, ipaddr=ipaddr, retry=False, **kwargs)
 
-    def wifi_monitor(self, channel, ht="HT20", ifname="", **kwargs):
+    def wifi_monitor(self, channel, ht="HT20", ifname="", band="5G", **kwargs):
         """Set interface into monitor mode"""
-        return self.lib.wifi_monitor(channel, ht, ifname, **kwargs)
+        return self.lib.wifi_monitor(channel, ht, ifname, band, **kwargs)
 
     def wifi_station(self, ifname="", **kwargs):
         """Set interface into station mode"""
@@ -315,7 +315,7 @@ class ClientTool:
         ipv4=True,
         ipv6=False,
         ipv6_stateless=False,
-        timeout=10,
+        timeout=20,
         reuse=False,
         static_ip=None,
         clear_dhcp=True,
@@ -362,6 +362,10 @@ class ClientTool:
         """Stop hostapd on the client"""
         return self.lib.disable_ap(ifname, **kwargs)
 
+    def get_target_version(self, version: Literal["stable", "latest"]) -> str:
+        """Retrieves the actual version for client from artifactory for specified "stable" or "latest"."""
+        return self.lib.get_target_version(version=version)
+
     def upgrade(self, fw_path=None, restore_cfg=True, force=False, version=None, restore_files=None, **kwargs):
         """Upgrade device with FW from fw_path or download build version from the artifactory
 
@@ -370,25 +374,46 @@ class ClientTool:
         return results
 
     def set_tb_nat(self, mode, **kwargs):
-        """Set NAT mode for the Test Bed (NAT64, NAT66 or noNAT)"""
+        """Set testbed's IPv6 NAT mode (NAT64 or NAT66)"""
         return self.lib.set_tb_nat(mode, **kwargs)
 
     def get_tb_nat(self, **kwargs):
-        """Get NAT mode for the Test Bed (NAT64, NAT66 or noNAT)"""
+        """Get testbed's IPv6 NAT mode (NAT64 or NAT66)"""
         return self.lib.get_tb_nat(**kwargs)
 
     def testbed_dhcp_reservation(self, **kwargs):
         """Create dhcp reservation for testbed devices"""
         return self.lib.testbed_dhcp_reservation(**kwargs)
 
-    def limit_tx_power(self, state=True, **kwargs):
+    def limit_tx_power(self, state=True, value=None, **kwargs):
         """Limit Wi-Fi Tx power on the devices in the testbed"""
-        return self.lib.limit_tx_power(state, **kwargs)
+        return self.lib.limit_tx_power(state, value, **kwargs)
 
-    def start_simulate_client(self, device_to_simulate, ifname="", ssid=None, psk=None, bssid=None, fake_mac=None):
+    def start_simulate_client(
+        self, device_to_simulate, ifname="", ssid=None, psk=None, bssid=None, fake_mac=None, force=False
+    ):
         """Start simulate device type. To list available devices use "adt-list-devices" command."""
+        try:
+            from lib.cloud.custbase import CustBase
+            from lib.cloud.userbase import UserBase
+        except (ImportError, ModuleNotFoundError) as err:
+            return [1, "", err]
+
+        custbase = CustBase(name="admin", role="admin", config=self.lib.config)
+        userbase = UserBase(name="user", role="user", conf=self.lib.config)
+        custbase.ub, userbase.cb = userbase, custbase
+        custbase.initialize(), userbase.initialize()
+
         return self.lib.start_simulate_client(
-            device_to_simulate, ifname=ifname, ssid=ssid, psk=psk, bssid=bssid, fake_mac=fake_mac
+            device_to_simulate,
+            ifname=ifname,
+            ssid=ssid,
+            psk=psk,
+            bssid=bssid,
+            fake_mac=fake_mac,
+            force=force,
+            custbase=custbase,
+            userbase=userbase,
         )
 
     def clear_adt(self, ifname="", **kwargs):
@@ -433,3 +458,7 @@ class ClientTool:
         """Disables mocha mode."""
         output = self.lib.mocha_disable()
         return output
+
+    def get_ssh_login_logs(self, last_hours: int = 1, max_lines_to_print: int = 100, **kwargs) -> list:
+        """Get SSH login logs."""
+        return self.lib.get_ssh_login_logs(last_hours, max_lines_to_print, **kwargs)

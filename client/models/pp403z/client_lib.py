@@ -7,6 +7,10 @@ from lib_testbed.generic.client.models.pp403z.client_tool import ClientTool
 from lib_testbed.generic.client.models.generic.client_lib import ClientLib as ClientLibGeneric
 
 
+TMP_RESOLV_CONF_FILE = "/tmp/dns/{ifname}.resolv"
+RESOLV_CONF_FILE = "/etc/resolv.conf"
+
+
 class ClientLib(ClientLibGeneric):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -30,7 +34,7 @@ class ClientLib(ClientLibGeneric):
         ssid=None,
         psk=None,
         bssid=None,
-        band="24g",
+        node_band="2.4G",
         key_mgmt="WPA-PSK",
         timeout=60,
         dhclient=True,
@@ -47,7 +51,7 @@ class ClientLib(ClientLibGeneric):
             ssid: ssid
             psk: password
             bssid: bssid if needed
-            band: Type of band (2G, 5GL, 5GU) to set correct interface
+            node_band: Type of band (2G, 5GL, 5GU) to set correct interface
             key_mgmt: SAE, WPA-PSK, FT-PSK or NONE for open network
             timeout: timeout for connecting to network
             dhclient: start dhcp client after association
@@ -63,7 +67,7 @@ class ClientLib(ClientLibGeneric):
 
         """
         ssid, psk = self.verify_credentials(ssid=ssid, psk=psk)
-        ifname = self.iface.get_interface_from_band(band)
+        ifname = self.iface.get_interface_from_band(node_band)
         if not ifname:
             return [1, "", "Missing wlan interface"]
         log.info(f"Connect clients {self.device.name} iface: {ifname} to ssid: {ssid}, bssid: {bssid}")
@@ -221,10 +225,15 @@ class ClientLib(ClientLibGeneric):
             **kwargs,
             timeout=timeout,
         )
-        # clear std err for successful results
+        # clear std err for successful results and update resolv.conf
         if not result[0]:
+            self.update_resolv_conf(ifname)
             result[2] = ""
         return result
+
+    def update_resolv_conf(self, ifname: str):
+        resolv_conf_path = TMP_RESOLV_CONF_FILE.format(ifname=ifname)
+        self.run_command(f"cp {resolv_conf_path} {RESOLV_CONF_FILE}")
 
     def wifi_station(self, ifname, **kwargs):
         return self.run_command(f"wl -i {ifname} down; wl -i {ifname} apsta 1; wl -i {ifname} up", **kwargs)
@@ -531,29 +540,17 @@ class ClientLib(ClientLibGeneric):
 
 
 class ClientIface(Iface):
-    ALLOWED_BANDS = ["24g", "5gl", "5gu"]
+    ALLOWED_BANDS = ["2.4G", "5GL", "5GU"]
 
     @staticmethod
-    def define_band_by_channel(channel):
+    def define_band_by_channel(channel, dut_band):
         if channel in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
-            return "24g"
+            return "2.4G"
         elif channel in [36, 40, 44, 48, 52, 56, 60, 64]:
-            return "5gl"
+            return "5GL"
         elif channel in [100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 149, 153, 157, 161, 165]:
-            return "5gu"
-        assert False, f"Can not define band name for {channel} channel"
-
-    @staticmethod
-    def get_interface_24g():
-        return "wl1"
-
-    @staticmethod
-    def get_interface_5gl():
-        return "wl0"
-
-    @staticmethod
-    def get_interface_5gu():
-        return "wl2"
+            return "5GU"
+        assert False, f"Can not define band name for {channel} channel and {dut_band}"
 
     @staticmethod
     def get_wireless_ifaces():
@@ -561,7 +558,7 @@ class ClientIface(Iface):
 
     @staticmethod
     def radio_index_map():
-        return {"24G": 1, "5GL": 0, "5GU": 2}
+        return {"2.4G": 1, "5GL": 0, "5GU": 2}
 
     @staticmethod
     def get_interface_map():
@@ -573,7 +570,8 @@ class ClientIface(Iface):
         assert band_name, f"Can not find the band type for {ifname} interface"
         return band_name
 
-    def get_interface_from_band(self, band):
+    @staticmethod
+    def get_interface_from_band(band) -> str:
         """
         Get client interface name
         Args:
@@ -582,8 +580,13 @@ class ClientIface(Iface):
         Returns: (str) name of wireless interface
 
         """
-        band = band.replace(".", "").lower()
         assert band in ClientIface.ALLOWED_BANDS, (
             f"Provided not supported band: {band}. " f"Allowed bands: {ClientIface.ALLOWED_BANDS}"
         )
-        return getattr(self, f"get_interface_{band}")()
+        match band:
+            case "2.4G":
+                return "wl1"
+            case "5GL":
+                return "wl0"
+            case "5GU":
+                return "wl2"

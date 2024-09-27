@@ -414,13 +414,13 @@ class ClientPodTool(BaseTool):
                     if stderr:
                         stderr += "\n"
                     try:
-                        rpower = Rpower().create_obj(module_name="rpower", config=self.get_config())
+                        rpower = Rpower().create_obj(module_name="rpower", request=None, config=self.get_config())
                         status = rpower.status(name)
                         stderr += f"RPOWER STATUS {name}: {status[name]}"
                     except OpenSyncException:
                         stderr += "Could not establish RPOWER STATUS, rpower is not accessible."
                     except AssertionError:
-                        stderr += f"Could not establish RPOWER STATUS for device{name}"
+                        stderr += f"Could not establish RPOWER STATUS for '{name}' device"
                     except Exception as e:  # in the case we can't connect, we just raise bare Exception
                         stderr += f"Could not establish connection to RPOWER. Original error: {e}."
                 table.append([name, ret_value, stdout, stderr])

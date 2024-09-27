@@ -74,6 +74,7 @@ class PodTool(ClientPodTool):
                     'connected': 'connected',
                     'get-table': 'get_ovsh_table_tool',
                     'get-ips': 'get_ips',
+                    'get-client-pmk': 'get_client_pmk',
                     'start-wps': 'start_wps_session',
                     'set-region': 'set_region',
                     'get-region': 'get_region',

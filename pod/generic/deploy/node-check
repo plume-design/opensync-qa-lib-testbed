@@ -468,7 +468,7 @@ echo -n "Managers running:         "
 ret=0
 for manager in ${managers}; do
     if [[ ${manager} == "veego" ]]; then
-      manager="veego-agent"
+      continue
     fi
     pid=$(pidof ${manager} | awk '{print $1}')
     out=0

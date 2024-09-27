@@ -1,13 +1,11 @@
 import re
-import os
 import time
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.common import DeviceCommon
 from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from lib_testbed.generic.switch.generic.switch_api_generic import SwitchApiGeneric
+from lib_testbed.generic.switch.util import get_switch_config_path
 
-
-SWITCH_CFG_DIR = "/home/plume/config-files"
 PORT_15_NAME = "rpi_dongle"
 PORT_15_CONF = {"name": PORT_15_NAME, "port": 15, "backhaul": 309}
 FIXED_VLANS = [PORT_15_CONF]
@@ -223,10 +221,6 @@ class SwitchApi(SwitchApiGeneric):
         if not switch_ip:
             raise OpenSyncException("IP address to the USTB switch not found.", "Check USTB config switch section.")
 
-        switch_cfg_path = self.get_model_switch_cfg()
-        if not switch_cfg_path:
-            return {}
-
         # init server obj to get switch cfg
         from lib_testbed.generic.client.client import Client
 
@@ -235,12 +229,13 @@ class SwitchApi(SwitchApiGeneric):
         server = client_obj.resolve_obj(**kwargs)
 
         # get switch config
-        switch_cfg = server.run(f"cat {switch_cfg_path}", skip_exception=True)
-        if not switch_cfg:
+        switch_cfg_path = get_switch_config_path(server, "tplink", self.model(), self.switch_ctrl.name)
+        if not switch_cfg_path:
             raise OpenSyncException(
                 f'Unable to get switch cfg: "{switch_cfg_path}" from the rpi server.',
                 "Make sure you have a latest rpi-server version.",
             )
+        switch_cfg = server.run(f"cat {switch_cfg_path}", skip_exception=True)
         port_isolation_config = self.parse_port_isolation_from_switch_cfg(switch_cfg)
         return port_isolation_config
 
@@ -313,10 +308,6 @@ class SwitchApi(SwitchApiGeneric):
         """Sets duplex mode for port(s). Possible modes are "half", "full",
         and "auto"."""
         return self.switch_ctrl.set_port_duplex(port_names=ports, mode=mode)
-
-    def get_model_switch_cfg(self) -> str:
-        """Get path to the switch cfg on the ustb-server"""
-        return os.path.join(SWITCH_CFG_DIR, f"tplink_{self.model()}_{self.switch_ctrl.name}.cfg")
 
     def set_port_forwarding_between_gws(self):
         """Set port forwarding between gateway devices."""

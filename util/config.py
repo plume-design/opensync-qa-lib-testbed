@@ -52,6 +52,9 @@ FIXED_HOST_CLIENTS = [
     MOTION_HOST_CLIENT_NAME,
     WAG_HOST_CLIENT_NAME,
 ]
+NEW_SDK_FLAG = "NEW_SDK"
+MDU_CAPABILITIES_FLAG = "MDU"
+OSRT_CAPABILITIES_FLAG = "OSRT"
 RANDOM_KEY = b"GZWKEhHGNopxRdOHS4H4IyKhLQ8lwnyU7vRLrM3sebY="
 
 
@@ -102,10 +105,12 @@ def find_file(dir_names, file_name, extension="yaml"):
         list_dir = os.listdir(dir_name)
         if not file_name.endswith(extension):
             file_name += f".{extension}"
+        if file_name in list_dir:
+            # this is the case of exact match, will allow temp files while editing location files
+            return dir_name + "/" + file_name
         for file in list_dir:
             if re.compile(file_name).match(file):
-                file = dir_name + "/" + file
-                return file
+                return dir_name + "/" + file
     raise OpenSyncException(
         f"Cannot find config file {file_name}", f"Expecting config file: {file_name} in {dir_names}"
     )
@@ -209,7 +214,7 @@ def get_deployment(config, default_deployment=None):
                 conf = load_file(find_default_deployment_file(config))
                 inv = inventory.Inventory.fromurl(conf["inventory_url"], conf["inv_user"], conf["inv_pwd"])
                 try:
-                    deployment_name = inv.get_node(serial).get("deployment")
+                    deployment_name = inv.get_api_node(serial).get("deployment")
                     local_storage.node_deployment_cache[serial] = deployment_name
                 except requests.exceptions.ConnectTimeout:
                     local_storage.inv_available = False
@@ -368,6 +373,8 @@ def load_tb_config(  # noqa: C901
     sphere_file=None,
     skip_deployment=False,  # noqa:C901
     skip_capabilities=False,
+    skip_miscs=False,
+    skip_tokens=False,
 ) -> TbConfig:
     """
     Load test bed configuration file
@@ -375,12 +382,17 @@ def load_tb_config(  # noqa: C901
         location_file: (str) test bed name
         deployment_file: (str) deployment name
         sphere_file: (str) sphere name
-        skip_deployment: (bool) if only location config is needed
+        skip_deployment: (bool) if only location config is needed, not the deployment config
         skip_capabilities: (bool) if model capabilities are not needed
+        skip_miscs: (bool) if additional configs from miscs folder are not needed
+        skip_tokens: (bool) if tokens are not needed
 
     Returns: (dict) loaded configuration
 
     """
+    log.debug(
+        "Loading tb config for location=%s, deployment=%s, sphere=%s", location_file, deployment_file, sphere_file
+    )
     if location_file and not os.path.isabs(location_file):
         location_file = find_location_file(location_file)
     elif not location_file and not deployment_file and not sphere_file:
@@ -453,17 +465,19 @@ def load_tb_config(  # noqa: C901
 
     update_config_with_admin_creds(config)
 
-    misc_files = get_misc_files()
-    for misc_file in misc_files:
-        include = load_file(misc_file)
-        if include:
-            config = merge(config, include)
+    if not skip_miscs:
+        misc_files = get_misc_files()
+        for misc_file in misc_files:
+            include = load_file(misc_file)
+            if include:
+                config = merge(config, include)
 
-    token_files = get_tokens_from_files()
-    for token_file in token_files:
-        include = load_file(token_file)
-        if include:
-            config = merge(config, include)
+    if not skip_tokens:
+        token_files = get_tokens_from_files()
+        for token_file in token_files:
+            include = load_file(token_file)
+            if include:
+                config = merge(config, include)
 
     if not config.get("email") and "MDU" not in config.get("capabilities", []):
         config["email"] = config.get("default_email")
@@ -473,6 +487,7 @@ def load_tb_config(  # noqa: C901
 
     update_mdu_config(config=config)
     init_fixed_host_clients(tb_config=config)
+    log.debug("Finished parsing config file")
 
     return config
 
@@ -625,7 +640,7 @@ def get_model_capabilities(model, device_type="node"):
             break
     else:
         # Assuming new model configs will be added here
-        raise Exception(f"Cannot find model properties file for {model}. Make sure {cap_file} exists")
+        raise FileNotFoundError(f"Cannot find model properties file for {model}. Make sure {cap_file} exists")
     with open(cap_file) as cap:
         capab = yaml.load(cap, YamlLoader)
     if device_type == "client":
@@ -784,6 +799,9 @@ class YamlLoader(yaml.SafeLoader):
         out = None
         for path in paths:
             file_path = os.path.join(self._root, path.strip())
+            if not os.path.exists(file_path):
+                # Find a path for included files names: !include sloch2hydra_v3_01.yaml
+                file_path = self.get_path_to_file(path)
             with open(file_path, "r") as f:
                 data = yaml.load(f, YamlLoader)
                 if isinstance(data, dict):
@@ -797,6 +815,12 @@ class YamlLoader(yaml.SafeLoader):
                 else:
                     return data
         return out
+
+    def get_path_to_file(self, file_name):
+        config_dir = os.path.dirname(self._root)
+        for file_path in Path(config_dir).glob(f"**/{file_name.strip()}"):
+            return file_path
+        raise OpenSyncException(f"Can not find a path to {file_name} in {config_dir} directory")
 
     def join(self, node):
         seq = self.construct_sequence(node)

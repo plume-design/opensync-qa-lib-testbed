@@ -1289,7 +1289,7 @@ class SanityLib(object):
         # Make sure AP VAPs are beaconing
         for x in vaps:
             state, msg = getstatusout(
-                f"cat {self.logs_dir}iwconfig | grep -A 1 {x}[^0-9] |" " egrep 'Not-Associated' > /dev/null 2>&1"
+                f"cat {self.logs_dir}iwconfig | grep -A 1 '^{x}[^0-9]' | egrep 'Not-Associated' > /dev/null 2>&1"
             )
             if not state:
                 self._create_output("VAP Check", "ERROR", x + " is not beaconing!")
@@ -1542,7 +1542,11 @@ class SanityLib(object):
         #         "radioMac50"
         #         "radioMac60"
         #         "bluetoothMac"
-        inv_node_info = inv.get_node(self._id)
+        inv_node_info = inv.get_api_node(self._id, skip_exception=True)
+        if not inv_node_info:
+            _report_not_possible()
+            return False
+
         errs = 0
         # check eth interfaces
         for i in range(len(self.lan_interfaces)):

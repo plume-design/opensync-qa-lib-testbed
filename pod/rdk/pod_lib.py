@@ -35,14 +35,22 @@ class PodLib(PodLibGeneric):
         return driver_data_rate
 
     # mandatory for DFS testing: tests/dfs
-    def trigger_single_radar_detected_event(self, phy_radio_name, **kwargs):
+    def trigger_single_radar_detected_event(
+        self, phy_radio_name, segment_id: int = None, chirp: int = None, freq_offest: int = None, **kwargs
+    ):
         """
         Trigger radar detected event
         Args:
             phy_radio_name: (str): Phy radio name
+            segment_id: (int): Segment ID - optional
+            chirp: (int) Chirp information - optional
+            freq_offest: (int) Frequency offset - optional
             **kwargs:
+
         Returns: list(retval, stdout, stderr)
         """
+        if segment_id or chirp or freq_offest:
+            raise NotImplementedError
         response = self.run_command(f"iwpriv {phy_radio_name} set RDDReport=0", **kwargs)
         return response
 

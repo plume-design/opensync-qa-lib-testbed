@@ -28,8 +28,6 @@ def print_test_separator(request):
         automatics = ""
         if qase_id := next((m for m in request.node.iter_markers() if m.name == "qase_id"), None):
             tr = qase_id.kwargs.get("id", "")
-        elif testrail := next((m for m in request.node.iter_markers() if m.name == "testrail"), None):
-            tr = ", ".join(testrail.kwargs.get("ids", []))
         if tc_ := next((m for m in request.node.iter_markers() if m.name.startswith("TC_")), None):
             automatics = f"{indent * ' '}Automatics: {tc_.name}\n"
         tr = f"{indent * ' '}TC ID: {tr}\n" if tr else ""

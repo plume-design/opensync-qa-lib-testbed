@@ -1,18 +1,13 @@
+import collections
+import os
 import re
 import time
 import pexpect
 from pexpect import spawn
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.switch.generic.switch_lib_generic import SwitchLibGeneric
+from lib_testbed.generic.switch.util import get_switch_config_path
 
-CONFIGS_DIR = "/home/plume/config-files"
-MODEL_CONFIGS = {
-    "T1500G-8T": "tplink_8ports.cfg",
-    "TL-SG2008": "tplink_8ports_v2.cfg",
-    "T1600G-18TS": "tplink_16ports.cfg",
-    "TL-SG2218": "tplink_16ports_v2.cfg",
-    "TL-SG3210XHP-M2": "TL-SG3210XHP-M2.cfg",
-}
 REQUEST_TIMEOUT = 30
 MAX_READ = 2000
 
@@ -37,8 +32,9 @@ class SwitchLib(SwitchLibGeneric, spawn):
         self.set_echo = set_echo
         self.spawn_cmd = f"telnet {self.ip} {self.port}"
         self._port_to_interface = {}
+        self._port_id_to_speed = {}
 
-    def login(self):
+    def _login(self):
         self._spawn(self.spawn_cmd)
         self.setecho(self.set_echo)
         # self.logfile = sys.stdout
@@ -62,6 +58,14 @@ class SwitchLib(SwitchLibGeneric, spawn):
         if self.after == pexpect.TIMEOUT:
             raise pexpect.TIMEOUT("Can not login to switch. Check switch configuration")
 
+    def login(self):
+        try:
+            self._login()
+        except Exception as err:
+            # Close telnet session in case of failed login attempt
+            self.logout()
+            raise err
+
     def admin_login(self):
         self.login()
         self.enable_admin_mode()
@@ -80,6 +84,7 @@ class SwitchLib(SwitchLibGeneric, spawn):
             "Te": "ten-gigabitEthernet",
         }
         interfaces = {}
+        port_speeds = {}
         for line in out.splitlines():
             # Port      State       Speed     Duplex    FlowCtrl    Description
             # ----      -----       -----     ------    --------    -----------
@@ -90,7 +95,9 @@ class SwitchLib(SwitchLibGeneric, spawn):
                 if unit_one:
                     port_type = short_to_full_type.get(speed, "fastEthernet")
                     interfaces[position] = f"{port_type} 1/0/{position}"
+                    port_speeds[f"1/0/{position}"] = speed.lower()
         self._port_to_interface.update(interfaces)
+        self._port_id_to_speed.update(port_speeds)
 
     def get_interface_id(self, port):
         return self._port_to_interface.get(str(port), f"gigabitEthernet 1/0/{port}")
@@ -323,29 +330,21 @@ class SwitchLib(SwitchLibGeneric, spawn):
         return 1, "UNKNOWN", "UNKNOWN"
 
     def restore_config(self):
-        def copy_config_to_tftp(filename):
-            if not client.run(f"ls -d {tftp_path}", skip_exception=True):
-                # Tftp configuration example: http://www.ronnutter.com/raspberry-pi-tftp-server/
-                # Note the expected tftp directory: /srv/tftp
-                return [4, "", f"Configure tftp server on the host client, missing path: {tftp_path}"]
-            log.info(f"Copying {filename} to {tftp_path}")
-            return client.run_raw(f"cp {CONFIGS_DIR}/{filename} {tftp_path}")[0]
+        def copy_config_to_tftp(config_path):
+            log.info(f"Copying {config_path} to {tftp_path}")
+            return client.run_raw(f"cp {config_path} {tftp_path}")[0]
 
         # need to know which config to restore
         model = self.get_model()[1]
         client = self.get_host_client()
-        # First check if a new style <type>_<model>_<name>.cfg config file exists
-        filename = f"tplink_{model}_{self.switch_name}.cfg"
-        if client.run_raw(f"test -r {CONFIGS_DIR}/{filename}", skip_exception=True)[0]:
-            if model not in MODEL_CONFIGS:
-                return [2, "", f"Switch model {model} is not supported"]
-            if self.switch_name != "stb-switch":
-                return [3, "", f"Restoring config not supported for {model} switches named '{self.switch_name}'"]
-            filename = MODEL_CONFIGS[model]
+        config_path = get_switch_config_path(client, "tplink", model, self.switch_name)
+        if not config_path:
+            return [2, "", f"Switch model {model} named '{self.switch_name}' is not supported"]
         # Copy required config to the tftp directory on the rpi-server
         tftp_path = "/srv/tftp"
-        if copy_config_to_tftp(filename):
+        if copy_config_to_tftp(config_path):
             return [5, "", "Failed to copy switch config file"]
+        filename = os.path.basename(config_path)
         self.admin_login()
         out = self.send_command(f"copy tftp startup-config ip-address 192.168.5.1 filename {filename}")
         self.admin_logout()
@@ -628,7 +627,27 @@ class SwitchLib(SwitchLibGeneric, spawn):
                 self.send_command(f"no switchport general allowed vlan {vl_key}")
 
     def set_forward_port_isolation(self, ports, forward_ports=""):
-        action = f"port isolation gi-forward-list {forward_ports}"
+        ports_by_speed = collections.defaultdict(list)
+        for port_range in forward_ports.split(","):
+            if port_range.startswith("Po"):
+                # Skip Link Aggregation Groups (LAGs), we aren't using them.
+                # They show up in forward_ports when port isolation is disabled.
+                continue
+            elif "-" not in port_range:
+                port_range = [port_range]
+            else:
+                prefix, last = port_range.split("-")
+                _, first = prefix.rsplit("/", 1)
+                port_range = [f"1/0/{n}" for n in range(int(first), int(last) + 1)]
+            for port_id in port_range:
+                port_speed = self._port_id_to_speed[port_id]
+                ports_by_speed[port_speed].append(port_id)
+        forward_list = []
+        for speed, port_ids in ports_by_speed.items():
+            forward_list.append(f"{speed}-forward-list")
+            forward_list.append(",".join(port_ids))
+        log.info(f"setting port isolation for ports {ports} to {' '.join(forward_list)}")
+        action = f"port isolation {' '.join(forward_list)}"
         return self.action_interface(ports, action)
 
     def disable_port_isolation(self, ports):

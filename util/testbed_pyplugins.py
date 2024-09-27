@@ -84,10 +84,9 @@ class PyTemperatureMonitorPlugin:
             temperatures = self.pods.get_radio_temperatures(
                 skip_logging=True, skip_exception=True, timeout=3, retries=0, retry=False
             )
-            temp_log_catcher.add(nodes, temperatures)
             clients = self.clients.get_nicknames()
             client_temps = self.clients.get_temperature(skip_logging=True, skip_exception=True, timeout=3, retry=False)
-            temp_log_catcher.add(clients, client_temps)
+            temp_log_catcher.add(nodes + clients, temperatures + client_temps)
             for node, node_temperatures in zip(nodes, temperatures):
                 if not isinstance(node_temperatures, list):
                     continue
@@ -131,11 +130,11 @@ class TempMonitorLogCatcher(LogCatcher):
     def add_screenshot(self, **_kwargs):
         pass
 
-    def add(self, nodes, temperatures):
+    def add(self, devices, temperatures):
         timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%m-%d_%H:%M:%S") + " UTC"
         indent_str = f'\n{" ":2} - '
-        msg_str = f"[{timestamp}] Nodes temperatures:"
-        for node, temp in zip(nodes, temperatures):
+        msg_str = f"[{timestamp}] Device temperatures:"
+        for node, temp in zip(devices, temperatures):
             msg_str += f"{indent_str} {node}: {temp}"
         msg_str += "\n"
         self.add_to_logs(msg_str)

@@ -5,6 +5,7 @@ import sys
 import json
 import time
 import zlib
+import copy
 import base64
 import random
 import socket
@@ -181,6 +182,10 @@ class MqttClient:
 
     def collect_app_qoe_stats(self, device_id, lid, on_message_cb, timeout=5 * 60, wait=True, max_messages=None):
         topic = MqttResolver.get_app_qoe_stats_topic(self.config, device_id, lid)
+        return self.collect(topic, on_message_cb, timeout, wait, max_messages)
+
+    def collect_we_qoe_stats(self, device_id, lid, on_message_cb, timeout=5 * 60, wait=True, max_messages=None):
+        topic = MqttResolver.get_we_qoe_stats_topic(self.config, device_id, lid)
         return self.collect(topic, on_message_cb, timeout, wait, max_messages)
 
     # The callback for when the client receives a CONNACK response from the server.
@@ -364,8 +369,9 @@ class MqttClient:
         if not self.clients:
             raise Exception("No client connected")
         if parse:
+            report_proto = self.proto_util.get_proto_decoder(topic)
             message = self.mqtt_processing.pre_run(raw_msg=json.dumps(msg))
-            parsed_pb = Parse(message, self.report_proto, ignore_unknown_fields=False)
+            parsed_pb = Parse(message, report_proto, ignore_unknown_fields=False)
             try:
                 msg = parsed_pb.SerializeToString()
             except EncodeError as e:
@@ -513,42 +519,34 @@ class MqttResolver:
         return f'QoE/app_3rd_party/{config["deployment_id"]}/{device_id}/{loc_id}'
 
     @staticmethod
+    def get_we_qoe_stats_topic(config, device_id, loc_id):
+        return f'WE/QOE/{config["deployment_id"]}/{device_id}/{loc_id}'
+
+    @staticmethod
     def resolve_mqtt_topic(config, lid, topic_template):
         dpl_id = config["deployment_id"]
-        zk_hosts = config.get("zk_hosts")
-        zk_node = config.get("zk_node")
-        if not zk_hosts or not zk_node:
-            raise Exception('Values of "mqtt_servers", "zk_hosts", "zk_node" not defined in config file')
-
-        zk_node_base = zk_node[: zk_node.rfind(dpl_id) + len(dpl_id)]
-        shard_id = MqttResolver.get_dynamic_shard(zk_node_base, dpl_id, lid)
+        shard_id = MqttResolver.get_dynamic_shard(config, lid)
         tpl = MqttResolver.Template(topic_template)
         topic = tpl.substitute(shard=shard_id, deployment=dpl_id, locationId=lid)
         return topic
 
     @staticmethod
-    def get_dynamic_shard(zk_node_base, dpl_id, loc_id):
-        shard_id = None
-        if dpl_id == "dog1":
-            dpl_name = "dogfood"
-        else:
-            dpl_name = dpl_id
-        sharding_node = "infrastructure/services/sharding"
-        zk_node = f"{zk_node_base}/{sharding_node}"
-        from lib.util.zookeeper import Zookeeper
+    def get_dynamic_shard(config: dict, loc_id: str) -> str:
+        """Get dynamic shard ID from the controller API."""
+        from lib.cloud.api import customer
+        from lib.cloud.api import controller
 
-        zk = Zookeeper()
-        zk.connect(dpl_name)
-        sharding_service = json.loads(zk.get_node(zk_node).decode("utf-8"))
-        sharding_url_base = sharding_service.get("privateUrl")
-        sharding_user = sharding_service.get("user")
-        sharding_passwd = sharding_service.get("password")
-        if all([sharding_url_base, sharding_user, sharding_passwd]):
-            auth = (sharding_user, sharding_passwd)
-            sharding_url = f"{sharding_url_base}/locations/{loc_id}/shard"
-            response = MqttResolver.requests.get(sharding_url, auth=auth)
-            shard_str = json.loads(response.text).get("shardId")
-            shard_id = shard_str.replace(f"{dpl_id}-", "")
+        customer_serv = customer.Customer.fromurl(
+            config["customer_url"], config["admin_user"], config["admin_pwd"], config=config
+        )
+        controller_serv = controller.Controller.fromurl(config["controller_url"], customer_serv)
+        response = controller_serv.get_location_getshard(loc_id)
+        shard_id = response.get("shard")
+        if not shard_id:
+            raise Exception("Can not get shard-id from the controller API.")
+        dpl_id = config["deployment_id"]
+        # Strip deployment prefix
+        shard_id = shard_id.lstrip(f"{dpl_id}-")
         return shard_id
 
 
@@ -660,6 +658,21 @@ class MqttFakeStats:
         return fake_mqtt
 
     @staticmethod
+    def update_msgs_with_fake_traffic(mqtt_messages: list, tx_bytes: int, rx_bytes: int) -> list:
+        """Update provided MQTT messages with expected fake traffic"""
+        fake_mqtt = list()
+        traffic_generated = False
+        for mqtt_message in mqtt_messages:
+            for client in mqtt_message.get("clients", []):
+                for client_list in client["clientList"]:
+                    traffic_generated = True
+                    client_list["stats"]["txBytes"] = tx_bytes
+                    client_list["stats"]["rxBytes"] = rx_bytes
+            fake_mqtt.append(copy.deepcopy(mqtt_message))
+        assert traffic_generated, "Can not generate fake traffic - missing client in MQTT messages "
+        return fake_mqtt
+
+    @staticmethod
     def generate_fake_traffic(pods_serial, mqtt_message, tx_bytes, rx_bytes):
         """
         Generate fake traffic on all provided pod list
@@ -733,6 +746,26 @@ class MqttFakeStats:
                         client["stats"]["txBytes"] = tx_bytes
                         client["stats"]["rxBytes"] = rx_bytes
         return mqtt_messages
+
+    @staticmethod
+    def update_msgs_with_fake_interferences(
+        mqtt_messages: list, busy: int, bands: list = None, channels: list = None
+    ) -> list:
+        """Update provided MQTT messages with expected fake interferences"""
+        if not bands:
+            bands = ["2G", "5G"]
+        fake_mqtt = list()
+        for mqtt_message in mqtt_messages:
+            for survey in mqtt_message["survey"]:
+                for band in bands:
+                    if band in survey["band"]:
+                        for interference in survey["surveyList"]:
+                            if channels and interference["channel"] not in channels:
+                                continue
+                            interference["busy"] = busy
+                            interference["busyRx"] = busy
+            fake_mqtt.append(copy.deepcopy(mqtt_message))
+        return fake_mqtt
 
     @staticmethod
     def generate_fake_interference_msg(pods_serial, mqtt_message, busy, bands: list = None, channels: list = None):
@@ -848,12 +881,9 @@ class MqttFakeStats:
     def update_timestamp(mqtt_msgs):
         current_timestamp_ms = int(round(time.time() * 1000))
         for mqtt_msg in mqtt_msgs:
-            for client in mqtt_msg.get("clients", []):
-                client["timestampMs"] = current_timestamp_ms
-            for neighbor in mqtt_msg.get("neighbors", []):
-                neighbor["timestampMs"] = current_timestamp_ms
-            for survey in mqtt_msg.get("survey", []):
-                survey["timestampMs"] = current_timestamp_ms
+            for stats_to_update in ["clients", "neighbors", "survey", "bsReport", "device"]:
+                for stats in mqtt_msg.get(stats_to_update, []):
+                    stats["timestampMs"] = current_timestamp_ms
         return mqtt_msgs
 
 

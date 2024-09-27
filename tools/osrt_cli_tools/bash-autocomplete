@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+
+# generate all source files according to the click docs https://click.palletsprojects.com/en/8.1.x/shell-completion/
+# and then create an additional file that sources all completion files
+entry_points="$OPENSYNC_ROOT/tools/osrt_cli_tools/pyproject.toml"
+scripts=$(cat $entry_points | sed -n -e '/project.scripts/,$p' | grep "=" | awk '{print $1}')
+
+# if there is no completions directory, create it
+mkdir -p "$FRAMEWORK_CACHE_DIR/completions"
+echo -n "" > "$FRAMEWORK_CACHE_DIR/completions/bash_autocomplete"
+
+for f in $scripts; do
+    if [[ ! -f "$FRAMEWORK_CACHE_DIR/completions/$f" ]]; then
+        f_name=$(basename ${f})  # get file name
+        # remove ".py", upper(), replace('-', '_')
+        var_name=${f_name%.py}; var_name=${var_name^^}; var_name=${var_name//-/_}
+        var_name="_${var_name}_COMPLETE"
+        # get filename, remove ".py", replace('_', '-')
+        source_name=${f_name%.py}; source_name=${source_name//_/-}
+        # echo "${var_name}=bash_source ${source_name} > $OPENSYNC_ROOT/tools/osrt_cli_tools/autocomplete_scripts/${source_name}-complete.bash"
+        eval "${var_name}=bash_source ${source_name} > $OPENSYNC_ROOT/tools/osrt_cli_tools/autocomplete_scripts/${source_name}-complete.bash"
+        # echo ". $FRAMEWORK_CACHE_DIR/completions/${source_name}-complete.bash" >> "$OPENSYNC_ROOT/tools/osrt_cli_tools/autocomplete_scripts/bash_autocomplete"
+    fi
+done    

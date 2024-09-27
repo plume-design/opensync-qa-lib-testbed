@@ -20,6 +20,6 @@ class Switch(ObjectFactory):
         except ImportError:
             raise Exception(f"Class: {class_name} not implemented, expected path: {module_path}.py")
 
-    def create_obj(self, module_name, **kwargs):
+    def create_obj(self, module_name, request, **kwargs):
         kwargs.update({"name": "api"})
-        return super().create_obj(module_name, **kwargs)
+        return super().create_obj(module_name, request, **kwargs)

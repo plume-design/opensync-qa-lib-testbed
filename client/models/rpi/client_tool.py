@@ -11,6 +11,7 @@ class ClientTool(ClientToolGeneric):
         download_locally=True,
         version=None,
         restore_files=None,
+        mirror_url=None,
         **kwargs,
     ):
         """
@@ -25,6 +26,14 @@ class ClientTool(ClientToolGeneric):
         if not isinstance(download_locally, bool):
             download_locally = eval(download_locally)
         results = self.lib.upgrade(
-            fw_path, restore_cfg, force, http_address, download_locally, version, restore_files, **kwargs
+            fw_path,
+            restore_cfg,
+            force,
+            http_address,
+            download_locally,
+            version,
+            restore_files,
+            mirror_url=mirror_url,
+            **kwargs,
         )
         return results

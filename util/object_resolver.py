@@ -92,6 +92,10 @@ class ObjectResolver:
         pod_dir_paths = list()
         # Try to find specific model path
         for pod_dir_path in Path(LIB_TESTBED_DIR).glob(f"**/{model}"):
+            # pod-clients have the same model-name. Exclude client directories.
+            # TODO: Change pod-client model names to have unique model-name.
+            if "client" in os.fsdecode(pod_dir_path):
+                continue
             pod_dir_paths.append(os.fsdecode(pod_dir_path))
         # Add generic vendor path
         pod_dir_paths.append(os.path.join(LIB_TESTBED_DIR, "generic", "pod", wifi_vendor))

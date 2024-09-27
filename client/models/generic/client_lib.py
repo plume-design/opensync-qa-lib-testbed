@@ -3,21 +3,23 @@ import re
 import time
 import random
 import tempfile
-from typing import Tuple, Dict, Union, List
+import pingparsing
+from typing import Tuple, Dict, Union, List, Literal
 
 import requests
 import importlib
 import functools
+import datetime
 
 from collections import ChainMap
-from datetime import datetime
 from multiprocessing import Lock
 from distutils.version import StrictVersion
 from pathlib import Path
 
+from lib_testbed.generic.util.msg import syslog_msg
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.client.client_base import ClientBase
-from lib_testbed.generic.util.common import CACHE_DIR
+from lib_testbed.generic.util.common import CACHE_DIR, get_digits_value_from_text, wait_for
 from lib_testbed.generic.client.models.generic.client_tool import ClientTool
 from lib_testbed.generic.switch.switch_api_resolver import SwitchApiResolver
 from lib_testbed.generic.util.base_lib import Iface
@@ -300,6 +302,30 @@ class ClientLib(ClientBase):
             supported_ciphers.append(line[2:])
         return supported_ciphers
 
+    def _get_available_channels(self, iw_info=None, iface=None, **kwargs):
+        if not iw_info:
+            iface = iface if iface else self.get_wlan_iface()
+            phy = self.get_stdout(
+                self.strip_stdout_result(self.run_command(f"cat /sys/class/net/{iface}/phy80211/index"))
+            )
+            iw_info = self.get_stdout(self.strip_stdout_result(self.run_command(f"sudo iw phy{phy} info", **kwargs)))
+
+        # get Wi-Fi channels
+        bands = iw_info.split("Frequencies:")[1:]
+        channels = []
+        for band in bands:
+            for line in band.split("\n"):
+                if "DFS" in line:
+                    continue
+                if "MHz" in line and "disabled" not in line:
+                    try:
+                        channels.append(int(line[line.find("[") + 1 : line.find("]")]))
+                    except ValueError:
+                        pass
+                if line and "*" not in line:
+                    break
+        return channels
+
     def get_wlan_information(self, **kwargs):
         """
         Get information from wlan interface
@@ -343,21 +369,7 @@ class ClientLib(ClientBase):
         supported_ciphers = self.get_iw_supported_ciphers(iw_info)
         if "GCMP-128 (00-0f-ac:8)" in supported_ciphers:
             wlan_info["wlan"][iface]["wpa3"] = True
-        # get Wi-Fi channels
-        bands = iw_info.split("Frequencies:")[1:]
-        channels = []
-        for band in bands:
-            for line in band.split("\n"):
-                if "DFS" in line:
-                    continue
-                if "MHz" in line and "disabled" not in line:
-                    try:
-                        channels.append(int(line[line.find("[") + 1 : line.find("]")]))
-                    except ValueError:
-                        pass
-                if line and "*" not in line:
-                    break
-        wlan_info["wlan"][iface]["channels"] = channels
+        wlan_info["wlan"][iface]["channels"] = self._get_available_channels(iw_info)
         # check if 11ac.ax.6e
         wlan_info["wlan"][iface]["802.11ac"] = False
         if "VHT" in iw_info:
@@ -494,8 +506,8 @@ class ClientLib(ClientBase):
 
     def get_wlan_iface(self, **kwargs):
         """
-        Get all WLAN interfaces, if force=True get interface name directly from device
-        Returns: (list) interfaces
+        Get WLAN interface name, if force=True get interface name directly from device
+        Returns: (str) interface name
 
         """
         if self.device.config.get("wifi", False) is False:
@@ -519,8 +531,8 @@ class ClientLib(ClientBase):
 
     def get_eth_iface(self, **kwargs):
         """
-        Get all eth interfaces if force=True get interface name directly from device
-        Returns: (list) interfaces
+        Get ETH interface name if force=True get interface name directly from the device
+        Returns: (str) interface name
 
         """
         if self.device.config["name"] not in FIXED_HOST_CLIENTS and self.device.config.get("eth", False) is False:
@@ -541,6 +553,19 @@ class ClientLib(ClientBase):
         )
         if iface and not hasattr(self, "eth_iface"):
             self.eth_iface = iface
+        return iface
+
+    def get_iface(self, **kwargs):
+        """
+        Get interface name based on the device type
+        Returns: (str) interface name
+        """
+        iface = (
+            self.get_wlan_iface(skip_exception=True)
+            if self.device.config.get("wifi", False) is True
+            else self.get_eth_iface(skip_exception=True)
+        )
+        assert iface, "Missing interface on the device"
         return iface
 
     def join_ifaces(self, **kwargs):
@@ -590,6 +615,9 @@ class ClientLib(ClientBase):
         if len(result) == 3:
             return result
         ifname, _ = result
+        result = self.eth_disconnect(ifname, keep_down=True, **kwargs)
+        if result[0]:
+            return result
         pod_name = pod.get_nickname()
         unused_ports = self.switch.get_unused_pod_ports(pod_name)
         if not unused_ports:
@@ -598,9 +626,6 @@ class ClientLib(ClientBase):
             port_alias = unused_ports[0]
         if port_alias not in unused_ports:
             return [5, "", f"'{port_alias}' port alias doesn't exist or is already in use"]
-        result = self.eth_disconnect(ifname, keep_down=True, **kwargs)
-        if result[0]:
-            return result
         result = self.run_command(f"sudo ip link set {ifname} up", **kwargs)
         if result[0]:
             return result
@@ -689,14 +714,75 @@ class ClientLib(ClientBase):
         cmd = f"dig -t TYPE65 {domain}"
         return self.run_command(cmd)
 
-    def wifi_monitor(self, channel, ht, ifname, **kwargs):
-        ifname = ifname if ifname else self.get_wlan_iface()
+    def wifi_monitor(self, channel, ht, ifname, band="5G", **kwargs):
+        def _create_mon_iface_for_intel_ax(ifname):
+            # Intel disables 6G channels as long as STA iface will not mark them as enabled, so we need to brig up
+            # STA iface, once channels are marked as enabled, create MON iface and then without downing STA iface
+            # set channel we need
+            wifi_driver = self.get_stdout(
+                self.strip_stdout_result(self.run_command(f"ls -ll  /sys/class/net/{ifname}/device/driver"))
+            ).split("/")[-1]
+            if wifi_driver != "iwlwifi" or band != "6G":
+                return [0, ifname, ""]
+            self.connect(wps=True, start_supplicant_only=True)
+            time.sleep(5)
+            # wait_for enabled 6G channels
+            ret, _ = wait_for(
+                lambda: self.run_command(f"sudo wpa_cli -i {ifname} scan", **kwargs)
+                and any(
+                    [
+                        _channel in self._get_available_channels(ifname=ifname)
+                        for _channel in
+                        # from each 160Mhz band one idx, not common with 2.4G or 5G
+                        [29, 61, 93, 125, 129, 189, 221]
+                    ]
+                ),
+                timeout=60,
+                tick=10,
+            )
+            if not ret:
+                log.error("6G channels are disabled, probably there is no AP in the air")
+                self.disconnect()
+                return [5, "", "6G channels are disabled"]
+            ret = self.get_stdout(self.run_command("airmon-ng start %s" % ifname))
+            if "monitor mode vif enabled" not in ret:
+                self.run_command("airmon-ng stop %s" % ifname)
+                return [3, "", "Cannot create mon iface with airmon-ng command"]
+            return [0, "%smon" % ifname, ""]
 
-        command = (
-            f"sh -c 'sudo ip link set {ifname} down; sudo iw {ifname} set type monitor; "
-            f"sudo ip link set {ifname} up; sudo iw {ifname} set channel {channel} {ht}; "
-            f"iw {ifname} info | grep monitor'"
-        )
+        # iw [options] dev <devname> set freq <freq> [NOHT|HT20|HT40+|HT40-|5MHz|10MHz|80MHz|160MHz|320MHz]
+        ifname = ifname if ifname else self.get_wlan_iface()
+        channel = int(channel)
+        # 6G
+        if band == "6G":
+            freq = channel * 5 + 5950
+        # 2.4G
+        elif channel < 14:
+            freq = channel * 5 + 2407
+            # override default 80 into 20 if HT is not specified
+            ht = "HT20" if ht == "HT80" else ht
+        # 5G
+        else:
+            freq = channel * 5 + 5000
+
+        # transform HT80 and HT160 into bandwidth
+        if ht in ["HT80", "VHT80", "HT160", "VHT160", "HT320", "VHT320", "EHT80", "EHT160", "EHT320"]:
+            ht = get_digits_value_from_text("T", ht)
+            ht = f"{ht}MHz"
+
+        ifname = _create_mon_iface_for_intel_ax(ifname)
+        if ifname[0]:
+            return ifname
+        ifname = ifname[1]
+        self.wlan_iface = ifname
+        if "mon" in ifname:
+            command = f"sh -c 'sudo iw {ifname} set freq {freq} {ht}; " f"iw {ifname} info | grep monitor'"
+        else:
+            command = (
+                f"sh -c 'sudo ip link set {ifname} down; sudo iw {ifname} set type monitor; "
+                f"sudo ip link set {ifname} up; sudo iw {ifname} set freq {freq} {ht}; "
+                f"iw {ifname} info | grep monitor'"
+            )
 
         if not ifname:
             return [1, "", "Missing wlan interface"]
@@ -708,22 +794,43 @@ class ClientLib(ClientBase):
         return result
 
     def wifi_station(self, ifname, **kwargs):
+        def _remove_mon_iface_for_intel_ax(ifname):
+            wifi_ifname = self.get_stdout(
+                self.strip_stdout_result(self.run_command("ls /sys/class/net | grep wl", **kwargs)), skip_exception=True
+            )
+            if "%smon" % ifname not in wifi_ifname:
+                return [1, "", "No monitor interface"]
+            # wait_for enabled 6G channels
+            ret = self.get_stdout(self.run_command("airmon-ng stop %s" % wifi_ifname))
+            self.disconnect(ifname=ifname, skip_exception=True)
+            if "monitor mode vif disabled" not in ret:
+                return [3, "", "Cannot remove mon iface with airmon-ng command"]
+            return [0, "Wlan moved to managed (station) mode", ""]
+
         ifname = ifname if ifname else self.get_wlan_iface()
+        # use basic ifname
+        ifname = ifname.replace("mon", "")
+        # Run command only for Wi-Fi clients
+        if not ifname:
+            return [1, "", "Missing wlan interface"]
+
+        ret = _remove_mon_iface_for_intel_ax(ifname)
+        # if mon interface was created we are done
+        if ret[0] == 0:
+            self.wlan_iface = ifname
+            return ret
 
         command = (
             f"sh -c 'sudo ip link set {ifname} down; sudo iw {ifname} set type managed; "
             f"iw {ifname} info | grep managed'"
         )
 
-        # Run command only for Wi-Fi clients
-        if not ifname:
-            return [1, "", "Missing wlan interface"]
-
         result = self.strip_stdout_result(self.run_command(command, **kwargs))
         if not result[1] and not result[2]:
             if not result[0]:
                 result[0] = 1
             result[2] = "Can not change interface state to station mode"
+        self.wlan_iface = ifname
         return result
 
     def get_mac(self, ifname="", **kwargs):
@@ -756,7 +863,7 @@ class ClientLib(ClientBase):
         for line in out[1].splitlines(keepends=True):
             try:
                 sline = line.split(":", maxsplit=1)
-                stdout += f"[{datetime.utcfromtimestamp(float(sline[0])).ctime()}]:{sline[1]}"
+                stdout += f"[{datetime.datetime.utcfromtimestamp(float(sline[0])).ctime()}]:{sline[1]}"
             except Exception:
                 stdout += line
 
@@ -825,6 +932,7 @@ class ClientLib(ClientBase):
         ifname = ifname if ifname else self.get_wlan_iface(**kwargs)
         if not ifname:
             return [1, "", "Missing wlan interface"]
+        start_supplicant_only = kwargs.pop("start_supplicant_only", None)
 
         # Get default key_mgmt when function arg - key_mgmt is not specified
         key_mgmt = key_mgmt if key_mgmt else self.key_mgmt
@@ -892,8 +1000,6 @@ update_config=1
 country={country}
 """
 
-            log.info(f"Starting WPS PBC session on {ifname} iface")
-
         # first check if old supplicant works and remove old wpa_supplicant files
         base_path = self.get_wpa_supplicant_base_path(ifname)
         self.disconnect(ifname, clear_dhcp=True, **kwargs)
@@ -952,14 +1058,20 @@ country={country}
                 retry=retry,
                 **kwargs,
             )
+        if start_supplicant_only:
+            return result
         # wait for an association
         _timeout = time.time() + timeout
         result = []
         if wps:
+            log.info(f"Starting WPS PBC session on {ifname} iface")
             command = f"sudo wpa_cli -i {ifname} wps_pbc"
             result = self.run_command(command, **kwargs)
 
+        success_rssi_check = False
         while time.time() < _timeout:
+            rssi_list = self.check_rssi_to_ap(ifname, ssid)
+            success_rssi_check &= bool(rssi_list)
             command = f"sudo wpa_cli -i {ifname} status"
             result = self.run_command(command, **kwargs)
             if "wpa_state=COMPLETED" in result[1]:
@@ -970,6 +1082,10 @@ country={country}
         else:
             # wpa_cli satus always has 0 as a return code does not matter if client is connected or not
             result[0] = 1
+
+        # check rssi if earlier scan result was empty
+        if not success_rssi_check:
+            self.check_rssi_to_ap(ifname, ssid, check_empty=True)
 
         # in case of failure print wpa_supplicant.log and exit
         if result[0]:
@@ -999,6 +1115,30 @@ country={country}
             dhcp_result = self.start_dhcp_client(ifname, ipv4=ipv4, ipv6=ipv6, ipv6_stateless=ipv6_stateless, **kwargs)
             result = self.merge_result(result, dhcp_result)
         return result
+
+    def check_rssi_to_ap(self, ifname, ssid, check_empty=False, **kwargs):
+        """
+        Check RSSI level and print warning if signal is too strong or weak
+        """
+        command = f"sudo wpa_cli -i {ifname} scan_results | grep {ssid}"
+        scan_results = self.get_stdout(
+            self.strip_stdout_result(self.run_command(command, **kwargs)), skip_exception=True
+        )
+        all_rssi = []
+        for scan_result in scan_results.splitlines():
+            bssid_info = scan_result.split()
+            try:
+                rssi = int(bssid_info[2])
+                all_rssi.append(rssi)
+                if rssi > -20:
+                    log.warning(f"AP signal is too strong! BSSID info: {scan_result}")
+            except ValueError:
+                continue
+        if all_rssi and min(all_rssi) < -85:
+            log.warning(f"AP signal is too weak! '{ssid}' RSSI list: {all_rssi}")
+        if check_empty and not all_rssi:
+            log.warning("AP SSID not found in the scan results")
+        return all_rssi
 
     @staticmethod
     def _is_crash_in_txt(txt):
@@ -1097,9 +1237,11 @@ country={country}
                     ret[2], ret[1] = ret[1], ""
                 ret[2] = f"Unable to get IPv4: {ret[2].split('https://www.isc.org/software/dhcp/')[-1]}"
             else:
-                log.info(f"Getting IPv4 address took: {time.time() - start_time:.2f} sec")
+                ipv4_dhcp_lease_time = round(time.time() - start_time, 2)
+                log.info(f"Getting IPv4 address took: {ipv4_dhcp_lease_time} sec")
                 # Remain quiet when dhclient suceeds
-                ret[1] = ret[2] = ""
+                ipv4_dhcp_lease_time_stdout = f"ipv4_dhcp_lease={ipv4_dhcp_lease_time}"
+                ret[1], ret[2] = ipv4_dhcp_lease_time_stdout, ""
             out = self.merge_result(out, ret)
 
         if ipv6:
@@ -1141,9 +1283,11 @@ country={country}
                     ret[2], ret[1] = ret[1], ""
                 ret[2] = f"Unable to get IPv6: {ret[2].split('https://www.isc.org/software/dhcp/')[-1]}"
             else:
-                log.info(f"Getting IPv6 address took: {time.time() - start_time:.2f} sec")
+                ipv6_dhcp_lease_time = round(time.time() - start_time, 2)
+                log.info(f"Getting IPv6 address took: {ipv6_dhcp_lease_time} sec")
+                ipv6_dhcp_lease_time_stdout = f"ipv6_dhcp_lease={ipv6_dhcp_lease_time}"
                 # Remain quiet when dhclient suceeds
-                ret[1] = ret[2] = ""
+                ret[1], ret[2] = ipv6_dhcp_lease_time_stdout, ""
             out = self.merge_result(out, ret)
         return out
 
@@ -1163,10 +1307,7 @@ country={country}
             return [1, "", "Specify at least one of ipv4 or ipv6"]
         if not ipv6 and ipv6_stateless:
             return [2, "", "Inappropriate IPv6 configuration, enable ipv6 to use ipv6_stateless mode"]
-        ifname = ifname if ifname else self.get_wlan_iface(skip_exception=True)
-        ifname = ifname if ifname else self.get_eth_iface(skip_exception=True)
-        if not ifname:
-            return [3, "", "Missing interface"]
+        ifname = ifname if ifname else self.get_iface()
         return ifname, ipv4, ipv6, ipv6_stateless
 
     def stop_dhcp_client(self, ifname, clear_cache=False, **kwargs):
@@ -1176,12 +1317,12 @@ country={country}
         self.run_command(f"sudo ip addr flush {ifname} scope global", **kwargs)
         command = (
             f"sudo ps aux | grep /var/run/dhclient.{ifname}.pid | grep -v grep | awk '{{print $2}}' | "
-            f"xargs sudo kill"
+            f"xargs -r sudo kill"
         )
         self.run_command(command, **kwargs)
         command = (
             f"sudo ps aux | grep /var/run/dhclient6.{ifname}.pid | grep -v grep | awk '{{print $2}}' | "
-            f"xargs sudo kill"
+            f"xargs -r sudo kill"
         )
         self.run_command(command, **kwargs)
         if clear_cache:
@@ -1270,8 +1411,7 @@ country={country}
         return self.device.config["type"]
 
     def get_client_ips(self, interface=None, ipv6_prefix=None, **kwargs):
-        interface = interface if interface else self.get_wlan_iface()
-        interface = interface if interface else self.get_eth_iface()
+        interface = interface if interface else self.get_iface()
         ip_adds = {"ipv4": False, "ipv6": False}
         result = self.get_stdout(self.run_command(f"ip --oneline address show dev {interface}", **kwargs))
         if result and re.search("inet", result.strip()):
@@ -1284,15 +1424,16 @@ country={country}
                     continue
                 if "inet6 " in ip_entry and (ipv6_address := re.search("(?<=inet6).+(?=/)", ip_entry)):
                     ip_adds["ipv6"] = ipv6_address.group().strip().split(" peer ")[0]
-                if (
-                    "inet6 " in ip_entry
-                    and "global" in ip_entry
-                    and "mngtmpaddr" not in ip_entry
-                    and (ipv6_address := re.search("(?<=inet6).+(?=/)", ip_entry))
-                ):
-                    ip_adds["ipv6_global"] = ipv6_address.group().strip().split(" peer ")[0]
-        if ipv6_global := ip_adds.pop("ipv6_global", ""):
-            ip_adds["ipv6"] = ipv6_global
+                    # SLAAC or DHCP assigned global IPv6 address
+                    if "global" in ip_entry:
+                        ip_adds["ipv6_global"] = ip_adds["ipv6"]
+                        # DHCP assigned global IPv6 address
+                        if "mngtmpaddr" not in ip_entry:
+                            ip_adds["dhcpv6_global"] = ip_adds["ipv6"]
+
+        # Try to return DHCP assigned global IPv6 address first, SLAAC assigned
+        # address second and link-local only when no global IPv6 address is present
+        ip_adds["ipv6"] = ip_adds.pop("dhcpv6_global", ip_adds.pop("ipv6_global", ip_adds["ipv6"]))
         return ip_adds
 
     def ping_v4_v6_arp(self, destination, version, wlan_test, count="8", **kwargs):
@@ -1309,7 +1450,7 @@ country={country}
         return self.strip_stdout_result(result)
 
     def ping_ndisc6(self, destination, ifname=None, **kwargs):
-        ifname = ifname if ifname else self.get_wlan_iface()
+        ifname = ifname if ifname else self.get_iface()
         result = self.run_command(f"sudo /usr/bin/ndisc6 {destination} {ifname}", **kwargs)
         return self.strip_stdout_result(result)
 
@@ -1356,48 +1497,35 @@ country={country}
         )
         return response
 
-    def start_continuous_ping(self, ifname, file_path="/tmp/ping.log", wait="1", target="8.8.8.8", **kwargs):
-        self.run_command("sudo killall ping", **kwargs)
-        cmd_output = self.run_command(f"/bin/ping -I {ifname} -W {wait} {target} > {file_path} 2>&1 &")
-        if not cmd_output[0] == 0:
+    def start_continuous_ping(
+        self, ifname, file_path="/tmp/ping.log", wait="1", target="8.8.8.8", interval=1, v6=False, **kwargs
+    ):
+        ifname = ifname if ifname else self.get_iface()
+        ping_ver = self.which_ping(v6)
+
+        self.run_command(f"sudo killall {ping_ver}", **kwargs)
+        cmd = f"sudo {ping_ver} -I {ifname} -W {wait} -i {interval} {target} > {file_path} 2>&1 &"
+        log.info(f"Starting infinite ping with: {cmd}")
+        ret = self.run_command(cmd)
+        if not ret[0] == 0:
             return False
         return True
 
-    def stop_continuous_ping(self, file_path="/tmp/ping.log", target="8.8.8.8", threshold=2, **kwargs):
+    def stop_continuous_ping(self, file_path="/tmp/ping.log", threshold=2, v6=False, **kwargs):
         response = {"result": False, "all_pings": None, "success_ping": None, "missed_ping": None, "max_time": None}
-        self.run_command("killall ping", **kwargs)
-        cmd_output = self.run_command(f"cat {file_path}", **kwargs)
-        self.run_command("rm /tmp/ping.log", **kwargs)
+        ping_ver = self.which_ping(v6)
+        self.run_command(f"sudo killall -s INT {ping_ver}", **kwargs)
+        cmd_output = self.run_command(f"sudo cat {file_path}", **kwargs)
+        self.run_command("sudo rm /tmp/ping.log", **kwargs)
         if cmd_output[0] != 0:
             return response
-        ping_res = cmd_output[1].strip()
-        if len(ping_res) == 0:
-            return response
-        ping_list = ping_res.split("\n")[1:-1]
-        all_pings = int(ping_list[-1].split("=")[1].split()[0])
 
-        successful_ping_list = []
-        for ping in ping_list:
-            if target in ping:
-                successful_ping_list.append(ping)
-
-        successful_ping = len(successful_ping_list)
-        missed_pings = all_pings - successful_ping
-
-        new_time_list = []
-        for row in successful_ping_list:
-            time_list = row.split()[-2:]
-            time_ping = f"{time_list[0].split('=')[1]}{time_list[1]}"
-            new_time_list.append(time_ping)
-        max_time = max(new_time_list)
-
-        if missed_pings < int(threshold):
-            response["result"] = True
-
-        response["all_pings"] = all_pings
-        response["success_ping"] = successful_ping
-        response["missed_ping"] = missed_pings
-        response["max_time"] = max_time
+        ping_results = pingparsing.PingParsing().parse(cmd_output[1]).as_dict()
+        response["result"] = ping_results["packet_loss_count"] <= int(threshold)
+        response["all_pings"] = ping_results["packet_transmit"]
+        response["success_ping"] = ping_results["packet_receive"]
+        response["missed_ping"] = ping_results["packet_loss_count"]
+        response["max_time"] = ping_results["rtt_max"]
         return response
 
     def set_hostname(self, new):
@@ -1708,7 +1836,7 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         ipv4=True,
         ipv6=False,
         ipv6_stateless=False,
-        timeout=10,
+        timeout=20,
         reuse=False,
         static_ip=None,
         clear_dhcp=True,
@@ -1769,8 +1897,7 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         return ret
 
     def set_ip_address(self, ip, netmask="255.255.255.0", iface=None, **kwargs):
-        iface = iface if iface else self.get_wlan_iface(skip_exception=True)
-        iface = iface if iface else self.get_eth_iface(skip_exception=True)
+        iface = iface if iface else self.get_iface()
         assert iface, "No interface found"
         netmask = "" if ip == "0.0.0.0" else f" netmask {netmask}"
         return self.run_command(f"sudo ifconfig {iface} {ip}{netmask}", **kwargs)
@@ -1782,6 +1909,11 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
             return out
         out[1] = out[1].replace("country ", "").strip()
         return out
+
+    def get_target_version(self, version: Literal["stable", "latest"]) -> str:
+        """Only retrieve target version from artifactory."""
+        linux_upgrade = LinuxClientUpgrade(lib=self)
+        return linux_upgrade.get_target_version(version=version)
 
     def upgrade(self, fw_path=None, restore_cfg=True, force=False, http_address="", version=None, **kwargs):
         """
@@ -1813,40 +1945,45 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         return ret
 
     def start_mqtt_broker(self, **kwargs):
-        # It is designed for rpi server only
-        raise NotImplementedError("Rpi-server only")
+        # It is designed for testbed server only
+        raise NotImplementedError("Testbed server only")
 
     def stop_mqtt_broker(self, **kwargs):
-        # It is designed for rpi server only
-        raise NotImplementedError("Rpi-server only")
+        # It is designed for testbed server only
+        raise NotImplementedError("Testbed server only")
 
     def set_tb_nat(self, mode, **kwargs):
-        # It is designed for rpi server only
-        raise NotImplementedError("Rpi-server only")
+        # It is designed for testbed server only
+        raise NotImplementedError("Testbed server only")
 
     def get_tb_nat(self, **kwargs):
-        # It is designed for rpi server only
-        raise NotImplementedError("Rpi-server only")
+        # It is designed for testbed server only
+        raise NotImplementedError("Testbed server only")
 
     def testbed_dhcp_reservation(self, **kwargs):
-        # It is designed for rpi server only
-        raise NotImplementedError("Rpi-server only")
+        # It is designed for testbed server only
+        raise NotImplementedError("Testbed server only")
 
-    def limit_tx_power(self, state, **kwargs):
-        # It is designed for rpi server only
-        raise NotImplementedError("Rpi-server only")
+    def limit_tx_power(self, state, value, **kwargs):
+        # It is designed for testbed server only
+        raise NotImplementedError("Testbed server only")
 
     def start_selenium_server(
-        self, port=4444, server_path="/usr/bin/selenium-server-standalone-3.141.59.jar", **kwargs
+        self,
+        port=4444,
+        server_path="/usr/bin/selenium-server-standalone-3.141.59.jar",
+        session_timeout: int = 3600,
+        **kwargs,
     ):
         response = self.run_command(
-            f"export MOZ_HEADLESS=1; " f"java -jar {server_path} -port {port} &> /dev/null &", **kwargs
+            f"export MOZ_HEADLESS=1; "
+            f"java -jar {server_path} -port {port} -sessionTimeout {session_timeout} &> /dev/null &",
+            **kwargs,
         )
         return response
 
     def change_driver_settings(self, ifname, settings, **kwargs):
-        ifname = ifname if ifname else self.get_wlan_iface(skip_exception=True)
-        ifname = ifname if ifname else self.get_eth_iface(skip_exception=True)
+        ifname = ifname if ifname else self.get_iface()
         assert ifname, "No interface found"
         command = f"ethtool -K {ifname} "
         for key, value in settings.items():
@@ -1854,15 +1991,18 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         response = self.run_command(command, **kwargs)
         return response
 
-    def start_simulate_client(self, device_to_simulate, ifname, ssid, psk, bssid, fake_mac):
+    def start_simulate_client(
+        self, device_to_simulate, ifname, ssid, psk, bssid, fake_mac, force=False, custbase=None, userbase=None
+    ):
         try:
-            module = importlib.import_module("lib.util.adtlib.adtlib")
-        except ModuleNotFoundError as err:
+            import lib.util.adtlib.adtlib as adt_module
+        except (ModuleNotFoundError, ImportError) as err:
             return [1, "", err]
-        ifname = ifname if ifname else self.get_wlan_iface(skip_exception=True)
-        ifname = ifname if ifname else self.get_eth_iface(skip_exception=True)
-        assert ifname, "No interface found"
-        adt_lib = getattr(module, "AdtLib")()
+        ifname = ifname if ifname else self.get_iface()
+        adt_lib = adt_module.AdtLib()
+        if custbase or userbase:
+            adt_lib.set_cloud_obj(custbase, userbase)
+
         device_mac = self.get_stdout(self.get_default_mac_address(ifname))
         adt_lib.set_device(
             device_object=self, client_name=self.get_nickname(), interface_name=ifname, default_mac=device_mac
@@ -1876,7 +2016,7 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
                 f"Not found any device config for {device_to_simulate}.\n "
                 f'To find all possible devices to simulate, use "adt-list-devices" command',
             ]
-        adt_lib.simulate_iot_device(device_cfg, ssid=ssid, password=psk, bssid=bssid, fake_mac=fake_mac)
+        adt_lib.simulate_iot_device(device_cfg, ssid=ssid, password=psk, bssid=bssid, fake_mac=fake_mac, force=force)
         return [
             0,
             f"{device_to_simulate} is simulated with following MAC address: {adt_lib.new_client_mac}\n"
@@ -1895,8 +2035,7 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         return [0, devices_to_list, ""]
 
     def clear_adt(self, ifname, **kwargs):
-        ifname = ifname if ifname else self.get_wlan_iface(skip_exception=True)
-        ifname = ifname if ifname else self.get_eth_iface(skip_exception=True)
+        ifname = ifname if ifname else self.get_iface()
         self.disconnect(ifname)
         if self.device.config["type"] == "rpi":
             log.info("Rebooting rpi client to fix MAC address issue")
@@ -2029,6 +2168,8 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         return self.device.config.get("host", {}).get("netns")
 
     def recover_namespace_service(self, **kwargs):
+        # Make sure skip_ns flag is set to False in case of executing next tests.
+        self.set_skip_ns_flag(False)
         kwargs.pop("skip_ns", False)
         if self.get_wlan_iface(force=True, skip_ns=False, **kwargs):
             return [0, "Network namespace is up and running", ""]
@@ -2228,6 +2369,47 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
 
         return model
 
+    def get_ssh_login_logs(self, last_hours: int = 1, max_lines_to_print: int = 100, **kwargs) -> list:
+        """Get SSH login logs."""
+        response = self.run_command("zgrep sshd /var/log/auth.log* -h | grep -F 'Accepted'", **kwargs)
+        if not response[1]:
+            return response
+
+        ssh_logins = response[1]
+        from_time = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=last_hours)
+        from_time_timestamp = int(from_time.timestamp()) * 1000000  # in microseconds
+
+        logs_to_print = list()
+        for ssh_login_entry in ssh_logins.splitlines():
+            if len(logs_to_print) == max_lines_to_print:
+                break
+            parsed_log_entry = syslog_msg.parse_syslog_message(ssh_login_entry)
+            if parsed_log_entry.get("timestamp", 0) > from_time_timestamp:
+                logs_to_print.append(ssh_login_entry)
+
+        # Print logs from newer to older
+        logs_to_print.reverse()
+
+        parsed_rsa_keys = dict()
+        for i, ssh_login_entry in enumerate(logs_to_print):
+            if rsa_key_match := re.search(r"(?<=RSA ).*", ssh_login_entry):
+                rsa_key = rsa_key_match.group()
+                host_name = parsed_rsa_keys.get(rsa_key)
+                if not host_name:
+                    host_name = self.get_rsa_key_host_name(rsa_key, **kwargs)
+                    if host_name:
+                        parsed_rsa_keys[rsa_key] = host_name
+                logs_to_print[i] = ssh_login_entry.replace(rsa_key, host_name)
+
+        return [0, "\n".join(logs_to_print), ""]
+
+    def get_rsa_key_host_name(self, rsa_key: str, **kwargs) -> str:
+        """Get hostname based on public RSA key."""
+        host_name = self.strip_stdout_result(
+            self.run_command(f"ssh-keygen -lf .ssh/authorized_keys | grep {rsa_key} | awk '{{print $3}}'", **kwargs)
+        )
+        return host_name[1]
+
 
 class ClientIface(Iface):
     pass
@@ -2311,6 +2493,15 @@ class LinuxClientUpgrade:
             f"Upgrade finished unsuccessfully. " f"Current version: {cur_version}. Expected version: {target_version}",
         ]
 
+    def get_target_version(self, version: Literal["stable", "latest"]) -> str:
+        """Retrieves the actual target version for stable/latest from artifactory.
+        Returns string with version.
+        """
+        download_url = self.get_latest_brix_upgrade_url(version=version)
+        expected_file = download_url.split("/")[-1]
+        target_version = re.findall(r"(\d+\.\d+[-,.]\d+)", expected_file)[0]
+        return target_version
+
     def start_upgrade(self, fw_path=None, force=False, version=None, **kwargs):
         """
         Upgrade Brix client to the target firmware, if fw_path=None download the latest build version from the
@@ -2325,7 +2516,7 @@ class LinuxClientUpgrade:
 
         """
         # make sure that current date is set
-        current_date = str(datetime.timestamp(datetime.now())).split(".")[0]
+        current_date = str(datetime.datetime.timestamp(datetime.datetime.now())).split(".")[0]
         self.lib.run_command(f"sudo date +%s -s @{current_date}")
 
         self.current_version = self.get_version()
@@ -2347,7 +2538,7 @@ class LinuxClientUpgrade:
                 f"Target firmware version: {target_version} is the same "
                 f"or older as on the device: {self.current_version}.\n"
                 f"If you want to downgrade or reinstall the same "
-                f"version, run command with force=True.\n",
+                f"version, run command with --force.\n",
             ]
 
         # Wait for finish upgrade for others namespaces on the same device
@@ -2490,12 +2681,15 @@ class LinuxClientUpgrade:
 
         data = '{ "buildName":"' + build_name + '", "buildNumber":"' + str(last_build) + '" }'
         headers = {"Content-Type": "application/json"}
-        build_info = requests.post(
-            build_info_url,
-            headers=headers,
-            data=data,
-            auth=(self.lib.config["artifactory"]["user"], self.lib.config["artifactory"]["password"]),
-        )
+
+        if self.lib.config.get("artifactory", {}).get("user") and self.lib.config.get("artifactory", {}).get(
+            "password"
+        ):
+            auth = (self.lib.config["artifactory"]["user"], self.lib.config["artifactory"]["password"])
+        else:
+            auth = None
+
+        build_info = requests.post(build_info_url, headers=headers, data=data, auth=auth)
         build_info.raise_for_status()
         build_info = build_info.json()
         download_urls = list()

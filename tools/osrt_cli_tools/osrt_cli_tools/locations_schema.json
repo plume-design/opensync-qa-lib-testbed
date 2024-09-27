@@ -1,0 +1,208 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Locations JSON schema",
+    "description": "JSON schema for validating testbed location files.",
+    "type": "object",
+    "properties": {
+        "user_name": {"type": "string"},
+        "email": {"type": "string"},
+        "password": {"type": "string"},
+        "tb_maintainer": {"type": "string"},
+        "purpose": {"type": "string"},
+        "capabilities": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": ["CLIENT_POD", "CMTS", "E2E", "FUT", "HOME", "LTE", "LimitTxPower", "MDU", "MOTION", "NEW_SDK", "NO LTE", "OSRT", "PERFORMANCE", "PoE", "ROMAN", "SLOTH", "SPIRENT", "TESTHOUSE", "WIFI6"]
+            }
+        },
+        "profile": {"type": "string"},
+        "group_admin_user": {"type": "string"},
+        "group_admin_pwd": {"type": "string"},
+        "reservation": {
+            "type": "object",
+            "properties": {
+                "max_reservation_time": {
+                    "description": "Max reservation time in minutes. Setting reservation exciding the maximum defined here requires providing a reason.",
+                    "type": "integer"
+                },
+                "team_responsible": {
+                    "description": "Which team owns the testbed",
+                    "type": "string"
+                }
+            }
+        },
+        "ssh_gateway": {
+            "type": "object",
+            "properties": {
+                "hostname": {
+                    "description": "Testbed server or its static IP address",
+                    "type": "string"
+                },
+                "user": {"type": "string"},
+                "pass": {"type": "string"}
+            },
+            "required": ["hostname"]
+        },
+        "Nodes": {
+            "type": "array",
+            "properties": {
+                "name": {"type": "string"},
+                "id": {"type": "string"},
+                "model": {"type": "string"},
+                "host": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "user": {"type": "string"},
+                        "pass": {"type": "string"}
+                    },
+                    "required": ["name", "user", "pass"]
+                },
+                "switch": {
+                    "type": "object",
+                    "items": {
+                        "type": "array",
+                        "enum": ["gw_wan", "gw_lan", "l1_wan", "l1_lan", "l2_wan", "l2_lan"],
+                        "items": {
+                            "type": "string",
+                            "enum": ["mn", "lan", "uplink"]
+                        }
+                    }
+                },
+                "static_eth_client": {"type": "string"}
+            },
+            "required": ["name", "id", "model", "host", "switch"]
+        },
+        "Clients": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {
+                        "type": "string",
+                        "enum": ["debian", "hydra", "linux", "mac", "pod", "pp403z", "pp603x", "rpi", "windows"]
+                    },
+                    "host": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "user": {"type": "string"},
+                            "pass": {"type": "string"},
+                            "netns": {"type": "string"}
+                        },
+                        "required": ["name"]
+                    },
+                    "wifi": {"type": "boolean"},
+                    "eth": {"type": "boolean"},
+                    "bt": {"type": "boolean"},
+                    "vlan": {"type": "integer"}
+                },
+                "required": ["name", "type", "host"]
+            }
+        },
+        "Networks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ssid": {"type": "string"},
+                    "key": {"type": "string"},
+                    "alias": {"type": "string"}
+                },
+                "required": ["ssid", "key", "alias"]
+            }
+        },
+        "rpower": {
+            "description": "Remote power distribution unit (PDU)",
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ipaddr": {"type": "string"},
+                    "user": {"type": "string"},
+                    "pass": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "alias": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "port": {"type": "integer"}
+                            },
+                            "required": ["name", "port"]
+                        }
+                    }
+                },
+                "required": ["ipaddr", "user", "pass", "port", "alias"]
+            }
+        },
+        "Switch": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {"type": "string"},
+                    "hostname": {
+                        "type": "string",
+                        "description": "<target server IP address or DNS name>"
+                    },
+                    "user": {"type": "string"},
+                    "pass": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "alias": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "backhaul": {"type": "integer"},
+                                "name": {"type": "string"},
+                                "port": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 48
+                                }
+                            },
+                            "required": ["backhaul", "name", "port"]
+                        }
+                    }
+                },
+                "required": ["name", "type", "user", "pass", "port", "alias"]
+            }
+        },
+        "group_name": {
+            "type": "array",
+            "items": {"type": "string"}
+        },
+        "wifi_check": {
+            "type": "object",
+            "properties": {
+                "ipaddr": {"type": "string"}
+            }
+        },
+        "node_deploy_to": {"type": "string"},
+        "client_deploy_to": {"type": "string"},
+        "http_check": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "md5sum_url": {"type": "string"}
+            },
+            "required": ["url", "md5sum_url"]
+        },
+        "iperf3_check": {
+            "type": "object",
+            "properties": {
+                "hostname": {"type": "string"},
+                "port": {"type": "integer"},
+                "user": {"type": "string"},
+                "pass": {"type": "string"}
+            },
+            "required": ["hostname", "port", "user", "pass"]
+        }
+    },
+    "required": ["user_name", "tb_maintainer", "capabilities", "Nodes", "Clients"]
+}

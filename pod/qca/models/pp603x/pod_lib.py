@@ -25,7 +25,7 @@ class PodLib(PodLibGeneric):
         if table_check[0] == 0:
             return table_check
         response = self.run_command(
-            "iwpriv wifi0 getCountry; iwpriv wifi1 getCountry; iwpriv wifi2 getCountry", **kwargs
+            "cfg80211tool wifi0 getCountry; cfg80211tool wifi1 getCountry; cfg80211tool wifi2 getCountry", **kwargs
         )
         cc_codes = re.findall(r"(?<=getCountry:).*", response[1])
         if not cc_codes:

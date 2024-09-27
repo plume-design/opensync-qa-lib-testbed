@@ -42,10 +42,10 @@ def add_model(cfg, matrix, cmodel, module=None, https=True, **kwargs):
             img_profile = "-".join(m_fw_version.split("-")[3:])
         else:
             fw_parts = fw_match.groupdict()
-            version = fw_parts['branch']
-            prefix = fw_parts['prefix'].lower()
+            version = fw_parts["branch"]
+            prefix = fw_parts["prefix"].lower()
             m_fw_version = f"{fw_parts['branch']}-{fw_parts['build']}-{fw_parts['sha']}-{fw_parts['profile']}"
-            img_profile = fw_parts['profile']
+            img_profile = fw_parts["profile"]
 
         model_map = get_map(m_model)
         if not model_map:
@@ -151,7 +151,7 @@ def test_url(url, **kwargs):
         return True
     except urllib.error.HTTPError as err:
         if err.code == 403:
-            raise Exception(f"File not found: {err}")
+            raise ValueError(f"File not found: {err}")
         else:
             raise Exception(f"URL test failed: {err}")
 

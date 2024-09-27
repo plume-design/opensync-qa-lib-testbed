@@ -266,6 +266,20 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
+  "6.4.0": {
+    "proj-name": "build_caesar_sdk11_v6.4.0",
+    "fn-prefix": "qcaPIRANHA2_QSDK11_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "6.4.1": {
+    "proj-name": "build_caesar_sdk11_v6.4.1",
+    "fn-prefix": "qcaPIRANHA2_QSDK11_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
   "legacy-master": {
     "proj-name": "build_caesar_master",
     "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",

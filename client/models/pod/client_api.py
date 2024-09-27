@@ -19,13 +19,13 @@ class ClientApi(ClientApiGeneric):
         bit_rate = re.search(r"\d+", result)
         return int(float(bit_rate.group())) if bit_rate else result
 
-    def connect_uci(self, ssid, psk, band, htmode="", hwmode="", bssid="", key_mgmt="psk2", timeout=60, **kwargs):
+    def connect_uci(self, ssid, psk, node_band, htmode="", hwmode="", bssid="", key_mgmt="psk2", timeout=60, **kwargs):
         """
         Connect client to network by the uci configuration
         Args:
             ssid: (str) ssid
             psk: (str) psk
-            band: (str) type of band
+            node_band: (str) type of band
             htmode: (str) ht mode
             hwmode: (str) hw mode
             bssid: (str) bssid of target device
@@ -36,7 +36,7 @@ class ClientApi(ClientApiGeneric):
         Returns: stdout from run commands
 
         """
-        result = self.lib.connect_uci(ssid, psk, band, htmode, hwmode, bssid, key_mgmt, timeout, **kwargs)
+        result = self.lib.connect_uci(ssid, psk, node_band, htmode, hwmode, bssid, key_mgmt, timeout, **kwargs)
         return self.get_stdout(result, **kwargs)
 
     def set_legacy_data_rate(self, ifname, rate, **kwargs):

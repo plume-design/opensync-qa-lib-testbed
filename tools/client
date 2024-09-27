@@ -18,7 +18,8 @@ class ClientTool(ClientPodTool):
         if names:
             kwargs['nicknames'] = names
         try:
-            kwargs['type'] = 'linux|rpi|pod|hydra|pp403z|windows|debian'  # TODO: remove once MacOS support is ready
+            # TODO: remove once MacOS support is ready
+            kwargs['type'] = 'linux|rpi|pod|hydra|pp403z|pp603x|windows|debian'
             clients_obj = Clients(**kwargs)
             clients_api = clients_obj.resolve_obj(**kwargs)
             client_lib = clients_api.lib

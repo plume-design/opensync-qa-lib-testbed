@@ -1,14 +1,14 @@
 import json
+import os
 import urllib3.exceptions
 import requests
 from typing import Union
 from requests.auth import HTTPBasicAuth
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.switch.generic.switch_lib_generic import SwitchLibGeneric
+from lib_testbed.generic.switch.util import get_switch_config_path
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-CONFIGS_DIR = "/home/plume/config-files"
 
 
 class SwitchLib(SwitchLibGeneric):
@@ -69,10 +69,10 @@ class SwitchLib(SwitchLibGeneric):
     def restore_config(self):
         model = self.get_model()[1]
         client = self.get_host_client()
-        config_name = f"mikrotik_{model}_{self.switch_name}.rsc"
-        config_path = f"{CONFIGS_DIR}/{config_name}"
+        config_path = get_switch_config_path(client, "mikrotik", model, self.switch_name)
+        config_name = os.path.basename(config_path)
         target_path = f"flash/{config_name}"
-        if client.run_raw(f"test -r {config_path}")[0]:
+        if not config_path:
             return [3, "", f'Restoring config not supported for {model} switches named "{self.switch_name}"']
         # Uploading files via REST API is not suported on Mikrotik in any practical way. Files can
         # be uploaded only to the top-lovel directory, where they don't persist across a reboot.

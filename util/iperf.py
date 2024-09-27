@@ -25,6 +25,7 @@ class Iperf:
         "mac": IperfClientLinux,
         "debian": IperfClientLinux,
         "windows": IperfClientWindows,
+        "hydra": IperfClientLinux,
     }
 
     def __init__(

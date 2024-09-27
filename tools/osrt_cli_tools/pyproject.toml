@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "osrt-cli-tools"
+description = "OSRT commandline tools"
+requires-python = ">=3.12"
+license = { text = "BSD 3-Clause License" }
+classifiers = ["Programming Language :: Python :: 3.12"]
+dependencies = ["rich-click", "click", "requests", "pyyaml"]
+version = "1.0.0"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages]
+find = {}
+
+[tool.black]
+line-length = 120
+include = '\.pyi?$'
+
+# register available tools/other packages might register other tools
+[project.entry-points.osrt]
+client = "osrt_cli_tools.client:cli"
+config = "osrt_cli_tools.config:cli"
+pod = "osrt_cli_tools.pod:cli"
+reserve = "osrt_cli_tools.reserve:cli"
+rpower = "osrt_cli_tools.rpower:cli"
+sanity = "osrt_cli_tools.sanity:cli"
+server = "osrt_cli_tools.server:cli"
+switch = "osrt_cli_tools.switch:cli"
+testbed = "osrt_cli_tools.testbed:cli"
+
+# each tool should advertise its bash-autocomplete location
+[project.entry-points.osrt_bash_complete]
+osrt = "osrt_cli_tools.osrt:get_bash_complete"
+client = "osrt_cli_tools.client:get_bash_complete"
+config = "osrt_cli_tools.config:get_bash_complete"
+pod = "osrt_cli_tools.pod:get_bash_complete"
+reserve = "osrt_cli_tools.reserve:get_bash_complete"
+rpower = "osrt_cli_tools.rpower:get_bash_complete"
+sanity = "osrt_cli_tools.sanity:get_bash_complete"
+server = "osrt_cli_tools.server:get_bash_complete"
+switch = "osrt_cli_tools.switch:get_bash_complete"
+testbed = "osrt_cli_tools.testbed:get_bash_complete"
+
+# entry points section needs to be at the end so that a bash script can generate bash autocomplete
+[project.scripts]
+cache-tb-config = "osrt_cli_tools.tb_config_parser:dump_config_cli"
+process-osrt-bash-complete-scripts = "osrt_cli_tools.process_autocomplete_scripts:process_bash_complete"
+osrt = "osrt_cli_tools.osrt:osrt"
+client = "osrt_cli_tools.client:cli"
+config = "osrt_cli_tools.config:cli"
+pod = "osrt_cli_tools.pod:cli"
+reserve = "osrt_cli_tools.reserve:cli"
+rpower = "osrt_cli_tools.rpower:cli"
+sanity = "osrt_cli_tools.sanity:cli"
+server = "osrt_cli_tools.server:cli"
+switch = "osrt_cli_tools.switch:cli"
+testbed = "osrt_cli_tools.testbed:cli"

@@ -94,14 +94,18 @@ class safe_setup:
             return False
         if setup_exception or teardown_exception:
             return False
+        allure_listener = None
         if item := getattr(request, "_pyfuncitem", None):
             for plugin in request.config.pluginmanager.get_plugins():
                 if plugin.__class__.__name__ == "MyAllureListener":
                     allure_listener = plugin
                     break
-            uuid = allure_listener._cache.get(item.nodeid)
-            if (test := allure_listener.allure_logger.get_test(uuid)) and test.steps:
-                return True
+            if allure_listener:
+                uuid = allure_listener._cache.get(item.nodeid)
+                if (test := allure_listener.allure_logger.get_test(uuid)) and test.steps:
+                    return True
+                return False
+            return False
         return False
 
 

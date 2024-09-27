@@ -12,6 +12,7 @@ from lib_testbed.generic.util.common import wait_for
 EXIT_CODE_FAILED_TO_READ_NON_EMPTY_MODEL = 100
 OVSDB_NULL_VALUE = '["set",[]]'
 
+
 class PodTool:
     def __init__(self, lib):
         """Class representing the pod tool."""
@@ -106,14 +107,14 @@ class PodTool:
         if wait_non_empty <= 0:
             return self.lib.get_model(retry=False, **kwargs)
 
-        pattern = re.compile(r'\s+')
+        pattern = re.compile(r"\s+")
 
-        success, get_model_op = wait_for(
-            lambda: self.lib.get_model(retry=False, **kwargs),
-            timeout=int(wait_non_empty),
-            tick=10,
-            eval_condition=lambda ret: ret and ret[0] == 0 and ret[1] and re.sub(pattern, '', ret[1]) != OVSDB_NULL_VALUE
-        )
+        def _get_model():
+            res = self.lib.get_model(retry=False, **kwargs)
+            if res and res[0] == 0 and res[1] and re.sub(pattern, "", res[1]) != OVSDB_NULL_VALUE:
+                return res
+
+        success, get_model_op = wait_for(_get_model, timeout=int(wait_non_empty), tick=10)
 
         if not success:
             get_model_op[0] = EXIT_CODE_FAILED_TO_READ_NON_EMPTY_MODEL
@@ -360,6 +361,12 @@ class PodTool:
         True - firmware fuse is burned (is locked), False - firmware fuse is not burned (is unlocked)."""
         is_fuse = self.lib.is_fw_fuse_burned(retry=False)
         return [0, str(is_fuse), ""]
+
+    def get_client_pmk(self, client_mac: str, **kwargs):
+        """
+        Returns client PMK key (Temporary key)
+        """
+        return self.lib.get_client_pmk(client_mac=client_mac, **kwargs)
 
     def eth_connect(self, pod_name, **kwargs):
         """Connect Specified pod to Ethernet pod."""

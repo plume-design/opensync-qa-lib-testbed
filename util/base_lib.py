@@ -3,6 +3,9 @@ from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.ssh.ssh_execute import SshCmd
 
 
+IPV6_CHECK_ADDRESS = "2001:ee2:1704:9807::1"  # address from the eth0.7 tb-server interface
+
+
 class BaseLib(SshCmd):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -21,7 +24,7 @@ class BaseLib(SshCmd):
         """List all device(s) configured"""
         return [0, f"{self.name}", ""]
 
-    def get_ip_address_ping_check(self, ipv6, ip_address_v4="8.8.8.8", ip_address_v6="2001:ee2:1704:9807::1"):
+    def get_ip_address_ping_check(self, ipv6, ip_address_v4="8.8.8.8", ip_address_v6=IPV6_CHECK_ADDRESS):
         # We use testbed-internal IPv6 address for now, because there is no testbed-external IPv6 address
         # that can be reached from both NAT66 and NAT64 testbeds at the moment and we don't support IPv6
         # on LTE yet.

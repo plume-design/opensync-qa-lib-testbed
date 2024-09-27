@@ -278,6 +278,7 @@ class MyAllureListener(AllureListener):
         self.test_result_parameters = {}  # additional test parameters visible in allure
         self.callbacks = []
         self.deregister_on_teardown = False
+        self.step_idx = 1
         super().__init__(config)
 
     @hookimpl
@@ -285,13 +286,15 @@ class MyAllureListener(AllureListener):
         def _print_test_step_separator():
             indent = 8
             separator = "~"
+            step_idx = str(self.step_idx).zfill(2)
             log.info(
-                f"\n\n{80 * separator}\n" f"{indent * ' '}Test step: \"{title}\"\n" f"{80 * separator}",
+                f"\n\n{80 * separator}\n" f"{indent * ' '}Test step {step_idx}: \"{title}\"\n" f"{80 * separator}",
                 show_file=False,
             )
 
         super().start_step(uuid, title, params)
         _print_test_step_separator()
+        self.step_idx += 1
 
     @hookimpl
     def stop_step(self, uuid, exc_type, exc_val, exc_tb):
@@ -323,6 +326,7 @@ class MyAllureListener(AllureListener):
             yield
             return
         yield from super().pytest_runtest_makereport(item, call)
+        self.step_idx = 1
         if self.allure_logger._items[uuid].steps:  # removes duplicated log from test body, logs are attached per step
             attachments = [x for x in self.allure_logger._items[uuid].attachments if x.name != "log"]
             self.allure_logger._items[uuid].attachments = attachments

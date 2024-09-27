@@ -3,7 +3,7 @@ def get_option_config_names(config):
     if not config_name:
         configs = []
     else:
-        configs = config_name.split(",")
+        configs = list(filter(None, config_name.split(",")))
     return configs
 
 

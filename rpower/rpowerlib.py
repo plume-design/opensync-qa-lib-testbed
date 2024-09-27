@@ -1,243 +1,244 @@
-import re
-import time
-import socket
+import collections
+import functools
 import importlib
+import ipaddress
+import re
+import requests
+import socket
+import time
+
 from lib_testbed.generic.util.opensyncexception import OpenSyncException
-from lib_testbed.generic.client.client import Client
-from lib_testbed.generic.util.config import init_fixed_host_clients
-from lib_testbed.generic.rpower.util import get_rpower_path
+
+_PDU_PATTERNS = {
+    "cyberpower": re.compile(r"cyberpowersystems", re.IGNORECASE),
+    "dli": re.compile(r'ACTION="/login.tgi"', re.IGNORECASE),
+    "shelly": re.compile(r"Shelly\s+Web\s+Admin", re.IGNORECASE),
+}
+
+
+class _UnsafeSession(requests.Session):
+    """Requests session that preserves Authentication across redirects"""
+
+    def should_strip_auth(old_url, new_url):
+        return False
+
+
+class GenericPduLib:
+    """
+    GenericPduLib determines the type of the PDU, creates concrete PduLib for it and dispatches commands to it
+    """
+
+    def __init__(self, pdu_config):
+        try:
+            address = pdu_config["ipaddr"]
+        except KeyError:
+            raise OpenSyncException("'ipaddr' setting missing from 'rpower' testbed config section")
+        self.address = self.host = address
+        self.pdu_config = pdu_config
+        self.ipv6 = False
+        ipaddr = None
+        try:
+            ipaddr = ipaddress.ip_address(self.address)
+        except ValueError:
+            try:
+                self.address = socket.gethostbyname(self.address)
+            except socket.gaierror:
+                pass
+            else:
+                ipaddr = ipaddress.ip_address(self.address)
+        if ipaddr is not None and ipaddr.version == 6:
+            self.ipv6 = True
+            self.host = f"[{self.address}]"
+
+    @property
+    def username(self):
+        return self.pdu_config.get("user", "admin")
+
+    @property
+    def password(self):
+        return self.pdu_config.get("pass", "1234")
+
+    @property
+    def port(self):
+        return self.pdu_config.get("port", 9000)
+
+    @functools.cached_property
+    def session(self):
+        session = _UnsafeSession()
+        return session
+
+    def type(self):
+        if "type" in self.pdu_config:
+            return self.pdu_config["type"]
+        response = self.session.get(f"http://{self.host}:{self.port}/")
+        if not response.ok:
+            response.raise_for_status()
+        response = response.text
+        for typ, pattern in _PDU_PATTERNS.items():
+            if pattern.search(response) is not None:
+                self.pdu_config["type"] = typ
+                return typ
+        raise OpenSyncException(f"Unrecognized power controller unit. Supported PDU types: {list(_PDU_PATTERNS)}")
+
+    @functools.cached_property
+    def concrete_pdu(self):
+        module_path = f"lib_testbed.generic.rpower.pdu_units.{self.type()}"
+        module = importlib.import_module(module_path)
+        return module.PduLib(self.address, self.port, self.username, self.password, self.ipv6, self.session)
+
+    def __getattr__(self, name):
+        return getattr(self.concrete_pdu, name)
 
 
 class PowerControllerLib:
-    def __init__(self, conf, **kwargs):
-        self.tb_config = conf
-        # this speeds up tools help
-        skip_init = kwargs.pop("skip_init", False)
-        if not skip_init:
-            self.rpower_units = self.init_rpower_units()
-            self.rpower_devices = self.get_all_rpower_devices()
+    """
+    PowerControllerLib represents one or more power distribution units (PDUs) listed in testbed config
 
-    def init_rpower_units(self):
+    It is responsible for setting up individual GenericPduLib classes for each of the testbed PDUs, translating from
+    PDU port aliases to actual PDU ports, translating from convenience aliases (all, pods, clients) to actual PDU ports,
+    outlet state change timestamp tracking and request batching.
+    """
+
+    #: mapping PDU port aliases to their port number (as string) and PDU
+    pdu_ports: dict[str, tuple[str, GenericPduLib]]
+    #: mapping PDU port groups (all, clients, pods) to their port aliases
+    pdu_groups: dict[str, list[str]]
+    #: mapping PDU port aliases to the last time (since epoch) that port was turned on or off
+    pdu_timestamps: dict[str, float]
+
+    def __init__(self, conf: dict, skip_init: bool = False, **kwargs):
+        self.tb_config = conf
+        # used only by legacy rpower tool to speed up help display
+        if skip_init:
+            return
         if "rpower" not in self.tb_config:
             raise OpenSyncException(
                 "Power control unit not configured for this testbed",
-                f"Testbed configuration file {self.tb_config['location_file']} does not include rpower configuration",
+                f"Testbed configuration file {self.tb_config['location_file']} is missing rpower section",
             )
-        rpower_units = list()
-        for rpower_unit in self.tb_config["rpower"]:
-            server_address, user, password, port = (
-                socket.gethostbyname(rpower_unit["ipaddr"]),
-                rpower_unit["user"],
-                rpower_unit["pass"],
-                rpower_unit["port"],
-            )
-            device_port = list()
-            for device in rpower_unit["alias"]:
-                if device.get("port") is None:
-                    raise OpenSyncException(
-                        "Can not load rpower library without PDU ports.", "Make sure PDU ports are configured"
-                    )
-                device_port.append(str(device.get("port")))
-            server_object = self.init_server_object(address=server_address)
-            pdu_ports = ",".join(device_port)
-            pdu_type = self.get_pdu_type(
-                rpi_server=server_object,
-                ipaddr=server_address,
-                username=user,
-                password=password,
-                port=port,
-                pdu_ports=pdu_ports,
-            )
-            rpower_devices = self.init_rpower_devices(rpower_unit)
-            pod_names = self.get_pdu_pod_names(rpower_devices)
-            client_names = self.get_pdu_client_names(rpower_devices)
-            pdu_lib = self.get_pdu_lib(pdu_type=pdu_type)(
-                server_object=server_object,
-                rpower_devices=rpower_devices,
-                pod_names=pod_names,
-                client_names=client_names,
-                address=server_address,
-                user=user,
-                password=password,
-                port=port,
-                tb_config=self.tb_config,
-            )
-            rpower_units.append(pdu_lib)
-        return rpower_units
+        pods = {node["name"] for node in self.tb_config.get("Nodes", []) if "name" in node}
+        clients = {client["name"] for client in self.tb_config.get("Clients", []) if "name" in client}
+        pdu_ports = {}
+        pdu_groups = {"clients": [], "pods": []}
+        for pdu_config in self.tb_config["rpower"]:
+            pdu = GenericPduLib(pdu_config)
+            for alias in pdu_config["alias"]:
+                if "name" not in alias:
+                    raise OpenSyncException(f"PDU alias config is missing 'name' setting: {alias}")
+                if "port" not in alias:
+                    raise OpenSyncException(f"PDU alias config is missing 'port' setting: {alias}")
+                port_name = alias["name"]
+                if port_name in pdu_ports:
+                    raise OpenSyncException(f"'{port_name}' device config states it is connected to two PDUs")
+                if port_name in pods:
+                    pdu_groups["pods"].append(port_name)
+                if port_name in clients:
+                    pdu_groups["clients"].append(port_name)
+                pdu_ports[port_name] = str(alias["port"]), pdu
+        pdu_groups["all"] = list(pdu_ports)
+        self.pdu_ports = pdu_ports
+        self.pdu_groups = pdu_groups
+        self.pdu_timestamps = self.tb_config.setdefault("rpower_timestamps", {})
 
-    @staticmethod
-    def get_pdu_lib(pdu_type):
-        module_path = ".".join(["lib_testbed", "generic", "rpower", "pdu_units", pdu_type])
-        r = re.compile(f".*{pdu_type.replace('_', '')}", re.IGNORECASE)
-        module = importlib.import_module(module_path)
-        class_name = list(filter(r.match, dir(module)))
-        if not class_name:
-            raise Exception(f"Can not load rpower library for {pdu_type} PDU type")
-        class_name = class_name[0]
-        return getattr(module, class_name)
+    def get_all_devices(self) -> list[str]:
+        """Return list of all PDU powered devices"""
+        return list(self.pdu_groups["all"])
 
-    @staticmethod
-    def init_rpower_devices(rpower_unit):
-        rpower_devices = dict()
-        for device in rpower_unit["alias"]:
-            device_name = device.get("name")
-            device_port = device.get("port")
-            assert device_name, "Rpower alias name not set in location config "
-            assert device_port, f"Rpower port number is not set in location config for {device_name} device"
-            rpower_devices[device_name] = device_port
-        return rpower_devices
+    def get_client_devices(self) -> list[str]:
+        """Return list of PDU powered client devices"""
+        return list(self.pdu_groups["clients"])
 
-    def get_all_devices(self):
-        all_devices = list()
-        for pdu_unit in self.rpower_units:
-            all_devices.extend(pdu_unit.get_devices_to_execute("all"))
-        return all_devices
+    def get_nodes_devices(self) -> list[str]:
+        """Return list of PDU powered pod devices"""
+        return list(self.pdu_groups["pods"])
 
-    def get_client_devices(self):
-        client_devices = list()
-        for pdu_unit in self.rpower_units:
-            client_devices.extend(pdu_unit.get_devices_to_execute("clients"))
-        return client_devices
-
-    def get_nodes_devices(self):
-        nodes_devices = list()
-        for pdu_unit in self.rpower_units:
-            nodes_devices.extend(pdu_unit.get_devices_to_execute("pods"))
-        return nodes_devices
-
-    def get_device_names(self, device_type):
-        node_names = [node.get("name") for node in self.tb_config.get(device_type, [])]
-        return node_names
-
-    def get_pdu_pod_names(self, rpower_devices):
-        return [
-            device_name
-            for device_name in self.get_device_names(device_type="Nodes")
-            if device_name in rpower_devices.keys()
-        ]
-
-    def get_pdu_client_names(self, rpower_devices):
-        return [
-            device_name
-            for device_name in self.get_device_names(device_type="Clients")
-            if device_name in rpower_devices.keys()
-        ]
-
-    def init_server_object(self, address):
-        if self.tb_config.get("ssh_gateway") is None:
-            return None
-        config = {
-            "ssh_gateway": {
-                "user": self.tb_config.get("ssh_gateway", {}).get("user", "plume"),
-                "pass": self.tb_config.get("ssh_gateway", {}).get("pass", "plume"),
-                "port": self.tb_config.get("ssh_gateway", {}).get("port", 22),
-                "hostname": self.tb_config.get("ssh_gateway", {}).get("hostname", address),
-                "opts": self.tb_config.get("ssh_gateway", {}).get("opts", {}),
-            }
-        }
-        init_fixed_host_clients(config)
-        kwargs = {"config": config, "multi_obj": True, "nickname": "host", "skip_logging": True}
-        client_obj = Client(**kwargs)
-        return client_obj.resolve_obj(**kwargs)
-
-    @staticmethod
-    def get_pdu_type(rpi_server, ipaddr, username, password, port, pdu_ports):
-        if rpi_server is None:
-            return "no_rpower_on_rpi_server"
-        rpower_tool = get_rpower_path(rpi_server)
-        ret = rpi_server.run_raw(
-            f"{rpower_tool} -a name --ip-address {ipaddr}:{port} --user-name {username}" f" --password {password}"
-        )
-        # Min supported RPI server version for a new PDULib is: plume_rpi_server__v2.0-157
-        if ret[0]:
-            return "no_rpower_on_rpi_server"
-        return ret[1].strip()
-
-    def _get_request_timestamp(self, device_names):
-        "Get timestamp of the last socket operation"
-        response = dict()
-        for rpower_unit in self.rpower_units:
-            response.update(rpower_unit.get_request_timestamp(device_names))
-        return response
-
-    def get_last_request_time(self, device_names):
-        "Get time [sec] since last socket operation"
-        last_request_time = self._get_request_timestamp(device_names)
-        for device in last_request_time:
-            timestamp = last_request_time[device]
-            last_request_time[device] = int(time.time() - timestamp) if timestamp != -1 else -1
+    def get_last_request_time(self, device_names: str | list[str]) -> dict[str, int]:
+        "Return time, in seconds, since each of 'device_names' was last turned on or off"
+        last_request_time = {}
+        now = time.time()
+        for device_name in self.verify_requested_devices(device_names):
+            if device_name in self.pdu_timestamps:
+                last_request_time[device_name] = int(now - self.pdu_timestamps[device_name])
+            else:
+                last_request_time[device_name] = -1
         return last_request_time
 
-    def get_all_rpower_devices(self):
-        rpower_devices = list()
-        for rpower_unit in self.rpower_units:
-            rpower_devices.extend(rpower_unit.rpower_devices.keys())
-        return rpower_devices
-
-    def verify_requested_devices(self, device_names):
-        if device_names in ["all", "pods", "clients"]:
-            return device_names
-        device_names = device_names.split(",") if isinstance(device_names, str) else device_names
+    def verify_requested_devices(self, device_names: str | list[str]) -> list[str]:
+        """Convert device names (testbed config rpower port names, 'all', 'clients' or 'pods') to port names"""
+        port_names = []
+        if isinstance(device_names, str):
+            device_names = device_names.split(",")
         for device_name in device_names:
-            assert device_name in self.rpower_devices, f"{device_name} is not configured in rpower config."
-        return device_names
+            if device_name in self.pdu_groups:
+                port_names.extend(self.pdu_groups[device_name])
+            elif device_name in self.pdu_ports:
+                port_names.append(device_name)
+            else:
+                raise OpenSyncException(f"Unknown PDU powered device: '{device_name}' not in {list(self.pdu_ports)}")
+        return port_names
 
-    def on(self, device_names):
-        "Turn devices on"
-        device_names = self.verify_requested_devices(device_names=device_names)
-        response = dict()
-        for rpower_unit in self.rpower_units:
-            response.update(rpower_unit.on(device_names))
+    def on(self, device_names: str | list[str]) -> dict[str, list[int, str, str]]:
+        """Turn devices on"""
+        return self._ports_action("on", device_names, reset_timestamps=True)
+
+    def off(self, device_names: str | list[str]) -> dict[str, list[int, str, str]]:
+        """Turn devices off"""
+        return self._ports_action("off", device_names, reset_timestamps=True)
+
+    def status(self, device_names: str | list[str] = "all") -> dict[str, list[int, str, str]]:
+        """Get power status of devices"""
+        return self._ports_action("status", device_names)
+
+    def consumption(self, device_names: str | list[str] = "all") -> dict[str, list[int, str, str]]:
+        """Get power consumption of devices. Supported only on Shelly PDUs."""
+        return self._ports_action("consumption", device_names)
+
+    def cycle(self, device_names: str | list[str], timeout: int = 5) -> dict[str, list[int, str, str]]:
+        """Power cycle devices"""
+        # PowerControllerApi overrides our methods and changes their
+        # signatures, so we can't simply call self.off(); self.on()
+        PowerControllerLib.off(self, device_names)
+        time.sleep(timeout)
+        return PowerControllerLib.on(self, device_names)
+
+    def version(self) -> dict[str, list[int, str, str]]:
+        """Get PDU firmware version(s)"""
+        return self._pdus_action("version")
+
+    def model(self) -> dict[str, list[int, str, str]]:
+        """Get PDU model(s)"""
+        return self._pdus_action("model")
+
+    def type(self) -> dict[str, list[int, str, str]]:
+        """Get PDU type(s)"""
+        return {addr: [0, typ, ""] for addr, typ in self._pdus_action("type").items()}
+
+    def _pdus_action(self, action_name: str) -> dict[str, str | tuple[int, str, str]]:
+        """Run some method that applies to PDU itself on all PDUs in testbed"""
+        response = {}
+        for rpower_unit in set(pdu for port, pdu in self.pdu_ports.values()):
+            response[rpower_unit.address] = getattr(rpower_unit, action_name)()
         return response
 
-    def off(self, device_names):
-        "Turn devices off"
-        device_names = self.verify_requested_devices(device_names=device_names)
-        response = dict()
-        for rpower_unit in self.rpower_units:
-            response.update(rpower_unit.off(device_names))
-        return response
-
-    def status(self, device_names="all"):
-        "Get devices power status"
-        device_names = self.verify_requested_devices(device_names=device_names)
-        response = dict()
-        for rpower_unit in self.rpower_units:
-            response.update(rpower_unit.status(device_names))
-        return response
-
-    def version(self):
-        "Get PDU FW version"
-        response = dict()
-        for rpower_unit in self.rpower_units:
-            version = rpower_unit.version()
-            # for no_rpower_on_rpi_server we get all PDU at once
-            if isinstance(version, dict):
-                response = version
-                break
-            response.update({rpower_unit.address: version})
-        return response
-
-    def model(self):
-        "Get PDU model"
-        response = dict()
-        for rpower_unit in self.rpower_units:
-            model = rpower_unit.model()
-            # for no_rpower_on_rpi_server we get all PDU at once
-            if isinstance(model, dict):
-                response = model
-                break
-            response.update({rpower_unit.address: model})
-        return response
-
-    def cycle(self, device_names, timeout=5):
-        "Power cycle devices"
-        device_names = self.verify_requested_devices(device_names=device_names)
-        response = dict()
-        for rpower_unit in self.rpower_units:
-            rpower_unit.off(device_names)
-            time.sleep(timeout)
-            response.update(rpower_unit.on(device_names))
+    def _ports_action(
+        self, action_name: str, device_names: str | list[str], reset_timestamps: bool = False
+    ) -> dict[str, tuple[int, str, str]]:
+        """Run some method that applies to PDU outlets on specified device_names outlet aliases"""
+        pdus = collections.defaultdict(lambda: collections.defaultdict(list))
+        for port_name in self.verify_requested_devices(device_names):
+            port, pdu = self.pdu_ports[port_name]
+            pdus[pdu][port].append(port_name)
+        response = {}
+        for pdu, ports in pdus.items():
+            for port, result in getattr(pdu, action_name)(sorted(ports)).items():
+                for port_name in ports[port]:
+                    # We need to copy result for devices on the same port, otherwise they get printed weirdly
+                    response[port_name] = list(result)
+        if reset_timestamps:
+            timestamp = time.time()
+            for device_name, result in response.items():
+                if result[0] == 0:
+                    self.pdu_timestamps[device_name] = timestamp
         return response
 
 
@@ -250,17 +251,29 @@ class PowerControllerApi(PowerControllerLib):
         return responses
 
     def on(self, device_names):
+        """Turn devices on"""
         responses = super().on(device_names)
         return self.get_stdout(responses)
 
     def off(self, device_names):
+        """Turn devices off"""
         responses = super().off(device_names)
         return self.get_stdout(responses)
 
     def status(self, device_names="all"):
+        """Get power status of devices"""
         responses = super().status(device_names)
         return self.get_stdout(responses)
 
+    def consumption(self, device_names="all"):
+        """Get power consumption of devices. Supported only on Shelly PDUs."""
+        responses = super().consumption(device_names)
+        responses = self.get_stdout(responses)
+        for device_name, consumption in responses.items():
+            responses[device_name] = float(consumption.rstrip("W"))
+        return responses
+
     def cycle(self, device_names, timeout=5):
+        """Power cycle devices"""
         responses = super().cycle(device_names=device_names, timeout=timeout)
         return self.get_stdout(responses)

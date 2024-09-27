@@ -47,7 +47,7 @@ class DeviceSsh:
                     opts=opts_str,
                 )
             chained_ssh = parallelssh.SSHHostInfo(
-                gateway_host, gateway_user, gateway_port, sshpass=gateway_pass, opts=opts_str
+                gateway_host, gateway_user, gateway_port, sshpass=gateway_pass, name="gateway", opts=opts_str
             )
         if "proxy" in self.config:
             proxy_host, proxy_user, proxy_port = self._extract_host_info(self.config["proxy"])

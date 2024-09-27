@@ -19,7 +19,7 @@ show_tools()
 {
     echo
     source_dir="$(dirname ${BASH_SOURCE[0]})"
-    python ${source_dir}/testbed tools
+    osrt testbed tools
     echo
 }
 
@@ -83,14 +83,19 @@ prun()
                 export debian_chroot="testbed:$OPENSYNC_TESTBED"
             fi
             shift
-            reserve . get >&2
+            cache-tb-config $1 || true
+            osrt reserve get . >&2
             if [[ $# -eq 0 ]]; then
                 show_tools >&2
             fi
             if [[ $# -eq 0 ]]; then
                 set -- "${SHELL:-/bin/bash}"
             fi
-            exec "$@"
+            if [[ $@ == "/bin/bash" ]]; then
+                /bin/bash --rcfile "$FRAMEWORK_CACHE_DIR/bashrc"
+            else
+                exec "$@"
+            fi
         else
             echo "Configuration for location $1 not found."
             return 1

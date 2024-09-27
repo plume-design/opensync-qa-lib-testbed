@@ -96,9 +96,9 @@ class SwitchToolGeneric:
         return self.info(target_port)
 
     def recovery_switch_cfg(self, pod_name, force=False, set_default_wan=False):
+        """Set default configuration on switch for the provided <pod_names>=str. <force>=bool <set_default_wan>=bool"""
         force = parse_bool_parameter("force", force)
         set_default_wan = parse_bool_parameter("set_default_wan", set_default_wan)
-        """Set default configuration on switch for the provided <pod_names>=str. <force>=bool <set_default_wan>=bool"""
         target_ports = self.switch_api.recovery_switch_configuration(
             pod_name, force=force, set_default_wan=set_default_wan
         )
@@ -116,13 +116,27 @@ class SwitchToolGeneric:
         self.switch_api.recovery_port_isolation_from_static_cfg()
         return self.tool.get_forward_port_isolation(port_names)
 
-    def get_port_isolations(self):
+    def get_port_isolations(self, port_names):
         """Get port isolations"""
-        return self.tool.get_forward_port_isolation(self.switch_api.get_list_of_all_port_names())
+        return self.tool.get_forward_port_isolation(port_names)
 
     def get_link_status(self, port_names):
         """Get port link status"""
         return self.tool.get_link_status(port_names)
+
+    def set_link_speed(self, port_name, link_speed):
+        """Set link speed on expected port"""
+        results = self.tool.set_link_speed(port_name, link_speed)
+        return results
+
+    def set_port_duplex(self, ports: str | list[str], mode: str) -> dict:
+        """Sets duplex mode for port(s). Possible modes are "half", "full", and "auto"."""
+        return self.tool.set_port_duplex(port_names=ports, mode=mode)
+
+    def set_daisy_chain_connection(self, target_device, connect_to_device):
+        """Set daisy chain connection between two pods connect_to_device <--eth--> target_device"""
+        self.switch_api.set_daisy_chain_connection(target_device, connect_to_device)
+        return self.info(self.switch_api.get_device_port_names()[target_device])
 
     def get_list_of_all_port_names(self):
         response = self.switch_api.get_list_of_all_port_names()

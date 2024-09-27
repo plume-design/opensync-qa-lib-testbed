@@ -5,6 +5,8 @@ import json
 import uuid
 import time
 import shutil
+from typing import Literal
+
 import requests
 
 from multiprocessing import Lock
@@ -16,10 +18,25 @@ from lib_testbed.generic.client.models.rpi.client_tool import ClientTool
 from lib_testbed.generic.client.models.generic.client_lib import UPGRADE_DIR, UPGRADE_LOCAL_CACHE_DIR
 
 
+NEW_DHCP_RESERVATION_PATH = "/tools/dhcp/dhcp_reservation.py"
+OLD_DHCP_RESERVATION_PATH = "/home/plume/dhcp/dhcp_reservation.py"
+NEW_SET_TB_NAT_PATH = "/tools/set-tb-nat"
+OLD_SET_TB_NAT_PATH = "/home/plume/config-files/switch-NAT6.sh"
+NEW_NAT_MODE_PATH = "/etc/ipv6.nat.mode"
+OLD_NAT_MODE_PATH = "/home/plume/.nat6_mode"
+
+
 class ClientLib(ClientLibGeneric):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.tool = ClientTool(lib=self)
+
+    def get_target_version(self, version: Literal["stable", "latest"]) -> str:
+        """Retrieves the actual target version for stable/latest from artifactory.
+        Returns string with version.
+        """
+        debian_upgrade = DebianClientUpgrade(lib=self, restore_cfg=True, download_locally=True, restore_files=None)
+        return debian_upgrade.get_target_version(version=version)
 
     def upgrade(
         self,
@@ -30,6 +47,7 @@ class ClientLib(ClientLibGeneric):
         download_locally=True,
         version=None,
         restore_files=None,
+        mirror_url=None,
         **kwargs,
     ):
         """
@@ -42,6 +60,7 @@ class ClientLib(ClientLibGeneric):
             download_locally: (bool) If True download upgrade files to local machine
             version: (str) version to download from the artifactory (or get latest or stable version)
             restore_files: (str): Paths of files to restore. eg. restore_files=/home/plume/file1,/etc/file2
+            mirror_url (str): url to mirror with upgrade files
             **kwargs:
 
         Returns: (ret_val, std_out, str_err)
@@ -51,7 +70,11 @@ class ClientLib(ClientLibGeneric):
         # short sleep to spread threads in time
         time.sleep(random.randint(1, 10) / 10)
         debian_upgrade = DebianClientUpgrade(
-            lib=self, restore_cfg=restore_cfg, download_locally=download_locally, restore_files=restore_files
+            lib=self,
+            restore_cfg=restore_cfg,
+            download_locally=download_locally,
+            restore_files=restore_files,
+            mirror_url=mirror_url,
         )
         if http_address:
             if debian_upgrade.device_type not in http_address:
@@ -80,12 +103,16 @@ class ClientLib(ClientLibGeneric):
 
     def set_tb_nat(self, mode, **kwargs):
         """
-        Set NAT mode for the Test Bed on the debian-server
+        Set testbed's IPv6 NAT mode on testbed's server
         mode: (str) NAT64 or NAT66
         """
-        assert mode in ["NAT64", "NAT66", "noNAT"]
-        assert self.name == "host", "NAT mode for the testbed can be set only for test bed server (host)"
-        out = self.run_command(f"sudo /home/plume/config-files/switch-NAT6.sh {mode}", **kwargs)
+        assert mode in ["NAT64", "NAT66"]
+        assert self.name == "host", "NAT mode for the testbed can be set only on testbed server (host)"
+        if self.run_command(f"test -x {NEW_SET_TB_NAT_PATH}", **kwargs)[0] == 0:
+            set_tb_nat = NEW_SET_TB_NAT_PATH
+        else:
+            set_tb_nat = OLD_SET_TB_NAT_PATH
+        out = self.run_command(f"sudo {set_tb_nat} {mode}", **kwargs)
         # there is a reboot at the end, which kills SSH, so 255 is positive
         if out[0] not in [0, 255]:
             return out
@@ -103,9 +130,13 @@ class ClientLib(ClientLibGeneric):
 
     def get_tb_nat(self, **kwargs):
         """
-        Get NAT mode for the Test Bed on the debian-server
+        Get testbed's IPv6 NAT mode from testbed's server
         """
-        ret = self.run_command("cat /home/plume/.nat6_mode", **kwargs)
+        if self.run_command(f"test -r {NEW_NAT_MODE_PATH}", **kwargs)[0] == 0:
+            mode_file = NEW_NAT_MODE_PATH
+        else:
+            mode_file = OLD_NAT_MODE_PATH
+        ret = self.run_command(f"cat {mode_file}", **kwargs)
         ret[1] = ret[1].strip()
         return ret
 
@@ -113,7 +144,28 @@ class ClientLib(ClientLibGeneric):
         """
         Create dhcp reservation for testbed devices
         """
-        return self.run_command("sudo /home/plume/dhcp/dhcp_reservation.py", timeout=300, **kwargs)
+        if self.run_command(f"test -x {NEW_DHCP_RESERVATION_PATH}")[0] == 0:
+            dhcp_reservation = NEW_DHCP_RESERVATION_PATH
+        else:
+            dhcp_reservation = OLD_DHCP_RESERVATION_PATH
+        return self.run_command(f"sudo {dhcp_reservation}", timeout=300, **kwargs)
+
+    def limit_tx_power(self, state=True, value=None, **kwargs):
+        """
+        Limit Wi-Fi TX power on the devices in the testbed
+        state: (bool) Enable/disable Tx power modification
+        """
+        if state:
+            cmd = f"echo {value} | sudo tee /.tx_power_enable.flag" if value else "sudo touch /.tx_power_enable.flag"
+            out = self.run_command(cmd, **kwargs)
+            if out[0]:
+                return out
+            out[1] = "Please reboot your nodes to make it happen"
+        else:
+            out = self.run_command("sudo rm /.tx_power_enable.flag", **kwargs)
+            if "No such file or directory" in out[2]:
+                return [0, "Limiting TX power was not enabled", ""]
+        return out
 
 
 class DebianClientUpgrade:
@@ -126,7 +178,7 @@ class DebianClientUpgrade:
     type_version_separator = "_"
     version_pattern = r"(\d+\.\d+\.\d+)"
 
-    def __init__(self, lib, restore_cfg, download_locally, restore_files):
+    def __init__(self, lib, restore_cfg, download_locally, restore_files, mirror_url=None):
         self.lib = lib
         self.download_locally = download_locally
         if not self.download_locally:
@@ -138,6 +190,7 @@ class DebianClientUpgrade:
         self.upgrade_thread = self.get_upgrade_thread()
         self.current_version = ""
         self.store_files = list()
+        self.mirror_url = mirror_url
 
     def get_version(self):
         version = self.lib.version(short=True)
@@ -251,19 +304,6 @@ class DebianClientUpgrade:
                     file_path=f"/{tx_power_flag}", store_path=store_path, file_name=tx_power_flag, out_path="/"
                 )
             if self.restore_cfg:
-                # NAT64, 66 or NoNAT
-                nat_flag = self.lib.get_stdout(
-                    self.lib.strip_stdout_result(self.lib.run_command("ls -a /home/plume/.nat6_mode")),
-                    skip_exception=True,
-                )
-                if nat_flag:
-                    self.get_file(
-                        file_path="/home/plume/.nat6_mode",
-                        store_path=store_path,
-                        file_name=".nat6_mode",
-                        out_path="/home/plume/",
-                    )
-
                 # below 2.0-104 dhcp reservation was stored in dhcp.conf, which we should not mixed in
                 # tell the user to fix DHCP by starting dhcp_reservation.py script
                 if StrictVersion(self.current_version.replace("-", ".")) < StrictVersion("2.0.104"):
@@ -360,17 +400,6 @@ class DebianClientUpgrade:
             if "dhcpd" in file_name:
                 restart_dhcp = self.lib.run_command("sudo service isc-dhcp-server restart")
                 result = self.lib.merge_result(result, restart_dhcp)
-            elif "nat6_mode" in file_name:
-                # we need to restore the NAT mode after flashing
-                with open(file_path, "r") as nmode:
-                    nat_mode = nmode.read().strip()
-                # NAT66 is already set on a fresh device server image
-                if nat_mode != "NAT66":
-                    restore_nat = self.lib.run_command(f"sudo /home/plume/config-files/switch-NAT6.sh {nat_mode}")
-                    # it ends with reboot, so 255 is a positive return here
-                    restore_nat[0] = 0 if restore_nat[0] == 255 else restore_nat[0]
-                    result = self.lib.merge_result(result, restore_nat)
-                    self.wait_for_reboot()
             elif "reserve" in file_name:
                 self.lib.run_command(f"sudo chown -R $USER:$USER {file_name}")
 
@@ -429,6 +458,15 @@ class DebianClientUpgrade:
         os.makedirs(fw_path, exist_ok=True)
         self.download_image_to_local_machine(fw_path, download_urls, expected_files)
 
+    def get_target_version(self, version: Literal["stable", "latest"]) -> str:
+        """Retrieves the actual target version for stable/latest from artifactory.
+        Returns string with version.
+        """
+        download_urls = self.get_latest_image_urls(self.device_type, version=version)
+        expected_files = [file_name.split("/")[-1] for file_name in download_urls]
+        target_version = re.findall(self.version_pattern, " ".join(expected_files))[0]
+        return target_version
+
     def start_upgrade(self, fw_path=None, force=False, version=None, **kwargs):
         """
         Upgrade raspberry clients to target firmware if fw_path=None download latest build version from artifactory
@@ -472,7 +510,7 @@ class DebianClientUpgrade:
                     f"Target firmware version: {target_version} is the same "
                     f"as on the device: {self.current_version}.\n"
                     f"If you still want to upgrade device to the same "
-                    f"version, run command with force=True argument.\n",
+                    f"version, run command with --force.\n",
                 ]
 
             os.makedirs(fw_path, exist_ok=True)
@@ -524,6 +562,7 @@ class DebianClientUpgrade:
             return put_upgrade_files_result
 
         client_hostname, store_path = self.collect_files(fw_path)
+        nat_mode = self.lib.get_stdout(self.lib.get_tb_nat(), skip_exception=True)
 
         upgrade_dir = os.path.join(UPGRADE_DIR, image_name)
         print(
@@ -541,6 +580,16 @@ class DebianClientUpgrade:
         self.upload_files_to_client(client_hostname, store_path)
         # Even though upgrade is finished successfully return code is 255
         upgrade_result[0] = 0
+
+        # NAT66 is already set on a fresh device server image
+        if self.restore_cfg and nat_mode == "NAT64":
+            result = self.lib.set_tb_nat(nat_mode)
+            if result[0] != 0:
+                print(
+                    f"Can not restore IPv6 NAT mode on server to {nat_mode}: "
+                    f"{result[0]}\nstdout:\n{result[1]}\nstderr:\n{result[2]}"
+                )
+
         self.lib.run_command(f"rm -rf {UPGRADE_DIR}")
 
         if self.brix_type:
@@ -551,7 +600,7 @@ class DebianClientUpgrade:
 
         return upgrade_result
 
-    def get_latest_image_urls(self, device_type, build_name=None, max_retry=10, version=None):
+    def get_latest_image_urls(self, device_type, build_name=None, max_retry=10, version=None) -> list[str]:
         """
         Get the latest device image for target device type
         Args:
@@ -561,64 +610,111 @@ class DebianClientUpgrade:
             version: (str) version to download from the artifactory (or get latest or stable version)
 
         Returns: (list) List of urls for upgrade device, checksum, and image
-
         """
+        retry = 0
+        headers = {"Content-Type": "application/json"}
         build_name = build_name if build_name is not None else self.build_name
         if version is None:
             version = "latest"
-        artifactory_url = self.lib.config["artifactory"]["url"]
-        project_url = os.path.join(artifactory_url, "api", "build", build_name)
-        build_info_url = os.path.join(artifactory_url, "api", "search", "buildArtifacts")
+        if self.mirror_url is None:
+            artifactory_url = self.lib.config["artifactory"]["url"]
+            project_url = os.path.join(artifactory_url, "api", "build", build_name)
+            build_info_url = os.path.join(artifactory_url, "api", "search", "buildArtifacts")
+            if version == "latest":
+                all_builds = requests.get(project_url)
+                all_builds = json.loads(all_builds.text)
+                all_builds = [int(build_number["uri"].strip("/")) for build_number in all_builds["buildsNumbers"]]
+                last_build = max(all_builds)
+            elif version == "stable":
+                last_build = int(
+                    re.split(self.build_separator, self.lib.device.config["capabilities"]["fw_version"])[-1]
+                )
+            else:
+                try:
+                    last_build = int(re.split(self.build_separator, version)[-1])
+                except Exception as e:
+                    log.error(f"Cannot get build number from {version}")
+                    raise e
+
+            data = '{ "buildName":"' + build_name + '", "buildNumber":"' + str(last_build) + '" }'
+
+            build_info = ""
+
+            if self.lib.config.get("artifactory", {}).get("user") and self.lib.config.get("artifactory", {}).get(
+                "password"
+            ):
+                auth = (self.lib.config["artifactory"]["user"], self.lib.config["artifactory"]["password"])
+            else:
+                auth = None
+
+            while max_retry > retry:
+                retry += 1
+                build_info = requests.post(build_info_url, headers=headers, data=data, auth=auth)
+                if device_type in build_info.text:
+                    break
+                last_build = str(int(last_build) - 1)
+                data = '{ "buildName":"' + build_name + '", "buildNumber":"' + last_build + '" }'
+
+            if device_type not in build_info.text:
+                raise ValueError(
+                    f"Can not find suitable upgrade package for {device_type} after checking last {max_retry} builds "
+                    f"from {build_name} project"
+                )
+
+            build_info = json.loads(build_info.text)
+            download_urls = list()
+            for build_url in build_info.get("results", []):
+                download_url = build_url.get("downloadUri", "")
+                if device_type in download_url and self.compression_type in download_url:
+                    download_urls.append(download_url)
+                if len(download_urls) == 2:
+                    break
+            return download_urls
+        log.debug("Querying mirror %s for builds", self.mirror_url)
+        # this comes with the assumption of certain mirror server directory structure:
+        all_builds = requests.get(f"{self.mirror_url}/{self.build_name}", headers=headers).json()
+
+        device_builds = [build for build in all_builds if device_type in build.get("name")]
+
+        # keep a list of tuples with (version, resp) - so that we pick the version number and keep the download URL
+        all_versions = [
+            (re.findall(rf"(\d+[{self.build_separator}]\d+[{self.build_separator}]\d+)", ver.get("name"))[0], ver)
+            for ver in device_builds
+        ]
+        all_versions_on_mirror = [ver[0] for ver in all_versions]
+        log.debug("All versions on mirror: %s", all_versions_on_mirror)
+
         if version == "latest":
-            all_builds = requests.get(project_url)
-            all_builds = json.loads(all_builds.text)
-            all_builds = [int(build_number["uri"].strip("/")) for build_number in all_builds["buildsNumbers"]]
-            last_build = max(all_builds)
+            last_build = max(all_versions, key=lambda x: StrictVersion(x[0].replace("-", ".")))[0]
         elif version == "stable":
-            last_build = int(re.split(self.build_separator, self.lib.device.config["capabilities"]["fw_version"])[-1])
-        else:
-            try:
-                last_build = int(re.split(self.build_separator, version)[-1])
-            except Exception as e:
-                log.error(f"Cannot get build number from {version}")
-                raise e
+            build_id = re.split(self.build_separator, self.lib.device.config["capabilities"]["fw_version"])
+            last_separator = "-" if "-" in self.build_separator else "."
+            last_id = int(build_id[-1])
+            while max_retry > retry:
+                retry += 1
+                last_build = f"{'.'.join(build_id[:-1])}{last_separator}{last_id}".replace("\\", "")
+                if last_build in all_versions_on_mirror:
+                    break
+                last_id -= 1
+            else:
+                raise ValueError(
+                    f"Can not find suitable upgrade package for {device_type} after checking last {max_retry} builds "
+                    f"from {build_name} project"
+                )
 
-        data = '{ "buildName":"' + build_name + '", "buildNumber":"' + str(last_build) + '" }'
-        headers = {
-            "Content-Type": "application/json",
-        }
+        log.debug("Build to download: %s", last_build)
 
-        retry = 0
-        build_info = ""
+        if last_build not in all_versions_on_mirror:
+            raise ValueError(f"Version {last_build} not available in: {all_versions_on_mirror}")
 
-        while max_retry > retry:
-            retry += 1
-            build_info = requests.post(
-                build_info_url,
-                headers=headers,
-                data=data,
-                auth=(self.lib.config["artifactory"]["user"], self.lib.config["artifactory"]["password"]),
-            )
-            if device_type in build_info.text:
-                break
-            last_build = str(int(last_build) - 1)
-            data = '{ "buildName":"' + build_name + '", "buildNumber":"' + last_build + '" }'
-
-        if device_type not in build_info.text:
-            raise Exception(
-                f"Can not find suitable upgrade package for {device_type} after checking last 10 builds "
-                f"from {build_name} project"
+        last_versions = [ver[1] for ver in all_versions if ver[0] == last_build]
+        log.debug("Got releases on mirror: %s", last_versions)
+        if len(last_versions) != 2:
+            raise ValueError(
+                f"Incorrect number of releases matching the expected version {last_build} found: {last_versions}"
             )
 
-        build_info = json.loads(build_info.text)
-        download_urls = list()
-        for build_url in build_info.get("results", []):
-            download_url = build_url.get("downloadUri", "")
-            if device_type in download_url and self.compression_type in download_url:
-                download_urls.append(download_url)
-            if len(download_urls) == 2:
-                break
-        return download_urls
+        return [f"{self.mirror_url}/{self.build_name}/{ver.get('name')}" for ver in last_versions]
 
     @staticmethod
     def parse_upgrade_output(upgrade_result):

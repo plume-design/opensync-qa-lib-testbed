@@ -6,6 +6,7 @@ import time
 
 import yaml
 
+from lib_testbed.generic.util.common import compare_fw_versions
 from lib_testbed.generic.util.logger import log
 import lib_testbed.generic.util.common as common_util
 from lib_testbed.generic.pod.generic.pod_lib import PodLib as PodLibGeneric
@@ -245,16 +246,24 @@ class PodLib(PodLibGeneric):
         result[1] = data_rate_table
         return result
 
-    def trigger_single_radar_detected_event(self, phy_radio_name, **kwargs):
+    def trigger_single_radar_detected_event(
+        self, phy_radio_name, segment_id: int = None, chirp: int = None, freq_offest: int = None, **kwargs
+    ):
         """
         Trigger radar detected event
         Args:
             phy_radio_name: (str): Phy radio name
+            segment_id: (int): Segment ID - optional
+            chirp: (int) Chirp information - optional
+            freq_offest: (int) Frequency offset - optional
             **kwargs:
 
         Returns: list(retval, stdout, stderr)
 
         """
+        if segment_id or chirp or freq_offest:
+            raise NotImplementedError
+
         ret_1 = self.run_command(f"wl -i {phy_radio_name} radar 1", **kwargs)
         ret_2 = self.run_command(f"wl -i {phy_radio_name} radar 2", **kwargs)
         # any resp with 0 is a success
@@ -359,6 +368,13 @@ class PodLib(PodLibGeneric):
                 rev_num = 990
             case ["AU", (2 | 3)]:
                 rev_num = 912
+            case ["MA", 3]:
+                # Morocco cannot be set on 5GU radio to not brick PP403Z. works on FW > 6.6.0
+                fw_version = self.get_stdout(self.version())
+                if compare_fw_versions(fw_version, "6.5.0.0", '<'):
+                    return [100, "", "Cannot change region for POD with OS < 6.6"]
+                num_of_radios = 2
+                rev_num = 763
             case _:
                 raise AssertionError(
                     f"Region {region} is not supported! Supported regions: EU, US, UK, CA, JP, KR, KW, PH, AU."
@@ -651,7 +667,6 @@ class PodLib(PodLibGeneric):
         archer_accelerated_flows = 0
         for flow_id, archer_flows in grouped_archer_flows.items():
             packet_counts = []
-            byte_counts = []
             for archer_flow in archer_flows:
                 if ip_protocol := common_util.get_digits_value_from_text(
                     value_to_take="ip_protocol", text_response=archer_flow
@@ -663,27 +678,15 @@ class PodLib(PodLibGeneric):
                 flow_packets = common_util.get_digits_value_from_text(
                     value_to_take="packets ", text_response=archer_flow
                 )
-                flow_bytes = common_util.get_digits_value_from_text(value_to_take="bytes ", text_response=archer_flow)
                 packet_counts.append(flow_packets)
-                byte_counts.append(flow_bytes)
 
             if packet_counts != sorted(packet_counts):
                 log.warning(
                     f"Number of packets in Archer flow on {self.get_nickname()} device decreased with time:\n"
                     + "\n\n".join(archer_flows)
                 )
-            if byte_counts != sorted(byte_counts):
-                log.warning(
-                    f"Number of bytes in Archer flow on {self.get_nickname()} device decreased with time:\n"
-                    + "\n\n".join(archer_flows)
-                )
-            # flow is accelerated if number of packets and bytes in flow increased during observation
-            if (
-                packet_counts
-                and packet_counts[0] < packet_counts[-1]
-                and byte_counts
-                and byte_counts[0] < byte_counts[-1]
-            ):
+            # flow is accelerated if number of packets in flow increased during observation
+            if packet_counts and packet_counts[0] < packet_counts[-1]:
                 archer_accelerated_flows += 1
 
         if archer_accelerated_flows < flow_count and not (multicast or flex or map_t):
@@ -917,3 +920,14 @@ class PodLib(PodLibGeneric):
                         f"Unknown acceleration tool: {acc_name}. Allowed tools for BCM: archer_flows, cached_flows"
                     )
         return acceleration_status
+
+    def get_client_pmk(self, client_mac, **kwargs):
+        iface_list = " ".join(self.capabilities.get_home_ap_ifnames(return_type=list))
+        cmd = (
+            f"sh -c 'for iface in {iface_list}; do hostapd_cli -i $iface "
+            f"-p /var/run/hostapd-$(cat /var/run/hostapd-$iface.config | grep ctrl_interface | cut -c 33-) "
+            f"raw GET_PMK {client_mac} | grep -v FAIL; done'"
+        )
+        # due to many ifaces ret code might be invalid
+        pmk = self.get_stdout(self.strip_stdout_result(self.run_command(cmd, **kwargs)), skip_exception=True)
+        return [0 if pmk else 1, pmk, f"No PMK for {client_mac}" if not pmk else ""]

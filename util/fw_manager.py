@@ -1,4 +1,5 @@
 """Firmware Manager for getting fixed firmwares from "test_fw_version.json"."""
+
 import os
 import re
 import json
@@ -6,6 +7,7 @@ from pathlib import Path
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.object_resolver import ObjectResolver
 from lib_testbed.generic.util.common import DeviceCommon
+from lib_testbed.generic.util.config import NEW_SDK_FLAG
 
 
 FW_VERSION_LIST = "test_fw_version.json"
@@ -20,14 +22,12 @@ class FwManager:
     def is_new_sdk(self) -> bool:
         return bool(
             re.search("new sdk", self.tb_cfg.get("purpose", ""), re.IGNORECASE)
-        ) or "NEW_SDK" in self.tb_cfg.get("capabilities", [])
+        ) or NEW_SDK_FLAG in self.tb_cfg.get("capabilities", [])
 
     def load_fw_map(self) -> dict:
         fw_map = dict()
         new_sdk = self.is_new_sdk()
-        device_models = list(
-            set([pod_cfg["model_org"] for pod_cfg in self.tb_cfg["Nodes"]])
-        )
+        device_models = list(set([pod_cfg["model_org"] for pod_cfg in self.tb_cfg["Nodes"]]))
         for device_model in device_models:
             fw_file = self.get_file_to_load(device_model=DeviceCommon.convert_model_name(device_model), new_sdk=new_sdk)
             if not fw_file:

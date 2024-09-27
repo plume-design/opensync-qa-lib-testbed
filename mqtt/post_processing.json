@@ -5,5 +5,6 @@
         "ipv6_address": ["destinationIpv6", "sourceIpv6"],
         "ipv4_address": ["destinationIpv4", "sourceIpv4"]
     },
-    "MdnsRecordsReport": {"encoded_string": ["resDesc"]}
+    "MdnsRecordsReport": {"encoded_string": ["resDesc"]},
+    "LatencyReport": {"mac_address": ["macAddress"]}
 }

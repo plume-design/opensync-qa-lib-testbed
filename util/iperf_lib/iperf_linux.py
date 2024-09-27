@@ -37,9 +37,12 @@ class IperfLinuxCommon(IperfCommon):
         iperf_pids = [line.split()[pid_col_index] for line in ps_res.splitlines() if "grep" not in line]
         iperf_pids = [int(pid) for pid in iperf_pids if pid.isdigit()]
         if not iperf_pids:
-            # in case of small traffic the iperf process is quickly closed:
-            if mode == "client" and self.bytes_to_send:
-                return cmd_id, [0]
+            # In case of small traffic or short duration the iperf process is quickly closed.
+            # Check if the result file was created without an error. If yes - the traffic was initialized successfully.
+            if mode == "client":
+                iperf_result = device.lib.run_command(f"cat {self.iperf_output_file}")[1]
+                if iperf_result and "error" not in iperf_result:
+                    return cmd_id, [0]
             return None
         log.info(f"Iperf {mode} started successfully on {device.nickname} with PIDs {iperf_pids}")
         return cmd_id, iperf_pids
@@ -282,27 +285,31 @@ class IperfClientLinux(IperfLinuxCommon, IperfClientLib):
             assert False, "Iperf client did not start"
 
     def get_raw_iperf_result(self, timeout: int = None) -> str:
-        log.info(
-            f"Waiting for iperf results(ETA " f"@{self.measurement_start_time + timedelta(seconds=self.duration)})"
-        )
+        if timeout is None:
+            timeout = self.duration + 10
+        timeout_end = self.measurement_start_time + timedelta(seconds=timeout)
+        log.info(f"Waiting for iperf results(ETA @{timeout_end})")
         iperf_results = None
         # protection against infinite loop
-        timeout = time.time() + timeout if timeout else time.time() + self.duration + 120
         ps_cmd = "ps aux" if self.client.lib.device_type == "Clients" else "ps"
-        while timeout > time.time():
-            pid_grep = self.client.lib.run_command(f'{ps_cmd} | grep -F "{self.iperf_id[0]}" | grep -v grep')[1]
-            if any(str(pid) in pid_grep for pid in self.iperf_id[1]):
+        while self.iperf_id and timeout_end > datetime.now():
+            pid_grep = self.client.lib.run_command(f'{ps_cmd} | grep -F "{self.iperf_id[0]}" | grep -v grep')
+            if any(str(pid) in pid_grep[1] for pid in self.iperf_id[1]):
                 time.sleep(5)
-            else:
+            elif pid_grep[0] == 1:  # 1 is returned if grep does not match, so there is no iperf running
                 break
+            else:
+                log.warning("Iperf check command failed, trying again in 2 sec")
+                time.sleep(2)
         iperf_results = self.client.lib.run_command(f"cat {self.iperf_output_file}")[1].strip()
         return iperf_results
 
     def get_result_from_client(self, timeout: int = None, skip_exception: bool = False) -> dict:
+        start = time.time()
         iperf_results = self.get_raw_iperf_result(timeout=timeout)
+        end = time.time()
         if skip_exception and not iperf_results:
             return {"error": "No iperf results"}
-
-        assert iperf_results, f"No iperf result after wait {self.duration + 120} seconds"
+        assert iperf_results, f"No iperf result after waiting {int(end - start)} seconds"
         log.info("Successfully got results")
         return self.parse_iperf_results(iperf_results)

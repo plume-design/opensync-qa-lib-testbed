@@ -7,5 +7,26 @@
     "encryption": true,
     "enc-suffix": "eim",
     "key-suffix": "key"
+  },
+  "6.2.0": {
+    "proj-name": "build_augustus_sdk542_v6.2.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_REIMAGE-5.02-TO-5.04_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "6.4.0": {
+    "proj-name": "build_augustus_sdk542_v6.4.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_REIMAGE-5.02-TO-5.04_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "6.4.1": {
+    "proj-name": "build_augustus_sdk542_v6.4.1",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_REIMAGE-5.02-TO-5.04_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
   }
 }

@@ -7,7 +7,6 @@ from subprocess import Popen, PIPE, STDOUT, TimeoutExpired
 import threading
 import psutil
 from subprocess import getoutput as getout
-from pipes import quote
 import sys
 import select
 
@@ -76,7 +75,7 @@ class SSHHostInfo(HostInfo):
                 " -o StrictHostKeyChecking=no"
                 " -o UserKnownHostsFile=/dev/null"
                 " -o ForwardAgent=yes"
-                " -o HostKeyAlgorithms=ssh-dss,ssh-rsa,ssh-ed25519"
+                " -o HostKeyAlgorithms=+ssh-dss,ssh-rsa,ssh-ed25519"
                 f" -o ProxyCommand='{proxy_str}'"
             )
         return proxy
@@ -98,7 +97,8 @@ class SSHHostInfo(HostInfo):
                 proxy = proxy.split("@")[1]
         prefix = "/tmp/.mux"
         max_addr_length = 90 - (len(prefix) + 1 + len(self.name) + 1 + 1 + len(proxy))
-        multiplex_cmd = f" -o ControlPath={prefix}_{self.name}_{self.get_short_addr(max_addr_length)}_{proxy}"
+        multiplex_cmd = (f" -o ControlMaster=auto -o ControlPersist=yes "
+                         f"-o ControlPath={prefix}_{self.name}_{self.get_short_addr(max_addr_length)}_{proxy}")
         if max_addr_length < 0:
             raise Exception(f"Control path too long: {multiplex_cmd}")
         return multiplex_cmd
@@ -160,24 +160,23 @@ class SSHHostInfo(HostInfo):
         else:
             options["sshpass"] = ""
 
-        options["multiplex"] = " -o ControlMaster=no"
         if not self.chained and override_config_path:
-            if not DISABLE_SSH_MUX and self.name not in ["host"]:
-                # TODO: Resolve problem for host with mux (controlpath is used from config/ssh/config)
-                options["multiplex"] = self.get_multiplex_command()
             options["path"] = self.replace_ssh_config()
         else:
             options["path"] = ""
+
+        options["multiplex"] = " -o ControlMaster=no"
+        if not DISABLE_SSH_MUX:
+            options["multiplex"] = self.get_multiplex_command()
 
         if forward_agent:
             options["forward_agent"] = " -A"
         else:
             options["forward_agent"] = ""
 
-        # Old OpenSsh doesn't support '+' sign
         options["keys"] = (
             " -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
-            " -o HostKeyAlgorithms=ssh-dss,ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group1-sha1"
+            " -o HostKeyAlgorithms=+ssh-dss,ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group1-sha1"
             " -o PubkeyAcceptedKeyTypes=+ssh-rsa"
         )
 
@@ -188,7 +187,7 @@ class SSHHostInfo(HostInfo):
 
     def command_wrapper(self, command, stdio_forward=False, override_config_path=True):
         if command:
-            command = quote(command)
+            command = shlex.quote(command)
         if self.netns:
             command = f"sudo ip netns exec {self.netns} {command}"
         proxy_command = self.get_proxy_command(stdio_forward=True)
@@ -357,6 +356,9 @@ def execute_commands(command_dict, timeout=EXECUTE_CMD_TIMEOUT, **kwargs):
         stdin = sys.stdin.readlines()
         stdin = "".join(stdin)
     for node, command in command_dict.items():
+        log.debug(
+            "Executing command against device '%s', timeout=%s, cmd='%s', extra args=%s", node, timeout, command, kwargs
+        )
         retval, stdout, stderr = execute_command(dev_name=node, cmd=command, stdin=stdin, timeout=timeout, **kwargs)
         retval = retval.decode() if isinstance(retval, bytes) else retval
         if isinstance(stdout, bytes):
@@ -367,6 +369,7 @@ def execute_commands(command_dict, timeout=EXECUTE_CMD_TIMEOUT, **kwargs):
         stderr = stderr.decode() if isinstance(stderr, bytes) else stderr
         if "sshpass: not found" in stderr:
             log.error(stderr)
+        log.debug("Command returned exit code=%s, stdout='%s', stderr='%s'", retval, stdout, stderr)
         results[node] = [retval, stdout, stderr]
     return results
 

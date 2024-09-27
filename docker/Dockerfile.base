@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 ENV PYTHON_VERSION 3.12.1
 ENV PATH /usr/local/bin:$PATH
 ENV LC_ALL C.UTF-8
@@ -8,7 +8,10 @@ ENV DEBIAN_FRONTEND noninteractive
 RUN rm -f /etc/apt/apt.conf.d/docker-clean; echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt update && apt install -y  \
+    apt update && apt install -y  eatmydata
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    eatmydata apt update && eatmydata apt install -y  \
     build-essential \
     apt-utils \
     git-core \
@@ -52,7 +55,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     net-tools \
     iproute2 \
     jq \
-    tshark
+    tshark \
+    gdb-multiarch
 
 
 # Install pyenv, Python interpreter, and make it global
@@ -69,9 +73,17 @@ ENV PATH="${PYENV_ROOT}/versions/${PYTHON_VERSION}/bin:${PATH}"
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --upgrade pip
 
+# Create directory for mounting trident-uv-cache volume
+RUN mkdir -p /var/cache/uv && chmod 777 /var/cache/uv
+
 # -- Install allure
-RUN wget https://repo.maven.apache.org/maven2/io/qameta/allure/allure-commandline/2.10.0/allure-commandline-2.10.0.zip
-RUN unzip allure-*.zip && rm allure-*.zip && mv allure-* allure && mv allure /opt/
+ARG allure_checksum="c29957411c5ea34b693fb7c67774f87336d1b88c345f261076cc8c6ea95b62c2"
+ARG allure_tarball="/var/cache/allure/allure-commandline-2.10.0.zip"
+RUN --mount=type=cache,target=/var/cache/allure \
+    sha256sum --check --status 2>/dev/null <<< "$allure_checksum  $allure_tarball" \
+    || wget https://repo.maven.apache.org/maven2/io/qameta/allure/allure-commandline/2.10.0/allure-commandline-2.10.0.zip -O $allure_tarball \
+    && sha256sum --check --status 2>/dev/null <<< "$allure_checksum  $allure_tarball" \
+    && unzip $allure_tarball && mv allure-* allure && mv allure /opt/
 ENV ALLURE_GEN_FILE=/opt/allure/bin/allure-gen
 COPY allure-gen ${ALLURE_GEN_FILE}
 RUN chmod a+x ${ALLURE_GEN_FILE}
@@ -93,7 +105,7 @@ RUN export MPLBACKEND
 
 # -- Install pipenv
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install setuptools==67.7.2 setuptools-scm pipenv==2023.7.23
+    python -m pip install setuptools==67.7.2 setuptools-scm uv==0.1.20
 
 # -- Adding autocomplete to pset command
 COPY pset /etc/bash_completion.d/

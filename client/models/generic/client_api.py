@@ -27,9 +27,11 @@ class ClientApi(DeviceApi):
             or request.config.option.skip_init
             or not self.lib.device
             or not self.lib.main_object
+            or not self.start_class_handler
             or self.skip_init
         ):
             return
+        self.start_class_handler = False
 
         name = self.get_nickname()
         uptime_result = self.lib.get_stdout(self.lib.uptime(timeout=20), skip_exception=True)
@@ -207,9 +209,9 @@ class ClientApi(DeviceApi):
         result = self.lib.fqdn_type65(domain)
         return self.get_stdout(result, **kwargs)
 
-    def wifi_monitor(self, channel, ht="HT20", ifname="", **kwargs):
+    def wifi_monitor(self, channel, ht="HT20", ifname="", band="5G", **kwargs):
         """Set interface WIFI_MON_IF in tbvars.conf file to monitor mode."""
-        result = self.lib.wifi_monitor(channel, ht, ifname, **kwargs)
+        result = self.lib.wifi_monitor(channel, ht, ifname, band, **kwargs)
         return self.get_stdout(result, **kwargs)
 
     def wifi_station(self, ifname="", **kwargs):
@@ -389,13 +391,13 @@ class ClientApi(DeviceApi):
     def stop_continuous_flood_ping(self, proc_id, file_path="/tmp/ping.log", **kwargs):
         return self.lib.stop_continuous_flood_ping(proc_id, file_path, **kwargs)
 
-    def start_continuous_ping(self, interface, file_path="/tmp/ping.log", wait="1", target="", **kwargs):
-        target = target if target else self.lib.get_ip_address_ping_check(ipv6=False)
-        return self.lib.start_continuous_ping(interface, file_path, wait, target, **kwargs)
+    def start_continuous_ping(self, interface=None, file_path="/tmp/ping.log", wait="1", target="", interval=1,
+                              v6=False, **kwargs):
+        target = target if target else self.lib.get_ip_address_ping_check(ipv6=v6)
+        return self.lib.start_continuous_ping(interface, file_path, wait, target, interval, v6, **kwargs)
 
-    def stop_continuous_ping(self, file_path="/tmp/ping.log", target="", threshold=2, **kwargs):
-        target = target if target else self.lib.get_ip_address_ping_check(ipv6=False)
-        return self.lib.stop_continuous_ping(file_path, target, threshold, **kwargs)
+    def stop_continuous_ping(self, file_path="/tmp/ping.log", threshold=2, v6=False, **kwargs):
+        return self.lib.stop_continuous_ping(file_path, threshold, v6, **kwargs)
 
     def get_mac(self, ifname="", **kwargs):
         """Get wifi MAC address"""
@@ -495,7 +497,7 @@ class ClientApi(DeviceApi):
         ipv4=True,
         ipv6=False,
         ipv6_stateless=False,
-        timeout=10,
+        timeout=20,
         reuse=False,
         static_ip=None,
         clear_dhcp=True,
@@ -533,7 +535,7 @@ class ClientApi(DeviceApi):
 
     def set_tb_nat(self, mode, **kwargs):
         """
-        Set NAT mode for the Test Bed on the rpi-server
+        Set testbed's IPv6 NAT mode on testbed's server
         mode: (str) NAT64 or NAT66
         """
         response = self.lib.set_tb_nat(mode, **kwargs)
@@ -541,13 +543,13 @@ class ClientApi(DeviceApi):
 
     def get_tb_nat(self, **kwargs):
         """
-        Get NAT mode for the Test Bed on the rpi-server
+        Get testbed's IPv6 NAT mode from testbed's server
         """
         response = self.lib.get_tb_nat(**kwargs)
         return self.get_stdout(response, **kwargs)
 
-    def start_selenium_server(self, port=4444, **kwargs):
-        response = self.lib.start_selenium_server(port, **kwargs)
+    def start_selenium_server(self, port=4444, session_timeout: int = 3600, **kwargs):
+        response = self.lib.start_selenium_server(port, session_timeout=session_timeout, **kwargs)
         return self.get_stdout(response, **kwargs)
 
     def change_driver_settings(self, ifname, settings, **kwargs):

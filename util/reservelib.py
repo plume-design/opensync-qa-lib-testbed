@@ -1,5 +1,6 @@
 import os
 import getpass
+import subprocess
 import sys
 import traceback
 import time
@@ -11,27 +12,63 @@ import threading
 import queue
 import yaml
 import functools
+import logging
+
+from packaging.version import Version
 
 from lib_testbed.generic.util.logger import log, LogCatcher
-from lib_testbed.generic.util.common import BASE_DIR
+from lib_testbed.generic.util.common import BASE_DIR, CACHE_DIR, skip_exception
 from lib_testbed.generic.util import config
 from lib_testbed.generic.client.client import Clients
 
 SSH_GATEWAY = "ssh_gateway"
 RESERVELIB_OUT_FILE = "log_reservelib"
 
+__version__ = "3.4.1"
+"""Reservelib version."""
+
+# Reservelib version history:
+# * 3.4.1: Updated pytest plugin log to see which testbed is being used by someone else.
+# * 3.4.0: Updated unreserve response: displaying "TESTBED WAS NOT RESERVED" when trying to free an unused testbed.
+#   Also, replaced deprecated :py:class:`distutils.version.StrictVersion` with :py:class:`packaging.version.Version`.
+# * 3.3.0: Now timestamps can all be retuned in UTC time zone, skipping timezone conversion based on the
+#   skip_tz_conversion constructor argument. Also fixed a small bug - force-free message was not stored in
+#   the message column, but in timestamp with parenthesis resulting with incorrect processing of that message.
+# * 3.2.1: logging exceptions in getting history on debug level, as users report being overwhelmed with logs.
+# * 3.2.0: now updating local reservation file (the counter) at the end of pytest run.
+#   reservation getter does not update the file format, added a dedicated method to update reservation file format.
+#   added a method checking if newer version is available (based on the current reservation file).
+#   Now reservation row includes reservation message as the last element of the reservation row:
+#   "<hostname_or_job>[-<build_number>]:::<machine_uuid>:::<start_time>:::<end_time>:::<reservelib-version>
+#   :::<is_forced flag>:::<reservation_message>"
+#   The commands return a dictionary with the information about team responsible, and whether the operation was forced.
+#   Added a method checking if the file format is not outdated, so that the tool can invoke it and present the
+#   command to fix the file to the users.
+#   In case pytest runs into an outdated file format, we convert it to the modern format without bothering the users.
+#   Increased default maximum reservation file from 3 to 7 days.
+# * 3.1.1: replace "tail | tee" call with "echo > reservation" - as the behavior was undefined. Also made sure that
+#   the exipry date does not contain reservation message.
+# * 3.1.0: now clearing reservation file leaves out the information about the user who cleared it.
+# * 3.0.0: changed value separator from __ (double underscore) to ::: (tripple colon)
+#   The reservation file is updated reserve on get operation, and should prevent old tool versions from working.
+# * 2.0.0: add handling for additional/extra values in every reservation: reservelib version and force-flag
+# * 1.0.0: legacy versionlib, stores reservation row on OSRT server:
+#   In 1.0, reservation row contains:
+#   <hostname_or_job>[-<build_number>]__<machine_uuid>__<start_time>__<end_time> <reservation_message>
+#   with reservation message being optional.
+
 
 class ReserveLib:
     def __init__(self, **kwargs):
         self.tb_config = kwargs.get("config")
-        self.json_output = kwargs.get("json")
+        self.json_output = kwargs.get("json", False)
         self.new_reservation_msg = self.tb_config.get("message", "")
+        self.skip_tz_conversion = kwargs.get("skip_tz_conversion", False)
         self.tb_name = config.get_location_name(self.tb_config)
         self.res_file = f"/.reserve_{self.tb_name}"
         self.client_lib = self._get_client_lib()
         self.sudo = "sudo " if kwargs.get("sudo", True) else ""  # if False, the commands will run without sudo
-        self.openfd_cmd = f"{self.sudo}touch {self.res_file}; exec {{reservefd}}<{self.res_file};"
-        self.closefd_cmd = "exec {reservefd}<&-"
+        self.ensure_res_file_cmd = f"{self.sudo}touch {self.res_file}; "
         if not (host_name := os.environ.get("CUSTOM_HOSTNAME")):
             host_name = os.uname()[1]
 
@@ -40,6 +77,8 @@ class ReserveLib:
         self.host_name = host_name
         self.machine_uuid = self._get_machine_uuid()
         self.log_catcher = log_catcher  # reference to log_catcher, allows derived classes to log into their own loggers
+        self.team_responsible = self.tb_config.get("reservation", {}).get("team_responsible", "-")
+        self.max_reserv_time = self.tb_config.get("reservation", {}).get("max_reservation_time", 7 * 24 * 60)
 
     def _tb_purpose_decorator(func):
         """
@@ -62,6 +101,7 @@ class ReserveLib:
 
     def _existing_msg_decorator(func):
         """
+        DEPRECATED!
         Check tb reservation file for reservation message sring
         insert key value pair into func's returned dictionary if k,v pair present
         Args:
@@ -105,6 +145,7 @@ class ReserveLib:
         """
         kwargs.update({"timeout": timeout})
         ret = self.client_lib.run_command(command, skip_logging=True, **kwargs)[0]
+        log.debug("Server SSH command '%s' returned %s", command, ret)
         if ret[0]:
             return f"Error: {ret[2]}"
         return ret[1].strip()
@@ -126,22 +167,25 @@ class ReserveLib:
         """
         message = ""
         try:
-            file_operation_cmds = f'flock -x "$reservefd"; ' f"tail -1 {self.res_file}; " f"sync; "
-            cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
+            log.debug("Getting current reservation message")
+            file_operation_cmds = f'flock -x {self.res_file} --command "tail -1 {self.res_file} && sync"'
+            cmd = self.ensure_res_file_cmd + file_operation_cmds
 
             out = self._server_ssh_call(cmd)
         except Exception as error:
             log.error(f"Failed to parse reservation log -> {error}")
             out = ""
-        if "__" in out:
-            info = out.split("__")
+        if ":::" in out:
+            info = out.split(":::")
             message_raw = info[3].split() if len(info) > 3 else []
             if len(message_raw) > 1:
                 message = " ".join(message_raw[1:]).replace("(", "").replace(")", "")
+        log.debug("Current reservation message: '%s'", message)
         return message
 
+    @skip_exception(Exception, reraise=True)
     @_tb_purpose_decorator
-    def reserve_test_bed(self, timeout=120):
+    def reserve_test_bed(self, timeout=120, by_pytest_plugin=False):
         """
         Reserve test bed. Default timeout is 120 minutes
         """
@@ -152,6 +196,10 @@ class ReserveLib:
                 "owner": "CANNOT RESERVE THIS TB",
                 "since": "-",
                 "expiration": "-",
+                "message": "-",
+                "team_responsible": self.team_responsible,
+                "version": __version__,
+                "is_forced": self.tb_config.get("force", False),
             }
         if not isinstance(timeout, int):
             timeout = int(timeout)
@@ -168,30 +216,35 @@ class ReserveLib:
                     "owner": status["owner"],
                     "since": f"{status['since']}",
                     "expiration": f"{status['expiration']}",
+                    "message": "-",
+                    "team_responsible": self.team_responsible,
+                    "version": __version__,
+                    "is_forced": self.tb_config.get("force", False),
                 }
 
         # limit the file to 2000 lines
         # this is the most problematic part, which often corrupts reservation file, so do it before adding new line
-        file_operation_cmds = f'flock -x "$reservefd"; ' f"tail -2000 {self.res_file} | tee {self.res_file}; " f"sync; "
-        cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
+        file_operation_cmds = (
+            f"flock -x {self.res_file} --command 'echo \"$(tail -2000 {self.res_file})\" > {self.res_file} && sync'"
+        )
+        cmd = self.ensure_res_file_cmd + file_operation_cmds
         self._server_ssh_call(cmd)
 
         # TODO: in case of force, previous reservation should end and new start
-        res_row = self.generate_reservation_row(status, timeout)
+        res_row = self.generate_reservation_row(status, timeout, by_pytest_plugin=by_pytest_plugin)
         # in case tb is reserved by Me, just update last row -> so delete it first
-        if status["busyByMe"]:
+        # but also don't erase last cleared-history operation:
+        if status["busyByMe"] and status.get("message") != "cleared-history":
             file_operation_cmds = (
-                f'flock -x "$reservefd"; '
-                f'{self.sudo}sed -i "$ d" {self.res_file}; '
-                f'echo "{res_row}" | {self.sudo}tee -a {self.res_file}; '
-                f"sync; "
+                f'flock -x {self.res_file} --command \'{self.sudo}sed -i "$ d" {self.res_file} && '
+                f'echo "{res_row}" | {self.sudo}tee -a {self.res_file} && sync\''
             )
         else:
             file_operation_cmds = (
-                f'flock -x "$reservefd"; ' f'echo "{res_row}" | {self.sudo}tee -a {self.res_file}; ' f"sync; "
+                f"flock -x {self.res_file} --command 'echo \"{res_row}\" | {self.sudo}tee -a {self.res_file} && sync'"
             )
 
-        cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
+        cmd = self.ensure_res_file_cmd + file_operation_cmds
         out = self._server_ssh_call(cmd)
         if out.startswith("Error:"):
             return {
@@ -200,10 +253,15 @@ class ReserveLib:
                 "owner": "ERROR: CANNOT RESERVE",
                 "since": status["since"],
                 "expiration": "-",
+                "message": "-",
+                "team_responsible": self.team_responsible,
+                "version": __version__,
+                "is_forced": self.tb_config.get("force", False),
             }
 
-        res_row = res_row.split("__")
-        # remove msg from res_row[3] - if msg exists
+        res_row = res_row.split(":::")
+        # remove msg from res_row[3] - if msg exists -> this convoluted mechanism is DEPRECATED,
+        # it is to be removed in the future!
         if len(res_row[3].split()) > 1:
             res_row[3], *self.new_reservation_msg = res_row[3].split()
             self.new_reservation_msg = " ".join(self.new_reservation_msg).replace("(", "").replace(")", "")
@@ -212,18 +270,22 @@ class ReserveLib:
             "status": True,
             "owner": res_row[0],
             "since": f"{self._convert_utc_to_local(res_row[2])}",
-            "expiration": f"{self._convert_utc_to_local(res_row[3])}",
+            "expiration": f"{self._convert_utc_to_local(res_row[3].split()[0])}",
+            "message": self.new_reservation_msg,
+            "team_responsible": self.team_responsible,
+            "version": __version__,
+            "is_forced": self.tb_config.get("force", False),
         }
-        if self.new_reservation_msg:
-            rsrv_dict.update({"reservation message": self.new_reservation_msg})
         return rsrv_dict
 
+    @skip_exception(Exception, reraise=True)
     @_existing_msg_decorator
     @_tb_purpose_decorator
     def get_reservation_status(self, tool=True):
         """
         Check reservation status
         """
+        log.debug("Getting reservation status")
         if not self.check_reservation_possible():
             return {
                 "name": self.tb_name,
@@ -232,16 +294,19 @@ class ReserveLib:
                 "owner": "CANNOT GET RESERVATION",
                 "since": "-",
                 "expiration": "-",
+                "is_forced": False,
+                "team_responsible": self.team_responsible,
+                "message": "-",
             }
-        file_operation_cmds = f'flock -x "$reservefd"; ' f"tail -1 {self.res_file}; "
+        file_operation_cmds = f'flock -x {self.res_file} --command "tail -1 {self.res_file}"'
 
-        cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
+        cmd = self.ensure_res_file_cmd + file_operation_cmds
 
         out = self._server_ssh_call(cmd)
 
         if not out:
-            file_operation_cmds = f'flock -x "$reservefd"; ' f"[ -s {self.res_file} ] || echo empty file; "
-            cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
+            file_operation_cmds = f'flock -x {self.res_file} "tail -1 {self.res_file}" || echo empty file'
+            cmd = self.ensure_res_file_cmd + file_operation_cmds
 
             out = self._server_ssh_call(cmd)
             if out != "empty file":
@@ -252,6 +317,10 @@ class ReserveLib:
                     "owner": "CANNOT GET RESERVATION",
                     "since": "-",
                     "expiration": "-",
+                    "version": "Unknown",
+                    "is_forced": False,
+                    "team_responsible": self.team_responsible,
+                    "message": "-",
                 }
         # analyze case where file does not exist
         if "No such file or directory" in out or "cannot open lock file" in out or "empty file" in out:
@@ -262,9 +331,13 @@ class ReserveLib:
                 "owner": "NO RESERVATION FILE",
                 "since": "-",
                 "expiration": "-",
+                "version": "Unknown",
+                "is_forced": False,
+                "team_responsible": self.team_responsible,
+                "message": "-",
             }
         # analyze other exceptions
-        if out.startswith("Error:") or "__" not in out:
+        if out.startswith("Error:") or ":::" not in out:
             return {
                 "name": self.tb_name,
                 "busy": True,
@@ -272,23 +345,26 @@ class ReserveLib:
                 "owner": "CANNOT GET RESERVATION",
                 "since": "-",
                 "expiration": "-",
+                "version": "Unknown",
+                "is_forced": False,
+                "team_responsible": self.team_responsible,
+                "message": "-",
             }
         # analyze the last row of reservation file
-        info = out.split("__")
+        info = out.split(":::")
         # gather existing reservation message, if it exists - split apart timestamp from initial part of line
         try:
             if len(info[3].split()) > 1:
                 info[3] = info[3].split()[0]
-            busy = datetime.datetime.utcnow() < datetime.datetime.fromisoformat(info[3])
+            if "+" not in info[3]:
+                log.debug("Extending timestamp with +00:00 timezone information")
+                info[3] += "+00:00"
+            busy = datetime.datetime.now(tz=datetime.UTC) < datetime.datetime.fromisoformat(info[3])
         except (ValueError, IndexError) as error:
             busy = None
-            log.error(f"Invalid timestamp in reservation file -> {error}")
-        if len(info) != 4 or busy is None:
-            log.error("Reservation file is corrupted, removing last reservation")
-            file_operation_cmds = f'flock -x "$reservefd"; ' f'{self.sudo}sed -i "$ d" {self.res_file}; ' f"sync;"
-            cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
-
-            self._server_ssh_call(cmd)
+            log.error("Invalid timestamp in reservation file -> %s", error)
+        if len(info) < 4 or busy is None:
+            log.error("Reservation file is corrupted.")
             return {
                 "name": self.tb_name,
                 "busy": True,
@@ -296,12 +372,30 @@ class ReserveLib:
                 "owner": "CANNOT GET RESERVATION",
                 "since": "-",
                 "expiration": "-",
+                "version": "Unknown",
+                "is_forced": False,
+                "team_responsible": self.team_responsible,
+                "message": "-",
             }
         busy_by_me = busy and self._get_machine_uuid() == info[1]
         # nicer look of the date
         if tool:
             info[2] = self._convert_utc_to_local(info[2])
             info[3] = self._convert_utc_to_local(info[3])
+        try:
+            version = info[4]
+        except IndexError:
+            log.debug("Could not determine reservelib version")
+            version = "Unknown"
+        try:
+            is_forced = info[5] == "True"
+        except IndexError:
+            log.debug("Could not determine if resrvation was forced (assuming False)")
+            is_forced = False
+        try:
+            message = info[6]
+        except IndexError:
+            message = ""
         if busy:
             return {
                 "name": self.tb_name,
@@ -310,6 +404,10 @@ class ReserveLib:
                 "owner": info[0],
                 "since": f"{info[2]}",
                 "expiration": f"{info[3]}",
+                "version": version,
+                "is_forced": is_forced,
+                "team_responsible": self.team_responsible,
+                "message": message,
             }
         else:
             info[3] = f"Expired: {info[3]}" if tool else "-"
@@ -320,9 +418,25 @@ class ReserveLib:
                 "owner": f"Last owner: '{info[0]}'",
                 "since": "-",
                 "expiration": info[3],
+                "version": version,
+                "is_forced": is_forced,
+                "team_responsible": self.team_responsible,
+                "message": message,
             }
 
-    def unreserve(self):
+    def update_old_reservation_format(self):
+        """Update the file format to the latest reservation format.
+
+        Updates separator string. Old format was using __ [double underscore] as a separator, new file format
+        uses ::: [triple colon].
+        """
+        convert_cmd = f"flock -x {self.res_file} --command \"{self.sudo}sed -i -e 's/__/:::/g' {self.res_file}\""
+        output = self._server_ssh_call(convert_cmd)
+        log.info("Reservation file conversion resulted: %s", output)
+        return {"name": self.tb_name, "status": True if "Error" not in output else False, "message": "-"}
+
+    @skip_exception(Exception, reraise=True)
+    def unreserve(self, by_pytest_plugin=False):
         """
         Un-reserve test bed
         """
@@ -334,6 +448,10 @@ class ReserveLib:
                 "owner": "CANNOT GET RESERVATION",
                 "since": "-",
                 "expiration": "-",
+                "version": "Unknown",
+                "is_forced": False,
+                "team_responsible": self.team_responsible,
+                "message": "-",
             }
         status = self.get_reservation_status(tool=False)
         self.log_catcher.process_caller(inspect.stack()[1][3], status)
@@ -345,11 +463,22 @@ class ReserveLib:
                 "owner": "ERROR: CANNOT GET RESERVATION",
                 "since": "-",
                 "expiration": "-",
+                "version": status.get("version"),
+                "is_forced": status.get("is_forced"),
+                "team_responsible": self.team_responsible,
+                "message": "-",
             }
 
         # if not reserved just exit
         if not status["busy"]:
-            return {"name": self.tb_name, "status": True, "owner": "-", "since": "-", "expiration": "-"}
+            return {
+                "name": self.tb_name,
+                "status": True,
+                "owner": "TESTBED WAS NOT RESERVED",
+                "since": "-",
+                "expiration": "-",
+                "message": "-",
+            }
 
         if not self.tb_config.get("force"):
             # check if we can un-reserve test bed
@@ -362,18 +491,37 @@ class ReserveLib:
                     "owner": status["owner"],
                     "since": f"{status['since']}",
                     "expiration": f"{status['expiration']}",
+                    "version": status.get("version"),
+                    "is_forced": status.get("is_forced"),
+                    "team_responsible": self.team_responsible,
+                    "message": status.get("message", ""),
                 }
 
-        # in case of force, we need to keep owner
-        res_row = self.generate_reservation_row(status, 0, keep_owner=True)
+        # in case of force, we need to keep owner, but also is_forced flag that's set only when getting reservation
+        res_row = self.generate_reservation_row(status, 0, keep_owner=True, by_pytest_plugin=by_pytest_plugin)
+        log.debug("Unreserve force-status -> should not be changed")
+        row = res_row.split(":::")
+        row[5] = str(status["is_forced"])
+        res_row = ":::".join(row)
+        log.debug("Unreserve reservation row: %s", res_row)
+        if self.tb_config.get("force"):
+            # we do force-free, so we want to keep the is_forced flag of the reservation and
+            # add a 1-second long reservation to indicate that it was force-freed
+            previous_end = row[3].split()[0]
+            row[2], row[3] = (
+                datetime.datetime.fromisoformat(previous_end).isoformat(),
+                (datetime.datetime.fromisoformat(previous_end) + datetime.timedelta(seconds=1)).isoformat(),
+            )
+            row[5] = "True"
+            row[6] = "forced-free"
+            res_row += "\n" + ":::".join(row)
+            log.debug("Will be storing the information about force-free with 2 rows:\n%s", res_row)
 
         file_operation_cmds = (
-            f'flock -x "$reservefd"; '
-            f'{self.sudo}sed -i "$ d" {self.res_file}; '
-            f'echo "{res_row}" | {self.sudo}tee -a {self.res_file}; '
-            f"sync;"
+            f'flock -x {self.res_file} --command \'{self.sudo}sed -i "$ d" {self.res_file} && '
+            f'echo -e "{res_row}" | {self.sudo}tee -a {self.res_file} && sync\''
         )
-        cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
+        cmd = self.ensure_res_file_cmd + file_operation_cmds
         out = self._server_ssh_call(cmd)
 
         if out.startswith("Error:"):
@@ -383,46 +531,85 @@ class ReserveLib:
                 "owner": "ERROR: CANNOT UNRESERVE",
                 "since": status["since"],
                 "expiration": "-",
+                "version": "Unknown",
+                "is_forced": False,
+                "team_responsible": self.team_responsible,
+                "message": "-",
             }
-        res_row = res_row.split("__")
+        res_row = res_row.split(":::")
+        try:
+            version = res_row[4]
+        except IndexError:
+            log.debug("Could not determine reservelib version")
+            version = "Unknown"
+        try:
+            is_forced = res_row[5] == "True"
+        except IndexError:
+            log.debug("Could not determine if resrvation was forced (assuming False)")
+            is_forced = False
+        try:
+            message = res_row[6]
+        except IndexError:
+            message = ""
         return {
             "name": self.tb_name,
             "status": True,
             "owner": "-",
             "since": f"{self._convert_utc_to_local(res_row[2])}",
-            "expiration": "-",
+            "expiration": f"{self._convert_utc_to_local(res_row[3].split()[0])}",
+            "version": version,
+            "is_forced": is_forced,
+            "team_responsible": self.team_responsible,
+            "message": message,
         }
 
     def clear_reservation_history(self):
-        """
-        Clear reservation history (remove reservation file)
-        """
+        """Clear reservation history (remove history from reservation file)."""
         if not self.check_reservation_possible():
             return {"name": self.tb_name, "status": False, "msg": "RESERVATION NOT POSSIBLE"}
         status = self.get_reservation_status(tool=False)
         self.log_catcher.process_caller(inspect.stack()[1][3], status)
         # if reserved, keep the last line
+        res_row = self.generate_reservation_row(status, 1)
+        row = res_row.split(":::")
+        log.debug("Unreserve reservation row: %s", res_row)
+        previous_end = row[3].split()[0]
+        row[2], row[3] = (
+            datetime.datetime.fromisoformat(previous_end).isoformat(),
+            (datetime.datetime.fromisoformat(previous_end) + datetime.timedelta(seconds=1)).isoformat(),
+        )
+        row[6] = "cleared-history"
+        res_row = ":::".join(row)
+        log.debug("Will be storing the information about history-clear:\n%s", res_row)
         if status["busy"]:
+            # when testbed is busy, we clear history but leave out the information about the current reservation
             file_operation_cmds = (
-                f'flock -x "$reservefd"; '
-                f'echo "$(tail -1 {self.res_file})" | {self.sudo}tee {self.res_file}; '
-                f"sync;"
+                f"flock -x {self.res_file} --command "
+                f"\"echo -e '{res_row}\n$(tail -1 {self.res_file})' | {self.sudo}tee {self.res_file} && sync\""
             )
-            cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
+            cmd = self.ensure_res_file_cmd + file_operation_cmds
 
             out = self._server_ssh_call(cmd)
         else:
             out = self._server_ssh_call(f"{self.sudo}rm {self.res_file}; sync")
+
+            file_operation_cmds = (
+                f"flock -x {self.res_file} --command 'echo \"{res_row}\" | {self.sudo}tee -a {self.res_file} && sync'"
+            )
+            cmd = self.ensure_res_file_cmd + file_operation_cmds
+
+            out += self._server_ssh_call(cmd)
+
         if "Error" in out:
-            return {"name": self.tb_name, "status": False, "msg": "CLEARING ERROR"}
+            return {"name": self.tb_name, "status": False, "message": "CLEARING ERROR"}
         else:
-            return {"name": self.tb_name, "status": True, "msg": "DONE"}
+            return {"name": self.tb_name, "status": True, "message": "DONE"}
 
     def usage_statistics(self, time_res="week", min_use="0"):  # noqa: C901
         """
         Get test bed usage statistics; time_res=week|month|year
         """
-        assert time_res in ["week", "month", "year"]
+        assert time_res in ["day", "week", "month", "year"]
         assert min_use.isdigit()
         min_use = int(min_use)
         ret = {"name": self.tb_name}
@@ -431,16 +618,17 @@ class ReserveLib:
         if not self.check_reservation_possible():
             ret["stats"] = "RESERVATION NOT POSSIBLE"
             return ret
-
-        if time_res == "week":
+        if time_res == "day":
+            delta = 1
+        elif time_res == "week":
             delta = 7
         elif time_res == "month":
             delta = 30
         else:
             delta = 365
 
-        file_operation_cmds = f'flock -x "$reservefd"; ' f"cat {self.res_file}; "
-        cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
+        file_operation_cmds = f'flock -x {self.res_file} --command "cat {self.res_file}"'
+        cmd = self.ensure_res_file_cmd + file_operation_cmds
 
         out = self._server_ssh_call(cmd)
         if not out or "returned non-zero exit status 1" in out or "returned non-zero exit status 66" in out:
@@ -458,18 +646,27 @@ class ReserveLib:
             ret["stats"] = "CANNOT REACH TB"
             return ret
 
-        boundary = datetime.datetime.utcnow() - datetime.timedelta(days=delta)
+        boundary = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=delta)
         res_count = 0
         res_time = 0
         for line in out.split("\n")[::-1]:
             log.info(line)
-            reservation = line.split("__")
+            reservation = line.split(":::")
             if len(reservation) < 4:
                 if line:  # report it, unless it's just an empty line
                     log.warning(f'Invalid reservation line for {self.tb_name}: "{line}"')
                 continue
-            st_res = datetime.datetime.fromisoformat(reservation[2])
-            end_res = datetime.datetime.fromisoformat(reservation[3].split()[0])  # split handles reservation messages
+            st_timestamp = reservation[2]
+            if "+" not in st_timestamp:
+                log.debug("Extending timestamp with +00:00 timezone information")
+                st_timestamp += "+00:00"
+            st_res = datetime.datetime.fromisoformat(st_timestamp)
+            # split handles reservation messages
+            end_timestamp = reservation[3].split()[0]
+            if "+" not in end_timestamp:
+                log.debug("Extending timestamp with +00:00 timezone information")
+                end_timestamp += "+00:00"
+            end_res = datetime.datetime.fromisoformat(end_timestamp)
             if end_res < boundary:
                 # latest reservation is earlier than boundary, so there is nothing to analyze above
                 break
@@ -478,8 +675,8 @@ class ReserveLib:
             if st_res < boundary:
                 st_res = boundary
             # if reservation ends after current time, stop NOW
-            if end_res > datetime.datetime.utcnow():
-                end_res = datetime.datetime.utcnow()
+            if end_res > datetime.datetime.now(datetime.UTC):
+                end_res = datetime.datetime.now(datetime.UTC)
             res_time += (end_res - st_res).days * 24 * 3600 + (end_res - st_res).seconds
         if min_use:
             ret["in_use"] = res_count >= min_use
@@ -508,29 +705,42 @@ class ReserveLib:
             return False
         return True
 
-    def generate_reservation_row(self, current_reservation, reservation_time=120, keep_owner=False):
+    def check_outdated_reserve_format(self) -> bool:
+        """Returns True when the file format is outdated."""
+        file_operation_cmds = f'flock -x {self.res_file} --command "cat {self.res_file}"'
+        cmd = self.ensure_res_file_cmd + file_operation_cmds
+
+        out = self._server_ssh_call(cmd)
+        return "__" in out
+
+    @skip_exception(Exception, reraise=True)
+    def generate_reservation_row(
+        self,
+        current_reservation: dict,
+        reservation_time: int = 120,
+        keep_owner: bool = False,
+        by_pytest_plugin: bool = False,
+    ):
         """
         Generate reservation file name
         Args:
-            current_reservation: (dict) current reservation
-            reservation_time: (int) timeout for test bed reservation
-            keep_owner: (bool) return the same owner (needed in case of force)
+            current_reservation: current reservation
+            reservation_time:  timeout for test bed reservation
+            keep_owner: return the same owner (needed in case of force)
+            by_pytest_plugin: indicates whether the reservation was called by pytest reservation plugin.
 
         Returns: (str) reservation file row:
-            "<hostname_or_job>[-<build_number>]__<machine_uuid>__<start_time>__<end_time> <reservation_message>"
+            "<hostname_or_job>[-<build_number>]:::<machine_uuid>:::<start_time>:::<end_time> <reservation_message>
+            :::<reservelib_version>:::<is_forced>"
 
         """
-        max_reserv_time = 3 * 24 * 60
-        if not self._system_qa_rsrv_exemption():
-            assert reservation_time <= max_reserv_time, f"Max reservation time is {max_reserv_time} minutes"
-
         if keep_owner:
-            file_operation_cmds = f'flock -x "$reservefd"; ' f"tail -1 {self.res_file};"
-            cmd = self.openfd_cmd + file_operation_cmds + self.closefd_cmd
+            file_operation_cmds = f'flock -x {self.res_file} --command "tail -1 {self.res_file}"'
+            cmd = self.ensure_res_file_cmd + file_operation_cmds
 
             out = self._server_ssh_call(cmd)
             assert out and "Error" not in out
-            out = out.split("__")
+            out = out.split(":::")
             owner = out[0]
             mach_uuid = out[1]
         elif os.environ.get("JOB_NAME"):
@@ -554,25 +764,114 @@ class ReserveLib:
                 owner = f"{self.host_name}{build_number}"
             mach_uuid = self.machine_uuid
 
-        start_time = current_reservation.get("since")
-        if start_time == "-":
-            start_time = datetime.datetime.utcnow().isoformat()
-
-        end_time = current_reservation.get("expiration")
-        if end_time == "-":
-            end_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=reservation_time)
+        if current_reservation["owner"] == owner:
+            # we should get here only if extending reservation by the same user, otherwise create new row with new owner
+            start_time = current_reservation.get("since")
         else:
-            # pytest extends reservation by 10 or 3, in case there is existing longer reservation probably it's manual,
-            # so keep the original record
+            start_time = datetime.datetime.now(datetime.UTC).isoformat()
+
+        end_time = current_reservation.get("expiration").split()[0]
+        if end_time == "-":
+            end_time = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=reservation_time)
+        else:
             end_time = datetime.datetime.fromisoformat(end_time)
             if not (
-                reservation_time in [10, 3] and datetime.datetime.utcnow() + datetime.timedelta(minutes=10) < end_time
+                by_pytest_plugin and datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=10) < end_time
             ):
-                end_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=reservation_time)
+                end_time = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=reservation_time)
 
-        rsrv_msg = f" ({self.new_reservation_msg})" if self.new_reservation_msg else ""
+        rsrv_msg = str(self.new_reservation_msg) if self.new_reservation_msg else ""
         owner = self.tb_config["owner"] if self.tb_config.get("owner") else owner
-        return f"{owner}__{mach_uuid}__{start_time}__{end_time.isoformat()}{rsrv_msg}"
+        reservation_row = (
+            f"{owner}:::{mach_uuid}:::{start_time}:::{end_time.isoformat()}"
+            f":::{__version__}:::{self.tb_config.get('force', False)}:::{rsrv_msg}"
+        )
+        log.debug("Prepared reservation row: %s", reservation_row)
+        return reservation_row
+
+    @skip_exception(Exception, reraise=True, log_level=logging.DEBUG)
+    def get_history(self, days: int = 0) -> list[dict]:
+        """Returns a list with reservation status (reservation history) for the current testbed."""
+        time_limit = None
+        if days == 0:
+            log.debug("Getting full reservation history")
+        else:
+            log.debug("Getting history for last %s days", days)
+            time_limit = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days)
+        cmd = f'flock -x {self.res_file} --command "cat {self.res_file}"'
+        out = self._server_ssh_call(cmd)
+        if "Error" in out:
+            log.error("Ran into an error: %s", out)
+            raise IOError(f"Could not process reservation history for {self.tb_name}")
+        history = []
+        for line in out.splitlines():
+            row = line.split(":::")
+            # split handles OLD reservation messages
+            end_msg = row[3].split()
+            expiration = end_msg[0]
+            if len(end_msg) > 1:
+                message = " ".join(end_msg[1:]).replace("(", "").replace(")", "")
+            else:
+                message = "-"
+            try:
+                version = row[4]
+            except IndexError:
+                log.debug("Could not determine reservelib version")
+                version = "Unknown"
+            try:
+                is_forced = row[5] == "True"
+            except IndexError:
+                log.debug("Could not determine if resrvation was forced (assuming False)")
+                is_forced = False
+            try:
+                message = row[6]
+            except IndexError:
+                log.debug("Could not determine reservation message (old version of reservelib was used!)")
+
+            end_date_tz = "" if "+" in expiration or "Z" in expiration else "+00:00"
+            end_date = datetime.datetime.fromisoformat(f"{expiration}{end_date_tz}")
+            if time_limit and end_date < time_limit:
+                continue
+
+            history.append(
+                {
+                    "name": self.tb_name,
+                    "owner": row[0],
+                    "since": f"{self._convert_utc_to_local(row[2])}",
+                    "expiration": f"{self._convert_utc_to_local(expiration)}",
+                    "message": message,
+                    "version": version,
+                    "is_forced": is_forced,
+                    "team_responsible": self.team_responsible,
+                }
+            )
+
+        return history
+
+    def get_latest_stable_reservation_used(self) -> Version:
+        """Parse version history, get the newest version of reservelib used to reserve the testbed - as parsed
+        from reservation row. The parser intentionally skips parsing pre-releases (alpha/beta/dev/rc)."""
+        history = self.get_history()
+        newest_ver = Version("0.0.0")
+        for row in history:
+            str_ver = row.get("version")
+            if str_ver:
+                try:
+                    ver = Version(str_ver)
+                    if ver.pre:
+                        continue
+                    if ver > newest_ver:
+                        newest_ver = ver
+                except ValueError:
+                    pass  # happens for some pre-releases or unparseable, do nothing
+        return newest_ver
+
+    def is_newer_available(self):
+        """Returns True when parsing the file suggests that a newer version of reservelib is available."""
+        try:
+            return self.get_latest_stable_reservation_used() > Version(__version__)
+        except ValueError:
+            return False
 
     def _get_machine_uuid(self):
         """
@@ -587,8 +886,7 @@ class ReserveLib:
                 f"{os.environ.get('BUILD_NUMBER', '')}"
             )
 
-    @staticmethod
-    def _convert_utc_to_local(utc_time):
+    def _convert_utc_to_local(self, utc_time):
         """
         Converts utc time to local
         Args:
@@ -598,15 +896,16 @@ class ReserveLib:
 
         """
         utc_time = datetime.datetime.fromisoformat(utc_time)
-        now_timestamp = time.time()
-        offset = datetime.datetime.fromtimestamp(now_timestamp) - datetime.datetime.utcfromtimestamp(now_timestamp)
-        log.debug(f"UTC offset: {offset}")
+        if self.skip_tz_conversion:
+            return datetime.datetime.strftime(utc_time, "%Y-%m-%d %H:%M:%S")
+        offset = datetime.datetime.now(datetime.UTC).astimezone().utcoffset()
+        log.debug("UTC offset: %s", offset)
         return datetime.datetime.strftime(utc_time + offset, "%Y-%m-%d %H:%M:%S")
 
 
 # keeping that global, so other plugins can stop the reservation threat, e.g PyUpgradePlugin
 reserve_main_q = {}
-lock = threading.Lock()
+lock = threading.RLock()
 
 
 class PyReservePlugin:
@@ -619,6 +918,7 @@ class PyReservePlugin:
         self.res = None
         self.tb_config = tb_config
         self.log_catcher = log_catcher  # reference to log_catcher, allows derived classes to log into their own loggers
+        self.busy_by_me = False  # hold the information whether the testbed is busy by me
 
     @pytest.fixture(scope="session", autouse=True)
     def reserve_fixture(self, request):
@@ -715,6 +1015,8 @@ class PyReservePlugin:
         if self.skip_reservation:
             log.info("Skipping reservation according to pytest arguments")
             return
+        if self.res.check_outdated_reserve_format():
+            self.res.update_old_reservation_format()
         if not self.res.check_reservation_possible():
             return
         timeout = time.time() + 10 * 60 * 60  # 10 hours should be enough
@@ -728,7 +1030,7 @@ class PyReservePlugin:
                 continue
             if status["busy"] and not status["busyByMe"]:
                 if not i % 5:
-                    log.info(f"Testbed is reserved by {status['owner']}, waiting...")
+                    log.info("Testbed %s is reserved by %s, waiting...", status["name"], status["owner"])
                 time.sleep(30)
             else:
                 break
@@ -748,11 +1050,25 @@ class PyReservePlugin:
                     log.info(f"Stopping main reservation thread for: {self.config_name}")
                     if cmd == "STOP":
                         # Leave it reserved for three minutes, so we will have a top priority with next reservation
-                        self.res.reserve_test_bed(3)
+                        res_result = self.res.reserve_test_bed(3, by_pytest_plugin=True)
+                        local_res_file = f"{CACHE_DIR}/.reserve_{res_result.get('name')}"
+                        if res_result.get("status") and os.path.exists(local_res_file):
+                            log.info(
+                                "Updating local reservation file %s with new expiry date: %s",
+                                local_res_file,
+                                res_result.get("expiration"),
+                            )
+                            subprocess.run(
+                                f"flock -x {local_res_file} echo \"{res_result['expiration']}\" > {local_res_file}",
+                                shell=True,
+                            )
                         break
             # reserve every two minutes, but reserve_main_q check every 0.1 sec
             if i % 1200 == 0:
-                self.res.reserve_test_bed(10)
+                reservation_result = self.res.reserve_test_bed(10, by_pytest_plugin=True)
+                with lock:
+                    self.busy_by_me = reservation_result.get("status") is True
+
                 i = 0
             time.sleep(0.1)
             i += 1
@@ -766,9 +1082,42 @@ class PyReservePlugin:
                 reserve_main_q[self.config_name] = "STOP"
             self.reserve_t.join()
             log.info(
-                f'Reservation thread -> "{self.reserve_t.getName()}" current state == '
-                f'{"alive" if self.reserve_t.is_alive() else "dead"}'
+                'Reservation thread -> "%s" current state == "%s"',
+                self.reserve_t.name,
+                "alive" if self.reserve_t.is_alive() else "dead",
             )
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_call(self, item):
+        """Before executing the next test function, check if testbed is still busy-by-me.
+        This hook should enforce pausing test execution if someone forces-reserve, and the status is only updated
+        in the reservation plugin, by the reservation thread.
+        """
+        # we are checking reservation in this hook, which should be invoked AFTER fixtures are generated,
+        # including the reservation fixture. The pytest_runtest_setup fixture might be invoked too early.
+        if self.skip_reservation:
+            return
+        with lock:
+            busy_by_me = self.busy_by_me
+
+        if busy_by_me:
+            # reserved by the current user/machine, just continuing execution as normal
+            return
+
+        counter = 0
+        log.error("Looks like testbed got reserved by someone else during test execution, pausing test execution...")
+        while not busy_by_me:
+            time.sleep(120)
+            with lock:
+                busy_by_me = self.busy_by_me
+            if busy_by_me:
+                log.info("Regained testbed reservation")
+                return
+
+            counter += 1
+            if counter > 180:  # 180 * 2 minutes = 6h
+                log.error("Could not get reservation for testbed for more than 6 hours, time to give up")
+                pytest.exit(reason="Testbed was force-reserved by someone else during test session.", returncode=1)
 
 
 class ReserveLibLogCatcher(LogCatcher):

@@ -94,6 +94,12 @@ class Capabilities:
         freq_band = self.parse_freq_band(freq_band)
         return self.device_capabilities["interfaces"][iftype].get(freq_band)
 
+    def get_ifnames(self, return_type=dict, freq_band="", iftype=""):
+        freq_band = self.parse_freq_band(freq_band)
+        return self.parse_results(
+            self.device_capabilities["interfaces"][iftype], return_type, freq_band=freq_band
+        )
+
     def get_bhaul_sta_ifname(self, freq_band):
         freq_band = self.parse_freq_band(freq_band)
         return self.device_capabilities["interfaces"]["backhaul_sta"].get(freq_band)
@@ -183,6 +189,9 @@ class Capabilities:
         all_supported_channels = [channel_type(channel) for channel in all_supported_channels]
         return all_supported_channels
 
+    def get_bridge_ifname(self, bridge_type: str):
+        return self.device_capabilities["interfaces"][bridge_type]
+
     def get_lan_bridge_ifname(self):
         return self.device_capabilities["interfaces"]["lan_bridge"]
 
@@ -209,6 +218,9 @@ class Capabilities:
 
     def get_patch_port_wan_to_lan_iface(self):
         return self.device_capabilities["interfaces"]["patch_port_wan_to_lan"]
+
+    def get_ppp_wan_interface(self):
+        return self.device_capabilities["interfaces"]["ppp_wan_interface"]
 
     def get_wifi_index(self, freq_band):
         freq_band = self.parse_freq_band(freq_band)

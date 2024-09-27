@@ -253,6 +253,38 @@ class SshCmd(SshExecute):
             result[2] = f"SSH not available after {timeout} sec"
         return result
 
+    def wait_unavailable(self, timeout=5, **kwargs):
+        """
+        Wait for device(s) to become unavailable. Arguments are ``timeout`` - command timeout, the time after which the
+        function does not check connectivity and returns.
+        Optional kwargs available:
+          * ``skip_logging`` (bool, optional, default=True) Skip logging for internal commands used to determine connectivity.
+          * ``retry`` (bool, optional, default=False) Retry the internal command used to determine connectivity if it fails.
+          * ``ssh_timeout`` (int, optional, default=5) Timeout the internal command used to determine connectivity.
+
+        Returns: (list) [ ``exit code`` (int), ``stdout`` (str), ``stderr`` (str)]
+        """
+        skip_logging = kwargs.pop("skip_logging", True)
+        retry = kwargs.pop("retry", False)
+        ssh_timeout = kwargs.pop("ssh_timeout", 5)
+        _timeout = time.time() + timeout
+        result = [1, "", "Check not started"]
+        command = self.device.get_remote_cmd("ls").replace("-o", f"-o ConnectTimeout={ssh_timeout} -o", 1)
+        while time.time() < _timeout:
+            result = self.run_command(
+                command, timeout=ssh_timeout, skip_remote=True, skip_logging=skip_logging, retry=retry, **kwargs
+            )
+            if result[0] != 0:
+                break
+            time.sleep(0.5)
+        if result[0]:
+            result[1] = f"Success - device unavailable after {_timeout - time.time()} sec"
+        else:
+            result[2] = f"SSH available after {timeout} sec"
+        # Invert result
+        result[0] = int(not result[0])
+        return result
+
     def put_file(self, file_name, location, timeout=10 * 60, **kwargs):
         """Copy a file onto device(s)"""
         command = self.device.scp_cmd(file_name, f"{{DEST}}:{location}")

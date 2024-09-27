@@ -1,6 +1,7 @@
 import os
 import re
 import ssl
+import json
 import pprint
 import random
 import datetime
@@ -8,10 +9,12 @@ import urllib.request
 import ipaddress
 import traceback
 import subprocess
+import logging
 import concurrent.futures
 from copy import deepcopy
 from functools import wraps
 from time import time, sleep
+from typing import Any
 
 import pytest
 from packaging.version import parse, InvalidVersion
@@ -26,14 +29,115 @@ ALL_MARKERS_NAME = "all_markers"  # Variable assignation is done in lib/util/con
 OVERWRITE_MARK_NAME = "overwrite_markers"
 QASE_ID_MARKER_NAME = "qase_id"
 QASE_TITLE_MARKER_NAME = "qase_title"
+UNIT_TEST_MARKER_NAME = "gen_unit_test"
 _DEFAULT_THREAD_EXECUTOR = concurrent.futures.ThreadPoolExecutor()
 POSSIBLE_BANDS = ["2.4G", "5G", "5GL", "5GU", "6G"]
+CHANNEL_GROUPS = {
+    "5G": {
+        "40": [
+            [36, 40],
+            [44, 48],
+            [52, 56],
+            [60, 64],
+            [100, 104],
+            [108, 112],
+            [116, 120],
+            [124, 128],
+            [132, 136],
+            [140, 144],
+            [149, 153],
+            [157, 161],
+        ],
+        "80": [
+            [36, 40, 44, 48],
+            [52, 56, 60, 64],
+            [100, 104, 108, 112],
+            [116, 120, 124, 128],
+            [132, 136, 140, 144],
+            [149, 153, 157, 161],
+        ],
+        "160": [
+            [36, 40, 44, 48, 52, 56, 60, 64],
+            [100, 104, 108, 112, 116, 120, 124, 128],
+        ],
+    },
+    "6G": {
+        "40": [
+            [1, 5],
+            [9, 13],
+            [17, 21],
+            [25, 29],
+            [33, 37],
+            [41, 45],
+            [49, 53],
+            [57, 61],
+            [65, 69],
+            [73, 77],
+            [81, 85],
+            [89, 93],
+            [97, 101],
+            [105, 109],
+            [113, 117],
+            [121, 125],
+            [129, 133],
+            [137, 141],
+            [145, 149],
+            [153, 157],
+            [161, 165],
+            [169, 173],
+            [177, 181],
+            [185, 189],
+            [193, 197],
+            [201, 205],
+            [209, 213],
+            [217, 221],
+            [225, 229],
+        ],
+        "80": [
+            [1, 5, 9, 13],
+            [17, 21, 25, 29],
+            [33, 37, 41, 45],
+            [49, 53, 57, 61],
+            [65, 69, 73, 77],
+            [81, 85, 89, 93],
+            [97, 101, 105, 109],
+            [113, 117, 121, 125],
+            [129, 133, 137, 141],
+            [145, 149, 153, 157],
+            [161, 165, 169, 173],
+            [177, 181, 185, 189],
+            [193, 197, 201, 205],
+            [209, 213, 217, 221],
+        ],
+        "160": [
+            [1, 5, 9, 13, 17, 21, 25, 29],
+            [33, 37, 41, 45, 49, 53, 57, 61],
+            [65, 69, 73, 77, 81, 85, 89, 93],
+            [97, 101, 105, 109, 113, 117, 121, 125],
+            [129, 133, 137, 141, 145, 149, 153, 157],
+            [161, 165, 169, 173, 177, 181, 185, 189],
+            [193, 197, 201, 205, 209, 213, 217, 221],
+        ],
+        "320": [
+            [1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61],
+            [65, 69, 73, 77, 81, 85, 89, 93, 97, 101, 105, 109, 113, 117, 121, 125],
+            [129, 133, 137, 141, 145, 149, 153, 157, 161, 165, 169, 173, 177, 181, 185, 189],
+            [33, 37, 41, 45, 49, 53, 57, 61, 65, 69, 73, 77, 81, 85, 89, 93],
+            [97, 101, 105, 109, 113, 117, 121, 125, 129, 133, 137, 141, 145, 149, 153, 157],
+            [161, 165, 169, 173, 177, 181, 185, 189, 193, 197, 201, 205, 209, 213, 217, 221],
+        ],
+    },
+}
 
 
-def skip_exception(*errors, log_traceback=True):
+def skip_exception(*errors, log_traceback: bool = True, reraise: bool = False, log_level: int = logging.ERROR):
     """
-    Decorator that accepts Exceptions: IOError, ValueError
+    Decorator that accepts all Exceptions, e.g. :py:exc:`IOError`, :py:exc:`ValueError`
     and wraps the whole function and skips those Exceptions.
+    When reraise=True, the exception is re-raised after being logged. This flag is useful for logging exceptions
+    in multi-threaded applications.
+    It is possible to enforce desired log level through the argument log_level, which accepts standard/configured
+    Python :py:mod:`logging` levels, e.g. ``logging.DEBUG``.
     Usage:
 
     .. code-block:: py
@@ -51,10 +155,14 @@ def skip_exception(*errors, log_traceback=True):
             try:
                 return func(*args, **kwargs)
             except errors as e:
-                if log_traceback:
+                if log_traceback and log_level == logging.ERROR:
                     log.exception("An error occurred")
+                elif log_traceback:
+                    log.log(log_level, "An error occurred: %s", "\n".join(traceback.format_exception(e)))
                 else:
-                    log.error("An error occurred: %s", e)
+                    log.log(log_level, "An error occurred: %s", e)
+                if reraise:
+                    raise
 
         return wrapper
 
@@ -149,15 +257,28 @@ def fill_ip_address(address):
     return ".".join([i.zfill(3) for i in address.split(".")])
 
 
-def wait_for(predictable: callable, timeout: int, tick: float, eval_condition: callable = lambda ret: True):
+def wait_for(predictable: callable, timeout: int, tick: float) -> tuple[bool, Any]:
+    """Wait for a callable to return a non-False result. Returns a tuple with the bool status, and the return
+    value of the provided predictable callable. If status is True, then the condition is met, i.e. a function returned.
+    In case the predictable raises an exception (any :py:exc:`Exception), the function immediately returns a tuple
+    with the ``(False, <exception instance>)``, to be re-raised or handled otherwise by the caller.
+
+    This utility function is very useful to await certain state, e.g. a value to be updated in ovsdb table.
+
+    The arguments are:
+    ``predictable`` which is a function/method/lambda that must return a ``True``-evaluated value.
+    Either non-empty string, or non-zero or a non-empty container. After ``timeout`` (in seconds) is reached,
+    the function returns the most recent return value of the predicable. The ``tick`` (in seconds) specifies
+    the time to sleep before attempts to evaluate the ``predictable`` again. The ``predictable`` must not
+    take any additional arguments. Use either :py:func:`functools.partial` or ``lambda``."""
     start = time()
     condition = False
     ret = None
     while time() - start < timeout:
         try:
             if ret := predictable():
-                if condition := eval_condition(ret):
-                    break
+                condition = True
+                break
         except Exception as e:
             ret = e
         sleep(tick)
@@ -221,13 +342,6 @@ class DeviceCommon:
         assert radio_hw_modes, '"radio_hw_mode" is missed in the device capabilities config'
         radio_hw_modes = [hw_mode for hw_mode in radio_hw_modes.values() if hw_mode]
         return list(set(radio_hw_modes))
-
-    @staticmethod
-    def get_device_max_channel_widths(device_capabilities_cfg):
-        max_channel_widths = device_capabilities_cfg.get("interfaces", {}).get("max_channel_width")
-        assert max_channel_widths, '"max_channel_width" is missed in the device capabilities config'
-        max_channel_widths = [channel_width for channel_width in max_channel_widths.values() if channel_width]
-        return list(set(max_channel_widths))
 
     @staticmethod
     def get_all_supported_channels(device_capabilities_cfg, channel_type=int):
@@ -298,6 +412,35 @@ def is_jenkins():
     return False
 
 
+def is_ci() -> bool:
+    """Returns True when run in CI is detected.
+
+    Supported CI systems:
+
+    * Jenkins
+    * Github Actions
+    * Travis
+    * Circle CI
+    * Gitlab CI
+
+    .. note::
+
+        This function is not the same as :py:func:`~lib_testbed.generic.util.common.is_jenkins` which
+        returns True only in the case of Jenkins. In some contexts it may return the same, it's up to the
+        caller to make the decision which function should be used when.
+
+    """
+    if (
+        os.environ.get("JOB_NAME")
+        or os.environ.get("GITHUB_ACTIONS")
+        or os.environ.get("TRAVIS")
+        or os.environ.get("CIRCLECI")
+        or os.environ.get("GITLAB_CI")
+    ):
+        return True
+    return False
+
+
 def is_service_accessible(service):
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -314,13 +457,21 @@ def is_inside_infrastructure():
     return is_service_accessible("https://inventory-api.global.plume.tech/explorer/")
 
 
-def get_target_pytest_mark(all_marks, target_mark_name, arg_name=""):
+def get_target_pytest_mark(all_marks, target_mark_name, arg_name="", marker_kwargs: dict = None):
     for pytest_mark in all_marks:
         if pytest_mark.name.startswith(target_mark_name):
             # Validate if expected pytest mark contains expected arguments
             # Helpfully for pytest marks which have the same name but different args
             if arg_name and arg_name not in pytest_mark.kwargs.keys():
                 continue
+            if marker_kwargs:
+                matched = True
+                for marker_arg, marker_value in marker_kwargs.items():
+                    if pytest_mark.kwargs.get(marker_arg) != marker_value:
+                        matched = False
+                        break
+                if not matched:
+                    continue
             return pytest_mark
     return None
 
@@ -364,7 +515,7 @@ def mark_failed_recovery_attempt(tb_config):
 
 
 def get_digits_value_from_text(value_to_take, text_response):
-    regex_pattern = rf"(?<={value_to_take}).\d+"
+    regex_pattern = rf"(?<={value_to_take})\d+"
     value = re.search(regex_pattern, text_response)
     if not value:
         return 0
@@ -372,7 +523,7 @@ def get_digits_value_from_text(value_to_take, text_response):
 
 
 def get_string_value_from_text(value_to_take, text_response):
-    regex_pattern = rf"(?<={value_to_take}).[A-Za-z]+"
+    regex_pattern = rf"(?<={value_to_take})[A-Za-z]+"
     value = re.search(regex_pattern, text_response)
     if not value:
         return ""
@@ -513,7 +664,16 @@ def get_datetime_iso(
     zulu_offset: bool = False,
     timedelta: datetime.timedelta = None,
 ) -> str:
-    """Get datetime iso format based on provided timezone - by default UTC."""
+    """Get datetime iso format based on provided timezone - by default UTC.
+
+    Examples:
+
+    .. code-block:: py
+
+        get_datetime_iso(tz_offset=False, zulu_offset=True) # returns "2024-01-29T07:39:47.875566Z"
+        get_datetime_iso(tz_offset=True, zulu_offset=False) # returns "2024-01-29T07:39:47.875566+00:00"
+
+    """
     datetime_now = datetime.datetime.now(timezone)
     # Some of the cloud API doesn't support time zone offset within isoformat():
     # with offset: 2024-01-29T07:39:47.875566+00:00
@@ -524,7 +684,14 @@ def get_datetime_iso(
     if timedelta:
         datetime_now = datetime_now + timedelta
     date_time_iso = datetime_now.isoformat()
-    # Some of the cloud API needs Zulu offset
     if timezone == datetime.UTC and zulu_offset:
         date_time_iso += "Z"
     return date_time_iso
+
+
+def is_unit_test(all_markers: list) -> bool:
+    return True if get_target_pytest_mark(all_markers, UNIT_TEST_MARKER_NAME) else False
+
+
+def json_dump(data: dict, indent: int = 2) -> str:
+    return json.dumps(data, indent=indent)

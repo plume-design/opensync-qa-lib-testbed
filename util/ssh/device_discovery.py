@@ -14,27 +14,55 @@ SSH_GATEWAY = "ssh_gateway"
 
 
 class DeviceDiscovery:
-    def __init__(self, device_type, multi_devices, config, **kwargs):
+    def __init__(
+        self,
+        device_type: str,
+        multi_devices: bool,
+        config: dict,
+        role_prefix: str = "",
+        skip_logging: bool = False,
+        session_config=None,
+        request=None,
+        **kwargs,
+    ):
+        self.request = request
         self.config = config
         self.device_type = device_type
         self.multi_devices = multi_devices
-        self.role_prefix = kwargs.pop("role_prefix", "")
+        self.role_prefix = role_prefix
         self.name = ""
         self.device = None
         self.main_object = False
-        self.skip_logging = kwargs.pop("skip_logging", False)
-        self.skip_init = kwargs.pop("skip_init", False)
+        self.skip_logging = skip_logging
+        self.session_config = session_config
+        self.filter_device_keys = kwargs
 
-        # check no_ssh option
-        session_config = kwargs.get("session_config")
-        if session_config:
-            del kwargs["session_config"]
-        if device_type == "Nodes" and session_config and session_config.option.no_ssh:
+    def __enter__(self):
+        self.assign_device()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb): ...
+
+    def filter_device(self) -> dict | None:
+        if self.device_type == "Nodes" and self.session_config and self.session_config.option.no_ssh:
             self.set_no_mgmt_access()
-            return
-        device_config = self.get_available_device(kwargs)
+            return None
+
+        device_config = self.get_available_device(self.filter_device_keys)
         if not device_config:
+            return None
+
+        # Update device state with busy flag (skip testbed server as its object used for multiple purposes)
+        # Set busy flag for object created by markers (class test approach),
+        # for fixtures it's not needed since the device is requested by name.
+        if device_config.get("capabilities", {}).get("device_type", "") != "host" and hasattr(self.request, "cls"):
+            self.set_device_busy(device_config)
+        return device_config
+
+    def assign_device(self, device_config: dict = None):
+        if not device_config and not (device_config := self.filter_device()):
             return
+
         self.name = device_config["name"]
         role = f"{self.role_prefix}_" if self.role_prefix else ""
         name_prefix = f"multi_{role}" if self.multi_devices else ""
@@ -44,7 +72,7 @@ class DeviceDiscovery:
 
         # Update ssh gateway with default value if not provided in Nodes
         if SSH_GATEWAY not in device_config:
-            ssh_gateway = config.get(SSH_GATEWAY)
+            ssh_gateway = self.config.get(SSH_GATEWAY)
             if ssh_gateway:
                 device_config[SSH_GATEWAY] = ssh_gateway
         from lib_testbed.generic.util.ssh.device_ssh import DeviceSsh  # TODO: remove
@@ -53,9 +81,6 @@ class DeviceDiscovery:
             # TODO: split DeviceSsh between DeviceExpect and DeviceScreen
             self.device = DeviceSsh(self.device_type, self.name, device_config)
 
-        # Update device state with busy flag (skip testbed server as its object used for multiple purposes)
-        if device_config.get("capabilities", {}).get("device_type", "") != "host":
-            self.set_device_busy(device_config)
         # Mark main object to skip doing recovery, collecting logs etc. twice for the same device
         self.set_main_object(device_config)
 
@@ -91,18 +116,18 @@ class DeviceDiscovery:
                 matched = re.compile(value).match(config_value)
         return matched
 
-    def get_available_device(self, kwargs):  # noqa: C901
+    def get_available_device(self, filter_keys):  # noqa: C901
         devices = self.config[self.device_type].copy() if self.device_type in self.config else []
-        name = kwargs.pop("nickname", "")
+        name = filter_keys.pop("nickname", "")
         use_host = False
-        if (name and "host" in name) or kwargs.get(IPERF_CLIENT_TYPE):
+        if (name and "host" in name) or filter_keys.get(IPERF_CLIENT_TYPE):
             use_host = True
 
         possible_no_mgmt = False
-        if "mgmt" in kwargs and kwargs["mgmt"] == "optional":
-            kwargs.pop("mgmt")
+        if "mgmt" in filter_keys and filter_keys["mgmt"] == "optional":
+            filter_keys.pop("mgmt")
             possible_no_mgmt = True
-        device_kwargs = kwargs
+        device_kwargs = filter_keys
 
         if name:
             all_names = [device["name"] for device in devices]
@@ -155,7 +180,7 @@ class DeviceDiscovery:
         ):
             if not possible_no_mgmt:
                 raise Exception(
-                    f"Can not initiate pod lib without management access for pods:" f' {filtered_devices[0]["name"]}'
+                    f"Can not initiate lib without management access for device: {filtered_devices[0]['name']}"
                 )
             self.set_no_mgmt_access()
             return None

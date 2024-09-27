@@ -27,7 +27,7 @@ def parse_request(func):
     """
 
     @functools.wraps(func)
-    def wrapper(self, request):
+    def wrapper(self, request, **kwargs):
         """Wrapper is to be used across all test **classes** for the
         ``setup_class_handler``, ``setup_method_handler``,
         ``teardown_method_handler``, ``teardown_handler`` or any other method
@@ -88,6 +88,6 @@ def parse_request(func):
                         config=self.session_confing,
                     )
 
-        return func(self, request=request)
+        return func(self, request=request, **kwargs)
 
     return wrapper

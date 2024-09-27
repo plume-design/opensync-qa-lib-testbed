@@ -171,17 +171,25 @@ class PodLib(PodLibGeneric):
         result[1] = data_rate_table
         return result
 
-    def trigger_single_radar_detected_event(self, phy_radio_name, **kwargs):
+    def trigger_single_radar_detected_event(
+        self, phy_radio_name, segment_id: int = None, chirp: int = None, freq_offest: int = None, **kwargs
+    ):
         """
         Trigger radar detected event
         Args:
             phy_radio_name: (str): Phy radio name
+            segment_id: (int): Segment ID - optional
+            chirp: (int) Chirp information - optional
+            freq_offest: (int) Frequency offset - optional
             **kwargs:
 
         Returns: list(retval, stdout, stderr)
 
         """
-        response = self.run_command(f"radartool -i {phy_radio_name} bangradar", **kwargs)
+        radar_cmd = f"radartool -i {phy_radio_name} bangradar"
+        if None not in [segment_id, chirp, freq_offest]:
+            radar_cmd += f" {segment_id} {chirp} {freq_offest}"
+        response = self.run_command(radar_cmd, **kwargs)
         return response
 
     def get_boot_partition(self, **kwargs):
@@ -427,7 +435,7 @@ class PodLib(PodLibGeneric):
                 time.sleep(4)
         else:
             sfe_dump = self.get_stdout(self.run_command(f"cat {sfe_dump_file}"))
-            parsed_connections_dump.extend(self.parse_sfe_flows(sfe_dump, ip_addresses))
+            parsed_connections_dump.extend(self.parse_sfe_flows(sfe_dump, ip_addresses, expected_protocol))
 
         grouped_connection_flows = collections.defaultdict(list)
         for connection_flow in parsed_connections_dump:
@@ -541,11 +549,11 @@ class PodLib(PodLibGeneric):
         if not ecm_dump_file:
             for i in range(dumps):
                 connection_flows = self.get_connection_flows_ecm_dump(ip_addresses, **kwargs)
-                parsed_connections_dump.append(connection_flows)
+                parsed_connections_dump.extend(connection_flows)
                 time.sleep(4)
         else:
             ecm_dump = self.get_stdout(self.run_command(f"cat {ecm_dump_file}"))
-            parsed_connections_dump.append(self.parse_ecm_flows(ecm_dump, ip_addresses))
+            parsed_connections_dump.extend(self.parse_ecm_flows(ecm_dump, ip_addresses))
         return self.verify_ecm_acceleration(parsed_connections_dump, flow_count)
 
     @staticmethod
@@ -563,54 +571,51 @@ class PodLib(PodLibGeneric):
         return connection_flow_list
 
     @staticmethod
-    def verify_ecm_acceleration(connection_dump: list, flow_count: int = 1) -> bool:
+    def verify_ecm_acceleration(all_connection_flows: list, flow_count: int = 1) -> bool:
         status = True
         flows = {}
-        pr_accel_flows_counter = []
-        for all_connection_flows in connection_dump:
-            # There should be at least 4 flows where all the pr.accel classifiers are "wanted"
-            flow_with_all_wanted_pr_accel = 0
-            for connection_flow in all_connection_flows:
-                flow_id = common_util.get_digits_value_from_text("conns.conn.", connection_flow)
-                slow_path_packets = common_util.get_digits_value_from_text("slow_path_packets=", connection_flow)
-                log.info(f"slow_path_packets for flow id {flow_id}: {slow_path_packets}")
-                if f"{flow_id}_slow_packets" not in flows:
-                    flows[f"{flow_id}_slow_packets"] = slow_path_packets
-                if f"{flow_id}_slow_packets_delta" not in flows:
-                    flows[f"{flow_id}_slow_packets_delta"] = []
-                flows[f"{flow_id}_slow_packets_delta"].append(slow_path_packets - flows[f"{flow_id}_slow_packets"])
-                if f"{flow_id}_pr_accel_counts" not in flows:
-                    flows[f"{flow_id}_pr_accel_counts"] = []
-                all_wanted_pr_accel = True
-                for row in connection_flow.splitlines():
-                    if "pr.accel" not in row:
-                        continue
-                    if "denied" in row:
-                        log.info(f"Got: denied for {row}, but checking if all 4 data flows are accelerated")
-                    if "wanted" not in row:
-                        all_wanted_pr_accel = False
-                if all_wanted_pr_accel:
-                    flow_with_all_wanted_pr_accel += 1
-            pr_accel_flows_counter.append(flow_with_all_wanted_pr_accel)
+        denied = set()
+        accel_info = {}
+        for connection_flow in all_connection_flows:
+            flow_id = common_util.get_digits_value_from_text("conns.conn.", connection_flow)
+            for row in connection_flow.splitlines():
+                if "slow_path_packets" in row:
+                    slow_path_packets = flows.setdefault(flow_id, [])
+                    slow_path_packets.append(common_util.get_digits_value_from_text("slow_path_packets=", row))
+                elif "pr.accel" in row and row.endswith("=denied"):
+                    denied.add(flow_id)
+                elif ".ported.accel_mode=" in row:
+                    prefix, accel_mode = row.split(".ported.accel_mode=")
+                    accel_method = prefix.split(".")[-1]
+                    accel_info[flow_id] = accel_method, accel_mode
 
-        for flow_id in flows:
-            if "_delta" not in flow_id:
+        for flow_id, slow_packets in list(flows.items()):
+            if flow_id in denied:
+                flows.pop(flow_id)
                 continue
-            log.info(f"All new reported slow packets between dumps: [{flow_id}] : {flows[flow_id]}")
-            if max(flows[flow_id]) > 100:
-                log.error("Too many new slow packets, acceleration is not working")
+            log.info(f"Reported slow packets for flow {flow_id} for all dumps: {slow_packets}")
+            # slow_path_packets should not increase by more than 100 between first and last ecm_dump.sh capture.
+            if slow_packets[-1] - slow_packets[0] > 100:
+                log.error(
+                    f"More than 100 new slow packets for flow {flow_id}, acceleration is not working: "
+                    f"{slow_packets[0]} -> {slow_packets[-1]}"
+                )
                 status = False
-        max_pr_accel = max(pr_accel_flows_counter)
-        log.info(f"Number of flows where all the pr.accel classifiers are 'wanted': {max_pr_accel}")
-        if not flows:
-            log.info("No flows were cached")
-        if max_pr_accel < flow_count:
+
+        for flow_id, (accel_method, accel_mode) in accel_info.items():
+            if flow_id not in denied:
+                log.info(f"ECM flow {flow_id} acceleration method and mode: {accel_method}, {accel_mode}")
+
+        # There should be at least flow_count flows where all the pr.accel classifiers are "wanted"
+        log.info(f"Number of flows where all the pr.accel classifiers are 'wanted': {len(flows)}")
+        if len(flows) < flow_count:
             log.error(
                 f"There were less than {flow_count} flows where all the pr.accel classifiers were 'wanted': "
-                f"{max_pr_accel}"
+                f"{len(flows)}"
             )
             status = False
-        return bool(flows) and status
+
+        return status
 
     def is_fw_fuse_burned(self, **kwargs):
         """Returns True when device firmware fuse is burned (locked) and False otherwise."""
@@ -634,6 +639,8 @@ class PodLib(PodLibGeneric):
         if output[0]:
             return output
         client_details = re.sub(r"\t", "", output[1])
+        # Remove white characters to avoid issues with regex match
+        client_details = client_details.replace(" ", "")
         snr_value = common_util.get_digits_value_from_text(value_to_take="SNR:", text_response=client_details)
         if not snr_value:
             return [1, "", f"Can not get SNR value for {client_mac}"]
@@ -649,7 +656,7 @@ class PodLib(PodLibGeneric):
         Returns: [int, str, str]
 
         """
-        output = self.run_command(f"iwpriv {ifname} get_bintval", **kwargs)
+        output = self.run_command(f"cfg80211tool {ifname} get_bintval", **kwargs)
         if output[0]:
             return output
         bi_value = common_util.get_digits_value_from_text(value_to_take="get_bintval:", text_response=output[1])
@@ -734,3 +741,23 @@ class PodLib(PodLibGeneric):
                 case _:
                     raise OpenSyncException(f"Unknown acceleration tool: {acc_name}. Allowed tools for QCA: sfe, ecm")
         return acceleration_status
+
+    def get_client_pmk(self, client_mac, **kwargs):
+        iface_list = " ".join(self.capabilities.get_home_ap_ifnames(return_type=list))
+        if self.is_owm():
+            cmd = (
+                f"sh -c 'for iface in {iface_list}; do hostapd_cli -i $iface -p /var/run/hostapd get_ptk "
+                f"{client_mac} | grep -v FAIL; done'"
+            )
+        else:
+            cmd = (
+                f"sh -c 'for iface in {iface_list}; do hostapd_cli -i $iface -p "
+                f"/var/run/hostapd-$(cat /sys/class/net/$iface/parent) get_ptk {client_mac} | grep -v FAIL; done'"
+            )
+        # due to many ifaces ret code might be invalid
+        pmk = self.get_stdout(self.strip_stdout_result(self.run_command(cmd, **kwargs)), skip_exception=True)
+        return [0 if pmk else 1, pmk, f"No PMK for {client_mac}" if not pmk else ""]
+
+    def set_sub_channel_marking(self, ifname: str, state: int, **kwargs) -> [int, str, str]:
+        """Set sub channel marking on specified interface."""
+        return self.run_command(f"cfg80211tool {ifname} mark_subchan {state}", **kwargs)

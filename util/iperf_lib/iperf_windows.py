@@ -282,13 +282,13 @@ class IperfClientWindows(IperfWindowsCommon, IperfClientLib):
         self.measurement_start_time = datetime.now()
 
     def get_raw_iperf_result(self, timeout: int = None) -> str:
-        log.info(
-            f"Waiting for iperf results(ETA " f"@{self.measurement_start_time + timedelta(seconds=self.duration)})"
-        )
+        if timeout is None:
+            timeout = self.duration + 10
+        timeout_end = self.measurement_start_time + timedelta(seconds=timeout)
+        log.info(f"Waiting for iperf results(ETA @{timeout_end})")
         iperf_results = None
         # protection against infinite loop
-        timeout = time.time() + timeout if timeout else time.time() + self.duration + 120
-        while timeout > time.time():
+        while timeout_end > datetime.now():
             time.sleep(5)
             if not self._get_iperf_pid(self.client, silent=True):
                 break
@@ -297,10 +297,11 @@ class IperfClientWindows(IperfWindowsCommon, IperfClientLib):
         return iperf_results
 
     def get_result_from_client(self, timeout: int = None, skip_exception: bool = False) -> dict:
+        start = time.time()
         iperf_results = self.get_raw_iperf_result(timeout=timeout)
+        end = time.time()
         if skip_exception and not iperf_results:
             return {"error": "No iperf results"}
-
-        assert iperf_results, f"No iperf result after wait {self.duration + 120} seconds"
+        assert iperf_results, f"No iperf result after waiting {int(end - start)} seconds"
         log.info("Successfully got results")
         return self.parse_iperf_results(iperf_results)

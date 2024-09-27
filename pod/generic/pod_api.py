@@ -14,8 +14,6 @@ from lib_testbed.generic.util.allure_util import AllureUtil
 from lib_testbed.generic.util.common import (
     get_git_revision,
     mark_failed_recovery_attempt,
-    get_target_pytest_mark,
-    ALL_MARKERS_NAME,
     CACHE_DIR,
 )
 from lib_testbed.generic.util.logger import log
@@ -36,7 +34,6 @@ class PodApi(DeviceApi):
         self.iface = self.lib.iface
         self.capabilities = self.lib.capabilities
         self.log_catcher = self.lib.log_catcher
-
         if TYPE_CHECKING:
             from lib_testbed.generic.pod.generic.pod_lib import PodLib
 
@@ -55,14 +52,14 @@ class PodApi(DeviceApi):
 
     @parse_request
     def setup_class_handler_main_object(self, request):
-        if not self.lib.main_object:
+        if not self.lib.main_object or not self.start_class_handler:
             return
+        self.start_class_handler = False
 
         if not self.lib.get_stdout(self.lib.version(timeout=20, retry=False), skip_exception=True):
             self.pod_recovery()
 
         self.auto_limit_tx_power()
-        self.set_wano_configuration()
         name = self.get_nickname()
         log.info(f"Pod{'s' if self.lib.multi_devices else ''}: {name} has management access")
 
@@ -230,12 +227,9 @@ class PodApi(DeviceApi):
             )
         log.info(f"{pod_prefix}: {name} successfully recovered")
 
-    def set_wano_configuration(self):
-        if not getattr(self, ALL_MARKERS_NAME, None) or self.nickname != "gw":
-            return
-        wan_connection = get_target_pytest_mark(self.all_markers, "wan_connection")
-        vlan_id = getattr(wan_connection, "kwargs", {}).get("vlan_id", 200)
-        tagged = getattr(wan_connection, "kwargs", {}).get("tagged", False)
+    def set_wano_configuration(self, wan_connection_marker):
+        vlan_id = getattr(wan_connection_marker, "kwargs", {}).get("vlan_id", 200)
+        tagged = getattr(wan_connection_marker, "kwargs", {}).get("tagged", False)
         wan_vlan = WAN_VLAN(vlan_id)
         expected_config = wan_vlan.tagged_wano_config if tagged else wan_vlan.wano_config
         current_config = self.get_wano_cfg(skip_exception=True) or expected_config
@@ -385,9 +379,9 @@ class PodApi(DeviceApi):
         """Node role: return gw or leaf"""
         return self.get_stdout(self.lib.role(**kwargs))
 
-    def get_ips(self, iface, **kwargs):
+    def get_ips(self, iface, ipv6_prefix: str = None, **kwargs):
         """get ipv4 and ipv6 address for desired interface"""
-        response = self.lib.get_ips(iface, **kwargs)
+        response = self.lib.get_ips(iface, ipv6_prefix, **kwargs)
         return self.get_stdout(response, **kwargs)
 
     def get_macs(self, **kwargs):
@@ -556,6 +550,20 @@ class PodApi(DeviceApi):
 
         """
         response = self.lib.get_eth_link_speed(iface, **kwargs)
+        return self.get_stdout(response, **kwargs)
+
+    def set_eth_link_speed(self, iface, speed, duplex, **kwargs):
+        """
+        Set ethernet link speed with ethtool
+        Args:
+            iface: (str) interface name
+            speed: (int) requested port speed
+            duplex: (str) half or full
+
+        Returns: (str) Pod response
+
+        """
+        response = self.lib.set_eth_link_speed(iface, speed, duplex, **kwargs)
         return self.get_stdout(response, **kwargs)
 
     def wait_eth_connection_ready(self, timeout=600, **kwargs):
@@ -945,6 +953,13 @@ class PodApi(DeviceApi):
         """Returns WPS keys."""
         return self.lib.get_wps_keys(if_name=if_name)
 
+    def get_client_pmk(self, client_mac: str, **kwargs):
+        """
+        Returns client PMK key
+        """
+        result = self.lib.get_client_pmk(client_mac=client_mac, **kwargs)
+        return self.get_stdout(result, *kwargs)
+
     def start_wps_session(self, key_id: str) -> bool:
         """Starts WPS session on pod.
 
@@ -1072,6 +1087,18 @@ class PodApi(DeviceApi):
 
         """
         self.lib.clear_traffic_acceleration_dump(acceleration_dump, **kwargs)
+
+    def set_sub_channel_marking(self, ifname: str, state: int, **kwargs) -> [int, str, str]:
+        """Set sub channel marking on specified interface."""
+        result = self.lib.set_sub_channel_marking(ifname, state, **kwargs)
+        return self.get_stdout(result, **kwargs)
+
+    def trigger_single_radar_detected_event(
+        self, phy_radio_name, segment_id: int = None, chirp: int = None, freq_offest: int = None, **kwargs
+    ):
+        """Trigger radar detected event on specified interface."""
+        result = self.lib.trigger_single_radar_detected_event(phy_radio_name, segment_id, chirp, freq_offest, **kwargs)
+        return self.get_stdout(result, **kwargs)
 
     # PROPERTIES FOR STORED DATA
     @property

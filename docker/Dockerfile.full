@@ -3,7 +3,7 @@ FROM $PARENT_IMAGE:latest
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt update && apt install -y  \
+    eatmydata apt update && eatmydata apt install -y  \
 # - Install java
     openjdk-8-jdk \
     ant \
@@ -13,12 +13,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libcanberra-gtk3-module \
     xserver-xorg \
     dbus-x11 \
-# - Install Chrome prerequisites
-    xvfb \
-    libxi6 \
-    libgconf-2-4 \
-    fonts-liberation \
-    libappindicator3-1 \
 # - Install Webkit browser
     webkit2gtk-driver
 
@@ -26,8 +20,12 @@ ENV JAVA_HOME /usr/lib/jvm/java-8-openjdk-amd64/
 RUN export JAVA_HOME
 
 # -- Install firefox
-RUN add-apt-repository ppa:mozillateam/ppa
-RUN apt update && apt install -y -t 'o=LP-PPA-mozillateam' firefox
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    eatmydata add-apt-repository ppa:mozillateam/ppa
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    eatmydata apt update && eatmydata apt install -y -t 'o=LP-PPA-mozillateam' firefox
 
 # Disable CORS
 RUN \
@@ -41,67 +39,46 @@ RUN \
     echo 'pref("security.fileuri.strict_origin_policy", false);' >> "$JS_FILE"
 
 # -- Install GeckoDriver
-RUN wget -q "https://github.com/mozilla/geckodriver/releases/download/v0.34.0/geckodriver-v0.34.0-linux64.tar.gz" -O /tmp/geckodriver.tgz \
-    && tar zxf /tmp/geckodriver.tgz -C /usr/bin/ \
-    && rm /tmp/geckodriver.tgz
-
-# Install Chrome browser
-# version: 91.0.4472.114, check https://www.chromium.org/getting-involved/download-chromium for branch_base_position
-# branch_base_position=870763
-# Filter branch_base_position in https://commondatastorage.googleapis.com/chromium-browser-snapshots/index.html?prefix=Linux_x64/
-# Wait a few minutes for page to be fully loaded
-RUN curl https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add
-RUN mkdir -p /tmp/chrome
-RUN wget "https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots/o/Linux_x64%2F870763%2Fchrome-linux.zip?generation=1617926496067901&alt=media" -O /tmp/chrome/chrome-linux.zip \
-    && unzip /tmp/chrome/chrome-linux.zip -d /opt/chrome-linux/
-RUN ls -la /opt/chrome-linux/ && ls -la /opt/chrome-linux/chrome-linux
-ENV CHROME_PATH=/usr/bin/google-chrome
-RUN ln -sf /opt/chrome-linux/chrome-linux/chrome ${CHROME_PATH}
-RUN chown root:root ${CHROME_PATH} \
-    && chmod 755 ${CHROME_PATH}
-RUN rm -rf /tmp/chrome
-
-# Install Chrome driver
-RUN mkdir -p /tmp/chrome
-RUN wget -q "https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots/o/Linux_x64%2F870763%2Fchromedriver_linux64.zip?generation=1617926501117925&alt=media" -O /tmp/chrome/chromedriver.zip \
-    && unzip /tmp/chrome/chromedriver.zip -d /tmp/chrome
-ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
-RUN cp /tmp/chrome/chromedriver_linux64/chromedriver ${CHROMEDRIVER_PATH}
-RUN chown root:root ${CHROMEDRIVER_PATH} \
-    && chmod +x ${CHROMEDRIVER_PATH} \
-    && rm -rf /tmp/chrome
+ARG geckodriver_checksum="79b2e77edd02c0ec890395140d7cdc04a7ff0ec64503e62a0b74f88674ef1313"
+ARG geckodriver_tarball="/var/cache/geckodriver/geckodriver.tgz"
+RUN --mount=type=cache,target=/var/cache/geckodriver \
+    sha256sum --check --status 2>/dev/null <<< "$geckodriver_checksum  $geckodriver_tarball" \
+    || wget "https://github.com/mozilla/geckodriver/releases/download/v0.34.0/geckodriver-v0.34.0-linux64.tar.gz" -O $geckodriver_tarball \
+    && sha256sum --check <<< "$geckodriver_checksum  $geckodriver_tarball" \
+    && tar zxf $geckodriver_tarball -C /usr/bin/
 
 # -- Install Jmeter
-RUN wget --no-check-certificate https://dlcdn.apache.org//jmeter/binaries/apache-jmeter-5.5.tgz \
-    && tar xf apache-jmeter-5.5.tgz -C /opt \
-    && mv /opt/apache-jmeter-5.5 /opt/jmeter \
-    && ln -s /opt/jmeter/bin/jmeter /usr/local/bin/jmeter \
-    && rm apache-jmeter-5.5.tgz
+ARG jmeter_checksum="f68efc17fe060f698c48a6abe2599a933927486bda2924dbe14c74895318ddde"
+ARG jmeter_tarball="/var/cache/jmeter/jmeter.tgz"
+RUN --mount=type=cache,target=/var/cache/jmeter \
+    sha256sum --check --status 2>/dev/null <<< "$jmeter_checksum  $jmeter_tarball" \
+    || wget --no-check-certificate https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.6.3.tgz -O $jmeter_tarball \
+    && sha256sum --check <<< "$jmeter_checksum  $jmeter_tarball" \
+    && tar xf $jmeter_tarball -C /opt \
+    && mv /opt/apache-jmeter-5.6.3 /opt/jmeter \
+    && ln -s /opt/jmeter/bin/jmeter /usr/local/bin/jmeter
 
 # -- Install Jmeter plugins as needed
-RUN wget -O /opt/jmeter/lib/ext/jmeter-plugins-manager-1.8.jar \
-    http://search.maven.org/remotecontent?filepath=kg/apc/jmeter-plugins-manager/1.8/jmeter-plugins-manager-1.8.jar \
-    -P /opt/jmeter/lib/ext/
-RUN wget -O /opt/jmeter/lib/cmdrunner-2.2.jar \
-    http://search.maven.org/remotecontent?filepath=kg/apc/cmdrunner/2.2/cmdrunner-2.2.jar \
-    -P /opt/jmeter/lib/
+ARG jmeter_plugins_manager_checksum="eb5996293465d908a17b809acf8e914682840d06f58eaee18f6cdc34507f921f"
+ARG jmeter_plugins_manager_tarball="/var/cache/jmeter/jmeter-plugins-manager-1.8.jar"
+RUN --mount=type=cache,target=/var/cache/jmeter \
+    sha256sum --check --status 2>/dev/null <<< "$jmeter_plugins_manager_checksum  $jmeter_plugins_manager_tarball" \
+    || wget http://search.maven.org/remotecontent?filepath=kg/apc/jmeter-plugins-manager/1.8/jmeter-plugins-manager-1.8.jar -O $jmeter_plugins_manager_tarball \
+    && sha256sum --check <<< "$jmeter_plugins_manager_checksum  $jmeter_plugins_manager_tarball" \
+    && cp $jmeter_plugins_manager_tarball /opt/jmeter/lib/ext/jmeter-plugins-manager-1.8.jar
 RUN java -cp /opt/jmeter/lib/ext/jmeter-plugins-manager-1.8.jar org.jmeterplugins.repository.PluginManagerCMDInstaller
-#### --- tack on extra plugins from here --- ####
-#### --------------------------------------- ####
-RUN /opt/jmeter/bin/PluginsManagerCMD.sh install jpgc-casutg=2.10 || true \
-    && /opt/jmeter/bin/PluginsManagerCMD.sh install jpgc-graphs-vs=2.0 || true \
-    && /opt/jmeter/bin/PluginsManagerCMD.sh install jpgc-tst=2.5 || true
-#### --------------------------------------- ####
-#### --------- END Jmeter plugins ---------- ####
 
 # -- Install Databricks Dependencies
-RUN mkdir -p /tmp/simba
-RUN wget https://databricks-bi-artifacts.s3.us-east-2.amazonaws.com/simbaspark-drivers/jdbc/2.6.33/DatabricksJDBC42-2.6.33.1055.zip \
-    -O /tmp/simba/DatabricksJDBC42-2.6.33.1055.zip \
-    && unzip /tmp/simba/DatabricksJDBC42-2.6.33.1055.zip -d /tmp/simba
-RUN mkdir /opt/databricks \
-    && mv /tmp/simba/DatabricksJDBC42.jar /opt/databricks \
-    && rm -rf /tmp/simba \
+ARG databricks_checksum="bc4163aefff3bed05bcbe96ca293020ac647341d8012d39d3107cd278185295c"
+ARG databricks_tarball="/var/cache/databricks/DatabricksJDBC42-2.6.33.1055.zip"
+RUN --mount=type=cache,target=/var/cache/databricks \
+    sha256sum --check --status 2>/dev/null <<< "$databricks_checksum  $databricks_tarball" \
+    || wget https://databricks-bi-artifacts.s3.us-east-2.amazonaws.com/simbaspark-drivers/jdbc/2.6.33/DatabricksJDBC42-2.6.33.1055.zip -O $databricks_tarball \
+    && sha256sum --check <<< "$databricks_checksum  $databricks_tarball" \
+    && unzip $databricks_tarball -d /opt/databricks \
     && chmod a+x /opt/databricks/DatabricksJDBC42.jar
+
+# Ensure directory for virtual environment exist and everyone can write to it, so that an anonymous volume can be mounted on top of it.
+RUN mkdir -p /tmp/.venv/ && chmod 777 /tmp/.venv/
 
 CMD ["bash"]

@@ -1,6 +1,7 @@
 import os
 import time
 import random
+from typing import Literal
 
 from lib_testbed.generic.client.models.debian.client_lib import DebianClientUpgrade, UPGRADE_DIR
 from lib_testbed.generic.client.models.debian.client_lib import ClientLib as DebianClientLib
@@ -16,6 +17,13 @@ class ClientLib(DebianClientLib):
     def pod_to_client(self, **kwargs):
         return ["1", "", "Rpi client is not a pod"]
 
+    def get_target_version(self, version: Literal["stable", "latest"]) -> str:
+        """Retrieves the actual target version for stable/latest from artifactory.
+        Returns string with version.
+        """
+        rpi_upgrade = RpiClientUpgrade(lib=self, restore_cfg=True, download_locally=True, restore_files=None)
+        return rpi_upgrade.get_target_version(version=version)
+
     def upgrade(
         self,
         fw_path=None,
@@ -25,6 +33,7 @@ class ClientLib(DebianClientLib):
         download_locally=True,
         version=None,
         restore_files=None,
+        mirror_url=None,
         **kwargs,
     ):
         """
@@ -37,6 +46,7 @@ class ClientLib(DebianClientLib):
             download_locally: (bool) If True download upgrade files to local machine
             version: (str) version to download from the artifactory (or get latest or stable version)
             restore_files: (str): Paths of files to restore. eg. restore_files=/home/plume/file1,/etc/file2
+            mirror_url (str): url to mirror with upgrade files
             **kwargs:
 
         Returns: (ret_val, std_out, str_err)
@@ -46,7 +56,11 @@ class ClientLib(DebianClientLib):
         # short sleep to spread threads in time
         time.sleep(random.randint(1, 10) / 10)
         rpi_upgrade = RpiClientUpgrade(
-            lib=self, restore_cfg=restore_cfg, download_locally=download_locally, restore_files=restore_files
+            lib=self,
+            restore_cfg=restore_cfg,
+            download_locally=download_locally,
+            restore_files=restore_files,
+            mirror_url=mirror_url,
         )
         if http_address:
             if rpi_upgrade.device_type not in http_address:
@@ -55,22 +69,6 @@ class ClientLib(DebianClientLib):
         if fw_path and not os.path.isabs(fw_path):
             fw_path = os.path.abspath(fw_path)
         return rpi_upgrade.start_upgrade(fw_path, force, version, **kwargs)
-
-    def limit_tx_power(self, state=True, **kwargs):
-        """
-        Limit WiFi Tx power on the devices in the testbed
-        state: (bool) Enable/disable Tx power modification
-        """
-        if state:
-            out = self.run_command("sudo touch /.tx_power_enable.flag", **kwargs)
-            if out[0]:
-                return out
-            out[1] = "Please reboot your pods to make it happen"
-        else:
-            out = self.run_command("sudo rm /.tx_power_enable.flag", **kwargs)
-            if "No such file or directory" in out[2]:
-                return [0, "Limiting Tx power was not enabled", ""]
-        return out
 
     def set_tx_power(self, tx_power, ifname="", **kwargs):
         """

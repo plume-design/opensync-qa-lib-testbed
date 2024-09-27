@@ -15,13 +15,13 @@ class ClientLib(ClientLibGeneric):
         self.tool = ClientTool(lib=self)
 
     # TODO: Implement regular connect from generic library
-    def connect_uci(self, ssid, psk, band, htmode="", hwmode="", bssid="", key_mgmt="psk2", timeout=60, **kwargs):
+    def connect_uci(self, ssid, psk, node_band, htmode="", hwmode="", bssid="", key_mgmt="psk2", timeout=60, **kwargs):
         """
         Connect client to network by the uci configuration
         Args:
             ssid: (str) ssid
             psk: (str) psk
-            band: (str) type of band
+            node_band: (str) type of band
             htmode: (str) ht mode
             hwmode: (str) hw mode
             bssid: (str) bssid of target device
@@ -37,8 +37,8 @@ class ClientLib(ClientLibGeneric):
         ssid = ssid if ssid else default_ssid
         psk = psk if psk else default_password
 
-        if_name = self.iface.get_interface_from_band(band)
-        interface_index = 0 if "2.4G" in band else 1
+        if_name = self.iface.get_interface_from_band(node_band)
+        interface_index = 0 if "2.4G" in node_band else 1
         connect_settings = (
             f"/etc/init.d/qca-wpa-supplicant boot; wifi unload; "
             f"wifi detect > /etc/config/wireless; "
@@ -64,20 +64,21 @@ class ClientLib(ClientLibGeneric):
         )
 
         stats_cmd = (
-            f"iwpriv wifi{interface_index} disablestats 0; "
+            f"cfg80211tool wifi{interface_index} disablestats 0; "
             if interface_index == 0
-            else f"iwpriv wifi{interface_index} enable_ol_stats 1"
+            else f"cfg80211tool wifi{interface_index} enable_ol_stats 1"
         )
         connect_settings += stats_cmd
 
         wifi_down = self.run_command("wifi down", **kwargs)
         self.run_command("killall wpa_supplicant", skip_exception=True)
         connect = self.run_command(connect_settings, timeout=60)
-        iwpriv_settings = self.run_command(
-            f"iwpriv {if_name} cwmenable 0; iwpriv {if_name} powersave 0; " f"iwpriv {if_name} disablecoext 1"
+        cfg80211tool_settings = self.run_command(
+            f"cfg80211tool {if_name} cwmenable 0; cfg80211tool {if_name} powersave 0; "
+            f"cfg80211tool {if_name} disablecoext 1"
         )
         results = self.merge_result(wifi_down, connect)
-        results = self.merge_result(results, iwpriv_settings)
+        results = self.merge_result(results, cfg80211tool_settings)
 
         if not results[0]:
             # wait a few minutes for connect client to network
@@ -93,7 +94,7 @@ class ClientLib(ClientLibGeneric):
 
     def disconnect(self, **kwargs):
         """
-        Kill wpa suplicant process on the target interface
+        Push down wifi interfaces and reload config
         Returns: (list) raw output from command
 
         """
@@ -130,7 +131,9 @@ class ClientLib(ClientLibGeneric):
         """
         ht_mcs = hex(128 + mcs)
         result = self.run_command(
-            f"iwpriv {ifname} chwidth {bw_index}; " f"iwpriv {ifname} shortgi 0; " f"iwconfig {ifname} rate {ht_mcs}",
+            f"cfg80211tool {ifname} chwidth {bw_index}; "
+            f"cfg80211tool {ifname} shortgi 0; "
+            f"iwconfig {ifname} rate {ht_mcs}",
             **kwargs,
         )
         return result
@@ -148,16 +151,17 @@ class ClientLib(ClientLibGeneric):
 
         """
         result = self.run_command(
-            f"iwpriv {ifname} nss {nss}; " f"iwpriv {ifname} chwidth {bw_index}; " f"iwpriv {ifname} vhtmcs {mcs}",
+            f"cfg80211tool {ifname} nss {nss}; "
+            f"cfg80211tool {ifname} chwidth {bw_index}; "
+            f"cfg80211tool {ifname} vhtmcs {mcs}",
             **kwargs,
         )
         return result
 
     def restore_data_rates(self, **kwargs):
-        results = self.merge_result(
-            self.run_command("iwconfig ath0 rate auto", **kwargs),
-            self.run_command("iwconfig ath1 rate auto", **kwargs),
-        )
+        results = [0, '', '']
+        for iface in self.iface.get_wireless_ifaces():
+            results = self.merge_result(results, self.run_command("iwconfig %s rate auto" % iface, **kwargs))
         return results
 
     def pod_to_client(self, **kwargs):
@@ -345,15 +349,18 @@ class ClientLib(ClientLibGeneric):
 
 
 class ClientIface(Iface):
-    @staticmethod
-    def define_band_by_channel(channel):
-        if channel in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
-            return "24g"
-        else:
-            return "5g"
+    ALLOWED_BANDS = ["2.4G", "5G"]
 
     @staticmethod
-    def get_interface_from_band(band):
+    def define_band_by_channel(channel, dut_band):
+        if channel in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
+            dut_band += ""
+            return "2.4G"
+        else:
+            return "5G"
+
+    @staticmethod
+    def get_interface_from_band(band) -> str:
         """
         Get client interface name
         Args:
@@ -362,7 +369,14 @@ class ClientIface(Iface):
         Returns: (str) name of wireless interface
 
         """
-        return "ath0" if "2" in band else "ath1"
+        assert band in ClientIface.ALLOWED_BANDS, (
+            f"Provided not supported band: {band}. " f"Allowed bands: {ClientIface.ALLOWED_BANDS}"
+        )
+        match band:
+            case "2.4G":
+                return "ath0"
+            case "5G":
+                return "ath1"
 
     @staticmethod
     def get_wireless_ifaces():
