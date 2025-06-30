@@ -233,6 +233,34 @@ class SwitchController:
         """
         return self.execute_port_request(request="get_link_status", port_names=port_names)
 
+    def set_bw_limit(self, port_names: Union[str, list], ingress_rate: int, egress_rate: int) -> dict:
+        """
+        Set bandwidth limit
+        Args:
+            port_names: (str) for one port name or (list) for more than one port
+            ingress_rate: (int) The upper rate limit for receiving packets from 1 to 1000000 kbps,
+            if 0 then disable the limit
+            egress_rate: (int) The upper rate limit for sending packets from 1 to 1000000 kbps,
+            if 0 then disable the limit
+
+        Returns: dict() {port_name: [ret_val, std_out, std_err]
+
+        """
+        return self.execute_port_request(
+            request="set_bw_limit", port_names=port_names, ingress_rate=ingress_rate, egress_rate=egress_rate
+        )
+
+    def get_bw_limit(self, port_names: Union[str, list]) -> dict:
+        """
+        Get bandwidth limit
+        Args:
+            port_names: (str) for one port name or (list) for more than one port
+
+        Returns: dict() {port_name: [ret_val, std_out, std_err]
+
+        """
+        return self.execute_port_request(request="get_bw_limit", port_names=port_names)
+
     def issue_port_action(self, port_names: Union[str, list], port_action: str) -> dict:
         """
         Issue port action
@@ -244,17 +272,6 @@ class SwitchController:
 
         """
         return self.execute_port_request(request="action_interface", port_names=port_names, action=port_action)
-
-    def switch_info_parsed(self, port_names: Union[str, list]) -> dict:
-        """
-        Switch info parser
-        Args:
-            port_names: (str) for one port name or (list) for more than one port
-
-        Returns: (dict) {port_name: dict(parsed_info)}
-
-        """
-        return self.execute_port_request(request="interface_info_parsed", port_names=port_names)
 
     def switch_info_parser(self, raw_info: dict) -> dict:
         """

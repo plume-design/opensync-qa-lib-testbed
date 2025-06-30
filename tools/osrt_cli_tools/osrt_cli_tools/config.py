@@ -2,15 +2,29 @@ import os
 import sys
 import tempfile
 import traceback
+import fnmatch
+import re
+from concurrent.futures.process import ProcessPoolExecutor
 from pathlib import Path
 
 from yaml.scanner import ScannerError
 
-from lib_testbed.generic.util.config import get_config_dir, LOCATIONS_DIR
+from lib_testbed.generic.util.config import (
+    get_config_dir,
+    MODEL_PROPERTIES_DIR,
+    LOCATIONS_DIR,
+    MISCS_DIR,
+    MODEL_INTERNAL_DIR,
+    MODEL_REFERENCE_DIR,
+    load_tb_config,
+    load_file,
+)
 from lib_testbed.generic.util.logger import log
 import osrt_cli_tools.utils
 import osrt_cli_tools.tb_config_parser
 import osrt_cli_tools.reserve
+import osrt_cli_tools.pod
+
 
 if osrt_cli_tools.utils.is_autocomplete():
     import click
@@ -23,8 +37,9 @@ else:
 
 @click.group(context_settings=dict(help_option_names=["-h", "--help"]))
 @osrt_cli_tools.utils.disable_colors_option
+@osrt_cli_tools.utils.verbosity_option
 @click.pass_context
-def cli(ctx, disable_colors):
+def cli(ctx, disable_colors, verbosity):
     """Configuration helper toolset (location).
 
     Parts of cached config files are available to access in a user-friendly way."""
@@ -32,6 +47,10 @@ def cli(ctx, disable_colors):
     ctx.ensure_object(dict)
     if not ctx.obj.get("DISABLE_COLORS"):
         ctx.obj["DISABLE_COLORS"] = disable_colors
+    if not ctx.obj.get("VERBOSITY"):
+        ctx.obj["VERBOSITY"] = verbosity
+    if not osrt_cli_tools.utils.is_autocomplete():
+        osrt_cli_tools.utils.set_log_verbosity(ctx.obj["VERBOSITY"])
 
 
 @cli.command
@@ -114,10 +133,17 @@ def _get_location_config(ctx, tb_name: str, keys: list[str, int], full: bool) ->
     """
     from lib_testbed.generic.util.config import load_tb_config, load_file, find_location_file
 
+    tb_config = {}
     if not full:
-        tb_config = load_file(find_location_file(tb_name))
+        try:
+            tb_config = load_file(find_location_file(tb_name))
+        except Exception as err:
+            log.debug("Caught exception: %s", "".join(traceback.format_exception(err)))
     else:
-        tb_config = load_tb_config(tb_name, skip_deployment=True)
+        try:
+            tb_config = load_tb_config(tb_name, skip_deployment=True)
+        except Exception as err:
+            log.debug("Caught exception: %s", "".join(traceback.format_exception(err)))
     if keys:
         full_path = ""
         for key in keys:
@@ -201,15 +227,18 @@ def get(ctx, path, full):
             tb_config = _get_location_config(ctx, tb_name, keys, full)
             click.echo(json.dumps(tb_config, indent=2))
         case ["locations", tb_name, *keys]:
-            if tb_name in ["*", ""]:
+            if "*" in tb_name or "?" in tb_name:
                 to_print = {}
                 locations_path = Path(get_config_dir()) / LOCATIONS_DIR
-                for tb_config in locations_path.iterdir():
-                    if tb_config.suffix == ".yaml":
-                        try:
-                            to_print[tb_config.stem] = _get_location_config(ctx, str(tb_config.name), keys, full)
-                        except ScannerError:
-                            log.error("Error parsing location file: %s", tb_config)
+                all_matched_locations = fnmatch.filter(
+                    [filepath.name[:-5] for filepath in locations_path.iterdir() if filepath.name.endswith(".yaml")],
+                    tb_name,
+                )
+                for tb_config in all_matched_locations:
+                    try:
+                        to_print[tb_config] = _get_location_config(ctx, str(tb_config), keys, full)
+                    except ScannerError:
+                        log.error("Error parsing location file: %s", tb_config)
                 click.echo(json.dumps(to_print, indent=2))
             else:
                 tb_config = _get_location_config(ctx, tb_name, keys, full)
@@ -274,7 +303,10 @@ def ssh(ctx, testbeds):
                 ssh_config += f"user {client['host']['user']}\n\n"
         except Exception as err:
             log.debug("Error occurred: %s", "\n".join(traceback.format_exception(err)))
-            click.secho(f"Error preparing reservation file for {tb_name}, use --debug for more information", err=True)
+            click.secho(
+                f"Error preparing reservation file for {tb_name}, increase tool verbosity with -vv for more information.",
+                err=True,
+            )
 
     click.echo(ssh_config)
 
@@ -297,6 +329,171 @@ def list_(ctx):
     except OSError:  # no tty
         line_width = 25  # with the assumption that it will all display in a single column, e.g. for grep
     click.echo(columnify.columnify(location_names, line_width=line_width))
+
+
+def _complete_model(ctx, param, incomplete) -> list[str]:
+    """Returns a list of available models out of all available for autocompletion."""
+    internal_models = (Path(get_config_dir()) / MODEL_PROPERTIES_DIR / MODEL_INTERNAL_DIR).glob("*.yaml")
+    reference_models = (Path(get_config_dir()) / MODEL_PROPERTIES_DIR / MODEL_REFERENCE_DIR).glob("*.yaml")
+    all_models = [x.name for x in list(internal_models) + list(reference_models)]
+    return [x.rstrip(".yaml") for x in sorted(all_models) if x.startswith(incomplete)]
+
+
+@cli.command
+@click.argument("model", required=False, default=None, shell_complete=_complete_model)
+@click.option(
+    "--version",
+    help="Version/branche to validate. When not specified, all versions from model-properties are checked.",
+    type=click.STRING,
+    default=None,
+    shell_complete=osrt_cli_tools.pod.complete_upgrade_image,
+)
+@click.pass_context
+def build_map_validate(ctx, model, version):
+    """Validate build map for specified **MODEL**.
+
+    If not specified and a testbed is active through the environment variable `OPENSYNC_TESTBED`, then the
+    current gateway model is checked.
+
+    It is expected for featurebranches to be reported as invalid as the repository structure does not conform
+    to the actual versions. Featurebranches are supposed to be tested manually.
+    """
+    from lib_testbed.generic.util.artifactory_lib import get_map, query_artifactory_search
+
+    valid_versions, invalid_versions = [], []
+    if not model:
+        tb_name = osrt_cli_tools.utils.get_testbed_name()
+        cfg = load_tb_config(tb_name, skip_deployment=True)
+        model = cfg["Nodes"][0]["model_org"]
+    else:
+        model = model.upper()
+        artifactory_cfg_path = Path(get_config_dir()) / MISCS_DIR / "artifactory.yaml"
+        if not artifactory_cfg_path.exists():
+            click.echo("Missing artifactory config, nothing to check")
+            sys.exit(1)
+        cfg = load_file(artifactory_cfg_path)
+
+    fw_map_full = get_map(model, "build_map.json")
+
+    if version:
+        versions = version.split(",")
+    else:
+        versions = [
+            ver for ver in fw_map_full.keys() if ver not in ["short-name", "s3-bucket", "build-profile", "fn-regex"]
+        ]
+    log.info("Total number of versions to process: %s.", len(versions))
+    log.trace("All versions: %s", versions)
+    for ver in versions:
+        fw_map = fw_map_full[ver]
+        fw_regex = fw_map.get("fn-regex", fw_map_full.get("fn-regex"))
+        if ver in ["short-name", "s3-bucket", "build-profile", "fn-regex"]:
+            continue
+        click.echo(f"Testing version '{ver}'", err=True, nl=False)
+        try:
+            log.info("Checking firmware status of version '%s'.", ver)
+            build_profile = fw_map.get("use-build-map-build-profile", fw_map.get("build_profile", "dev-debug"))
+            build_name = fw_map["proj-name"].split("/")[0]
+            suffix = fw_map["enc-suffix"] if fw_map["encryption"] else fw_map.get("img-suffix", "")
+            response = query_artifactory_search(cfg, build_name, "LATEST")
+            if response.status_code == 504:
+                log.debug("Gateway timeout, skipping this check")
+                click.echo(" ⇨ [skip]", err=True)
+                continue
+            elif response.status_code == 404:
+                log.debug("Response 404, firmware doesn't exist in artifactory")
+                click.echo(" ❌ [fail]", err=True)
+                invalid_versions.append(ver)
+                continue
+
+            fw_json = response.json()
+            all_urls = [url["downloadUri"] for url in fw_json["results"]]
+
+            filter_urls, fw_artifacts = [], []
+            # Filter out only the correct build_profile and suffix
+            for url in all_urls:
+                if build_profile in url and url.endswith(suffix):
+                    filter_urls.append(url)
+            # Use fn-regex to match filenames if available
+            if fw_regex:
+                fw_artifacts = [url for url in filter_urls if re.findall(fw_regex, url)]
+                if len(fw_artifacts) == 1:
+                    return fw_artifacts[0]
+            # Alternatively use fn-prefix
+            tmp_urls = filter_urls if len(fw_artifacts) == 0 else fw_artifacts
+            urls = []
+            for url in tmp_urls:
+                if fw_map["fn-prefix"] in url:
+                    urls.append(url)
+
+            if len(urls) != 1:
+                log.debug("More than 1 URL matching LATEST version, entry incorrect")
+                click.echo(" ❌ [fail]", err=True)
+                invalid_versions.append(ver)
+                continue
+
+            click.echo(" ✅ [ok]", err=True)
+            valid_versions.append(ver)
+        except Exception as err:
+            click.echo(" ❌ [fail]", err=True)
+            log.info("An error occurred checking version '%s' - %s: %s.", ver, type(err).__name__, err)
+            log.debug("Traceback: %s", "".join(traceback.format_exception(err)))
+            invalid_versions.append(ver)
+    result_table_rows = []
+    if valid_versions:
+        result_table_rows.append(["valid", ",\n".join(valid_versions)])
+    if invalid_versions:
+        result_table_rows.append(["invalid", ",\n".join(invalid_versions)])
+    osrt_cli_tools.utils.print_table(
+        rows=result_table_rows, headers=["status", "firmware versions"], ctx=ctx, show_lines=True
+    )
+    if invalid_versions:
+        click.echo("Increase tool verbosity with -vv for more information about invalid versions.", err=True)
+
+
+def match_serial(location: str | Path, serial: str) -> bool:
+    """Helper function to match provided serial to nodes in a given location. Returns True if serial matches any
+    nodes in given location.
+    """
+    # intentionally do not load tb-config, we only need nodes here:
+    config = load_file(location)
+    serials = [node.get("id") for node in config.get("Nodes")]
+    if fnmatch.filter(serials, serial):
+        return True
+
+
+@cli.command
+@click.argument("serial", required=True, type=click.STRING)
+@click.pass_context
+def node_find(ctx, serial):
+    """Finds location configs containing the specified node serial.
+
+    Wildcards are allowed in **SERIAL** argument.
+    """
+    from lib_testbed.generic.util.config import get_config_dir, LOCATIONS_DIR
+
+    locations_path = Path(get_config_dir()) / LOCATIONS_DIR
+    all_locations = [loc.absolute() for loc in locations_path.iterdir() if loc.is_file() and loc.suffix == ".yaml"]
+    # location_names = sorted([name[:-5] for name in all_locations])  # drop the .yaml extension
+    location_futures = {}
+    matched_locations = []
+    with ProcessPoolExecutor() as ppe:
+        for location in all_locations:
+            location_futures[location] = ppe.submit(match_serial, location=location, serial=serial)
+
+    for location in location_futures:
+        try:
+            status = location_futures[location].result()
+            if status:
+                matched_locations.append(location.name[:-5])
+        except Exception as err:
+            click.secho(f"Error processing {location}", err=True)
+            log.debug("Captured error: %s", "".join(traceback.format_exception(err)))
+    osrt_cli_tools.utils.print_table(
+        rows=[["locations", ",\n".join(matched_locations)]],
+        headers=["", f"node '{serial}'"],
+        ctx=ctx,
+        show_lines=True,
+    )
 
 
 def get_bash_complete() -> Path:

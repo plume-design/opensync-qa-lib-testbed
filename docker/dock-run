@@ -5,6 +5,7 @@ echo_debug()
     echo "${ColorDEBUG}$@${ColorOff}" >&2
 }
 
+export DOCKER_CLI_HINTS=false
 export DOCKER_TAG=${DOCKER_TAG:-'trident'}
 SKIP_DOCKER_START=${SKIP_DOCKER_START:-}
 DOCKER_START_FLAG=${DOCKER_START_FLAG:-"-ai"}
@@ -105,8 +106,10 @@ fi
 
 if [ -z "${LOUD_DOCKER_BUILD}" ]; then
     QUIET_BUILD="--quiet"
+    UV_BE_QUIET="--quiet"
 else
     QUIET_BUILD="--progress=plain"
+    UV_BE_QUIET="--no-progress"
 fi
 
 if [ -n "${DOCKER_EXTRA_DOCKERFILE}" ]; then
@@ -141,7 +144,9 @@ else
     elif [ -f /etc/timezone ]; then
         _TIMEZONE="-e TZ=$(cat /etc/timezone)"
     else
-        _TIMEZONE="-v /etc/localtime:/etc/localtime"
+        if [ MAYBE_TZ=$(timedatectl show --va -p Timezone 2>/dev/null) ]; then
+            _TIMEZONE="-e TZ=$MAYBE_TZ"
+        fi
     fi
 fi
 
@@ -201,23 +206,32 @@ QASE_ENV="
 
 
 DOCKER_COMMAND_EXEC='
+export UV_HTTP_TIMEOUT=900
 export PYTHONDONTWRITEBYTECODE=true
 export PYTHONPATH="$OPENSYNC_ROOT:$PYTHONPATH"
 export PYTHON_PATH="$OPENSYNC_ROOT:$PYTHON_PATH"
 export PATH="$TOOLS_DIR:$PATH"
 export SHELL=/bin/bash
-uv venv --seed -q $VIRTUAL_ENV
-uv pip sync "$OPENSYNC_ROOT/requirements.txt" -q
+uv venv --seed $UV_BE_QUIET $VIRTUAL_ENV
+uv pip sync "$OPENSYNC_ROOT/requirements.txt" $UV_BE_QUIET
 . "$VIRTUAL_ENV/bin/activate"
-# redirecting errors in case qase/extra tools are not available:
-uv pip install -q --no-deps \
-    -e $OPENSYNC_ROOT/lib/qase-python/qase-python-commons/ \
-    -e $OPENSYNC_ROOT/lib/qase-python/qase-pytest/ \
-    -e $OPENSYNC_ROOT/lib/qase-python/qaseio/ > /dev/null 2>&1
-uv pip install -q --no-deps -e $OPENSYNC_ROOT > /dev/null 2>&1
-uv pip install -q --no-deps -e $OPENSYNC_ROOT/lib_testbed/generic/tools/osrt_cli_tools > /dev/null 2>&1
-uv pip install -q --no-deps -e $TOOLS_DIR/osrt_cloud_tools > /dev/null 2>&1
-uv pip install -q --no-deps -e $OPENSYNC_ROOT/lib/tools/osrt_extra_cli_tools > /dev/null 2>&1
+# Install qase and extra tools only when they are available:
+DEVELOPMENT_PACKAGE_DIRS="
+$OPENSYNC_ROOT/lib/qase-python/qase-python-commons
+$OPENSYNC_ROOT/lib/qase-python/qase-pytest
+$OPENSYNC_ROOT/lib/qase-python/qaseio
+$OPENSYNC_ROOT
+$OPENSYNC_ROOT/lib_testbed/generic/tools/osrt_cli_tools
+$TOOLS_DIR/osrt_cloud_tools
+$OPENSYNC_ROOT/lib/tools/osrt_extra_cli_tools
+"
+DEVELOPMENT_PACKAGES=""
+for DEVELOPMENT_PACKAGE_DIR in $DEVELOPMENT_PACKAGE_DIRS; do
+    if grep -q -s "\[build-system\]" $DEVELOPMENT_PACKAGE_DIR/pyproject.toml; then
+        DEVELOPMENT_PACKAGES="$DEVELOPMENT_PACKAGES -e $DEVELOPMENT_PACKAGE_DIR"
+    fi
+done
+uv pip install $UV_BE_QUIET --no-deps $DEVELOPMENT_PACKAGES
 if [ -f ~/.bashrc ]; then
   cp ~/.bashrc "$FRAMEWORK_CACHE_DIR/bashrc"
 else
@@ -241,6 +255,10 @@ sig='INT HUP KILL TERM EXIT QUIT'
 id=
 cleanup() { r=$?; trap - $sig; test -z $id || docker kill $id; delete_pwd_file; delete_grp_file; clean_framework_cache_dir; exit $r; }
 trap cleanup $sig
+# clean all dangling trident-venv volumes - redirect empty line printed by docker to dev/null:
+docker volume ls -f label=trident-venv -f dangling=true -q | xargs docker volume rm {} > /dev/null 2>&1 || true
+# create new volume for current instance
+volume_id=$(docker volume create --label trident-venv)
 id=$(docker $DOCKER_COMMAND \
         --rm \
         --hostname $DOCKER_HOSTNAME \
@@ -252,6 +270,7 @@ id=$(docker $DOCKER_COMMAND \
         --env HOME="$HOME" \
         --env TERM \
         --env JOB_NAME \
+        --env JOB_BASE_NAME \
         --env BUILD_NUMBER \
         --env BUILD_URL \
         --env CLOUD_SMOKE_USER \
@@ -259,10 +278,13 @@ id=$(docker $DOCKER_COMMAND \
         --env OPENSYNC_ROOT \
         --env FRAMEWORK_CACHE_DIR \
         --env UV_CACHE_DIR=/var/cache/uv \
+        --env UV_BE_QUIET \
         --env TOOLS_DIR \
         --env DISPLAY=$DISPLAY \
         --env QT_X11_NO_MITSHM=1 \
         --env VIRTUAL_ENV \
+        --env DOCKER_CLI_HINTS \
+        --env OSRT_RESTBASE_LOG_ALL_REQUESTS \
         --workdir "$(pwd)" \
         -v/"$OPENSYNC_ROOT":"$OPENSYNC_ROOT":delegated \
         -v"$MPWDF":/etc/passwd:cached \
@@ -272,8 +294,8 @@ id=$(docker $DOCKER_COMMAND \
         -v/tmp/.X11-unix:/tmp/.X11-unix:cached \
         -v/dev/shm:/dev/shm:cached \
         -v"${FRAMEWORK_CACHE_DIR}/.pyenv":"$HOME/.pyenv":delegated \
-        -v"trident-uv-cache-${USER}":"/var/cache/uv":delegated \
-        -v"${VIRTUAL_ENV}" \
+        -v"trident-uv-cache-$(id -u)":"/var/cache/uv":delegated \
+        -v"${volume_id}:${VIRTUAL_ENV}" \
         --shm-size 1G \
         $_MOUNT_CUR_DIR \
         $_MOUNT_ROOT \

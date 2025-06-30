@@ -1,5 +1,5 @@
 FROM ubuntu:24.04
-ENV PYTHON_VERSION 3.12.1
+ENV PYTHON_VERSION 3.13.2
 ENV PATH /usr/local/bin:$PATH
 ENV LC_ALL C.UTF-8
 ENV LANG C.UTF-8
@@ -61,14 +61,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # Install pyenv, Python interpreter, and make it global
 SHELL ["/bin/bash", "-c"]
-ENV PYENV_ROOT=/opt/.pyenv
-ENV PYENV_BUILD_ROOT=/root/.cache/pyenv/sources
+ENV PYENV_ROOT /opt/.pyenv
+ENV PYENV_BUILD_ROOT /root/.cache/pyenv/sources
 RUN git clone https://github.com/pyenv/pyenv.git ${PYENV_ROOT}
-ENV PATH="${PYENV_ROOT}/bin:${PATH}"
+ENV PATH "${PYENV_ROOT}/bin:${PATH}"
 RUN echo 'export PATH="${PYENV_ROOT}/bin:$PATH"' >> ~/.bashrc && echo 'eval "$(pyenv init -)"' >> ~/.bashrc
 RUN --mount=type=cache,target=/root/.cache/pyenv/sources \
     pyenv install ${PYTHON_VERSION} && pyenv global ${PYTHON_VERSION} && chmod a+w -R ${PYENV_ROOT}
-ENV PATH="${PYENV_ROOT}/versions/${PYTHON_VERSION}/bin:${PATH}"
+ENV PATH "${PYENV_ROOT}/versions/${PYTHON_VERSION}/bin:${PATH}"
 # Update pip
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --upgrade pip
@@ -76,36 +76,20 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Create directory for mounting trident-uv-cache volume
 RUN mkdir -p /var/cache/uv && chmod 777 /var/cache/uv
 
-# -- Install allure
-ARG allure_checksum="c29957411c5ea34b693fb7c67774f87336d1b88c345f261076cc8c6ea95b62c2"
-ARG allure_tarball="/var/cache/allure/allure-commandline-2.10.0.zip"
-RUN --mount=type=cache,target=/var/cache/allure \
-    sha256sum --check --status 2>/dev/null <<< "$allure_checksum  $allure_tarball" \
-    || wget https://repo.maven.apache.org/maven2/io/qameta/allure/allure-commandline/2.10.0/allure-commandline-2.10.0.zip -O $allure_tarball \
-    && sha256sum --check --status 2>/dev/null <<< "$allure_checksum  $allure_tarball" \
-    && unzip $allure_tarball && mv allure-* allure && mv allure /opt/
-ENV ALLURE_GEN_FILE=/opt/allure/bin/allure-gen
-COPY allure-gen ${ALLURE_GEN_FILE}
-RUN chmod a+x ${ALLURE_GEN_FILE}
-ENV ALLURE_SHOW_FILE=/opt/allure/bin/allure-show
-COPY allure-show ${ALLURE_SHOW_FILE}
-RUN chmod a+x ${ALLURE_SHOW_FILE}
-ENV PATH="/opt/allure/bin:${PATH}"
-
 # -- Install ruff-check script
-ENV RUFF_CHECK_FILE=/usr/bin/ruff-check
+ENV RUFF_CHECK_FILE /usr/bin/ruff-check
 COPY ruff-check ${RUFF_CHECK_FILE}
 RUN chmod a+x ${RUFF_CHECK_FILE}
 
 RUN mkdir -p /plume
 
 # -- Matplotlib stuff
-ENV MPLBACKEND=Agg
+ENV MPLBACKEND Agg
 RUN export MPLBACKEND
 
 # -- Install pipenv
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install setuptools==67.7.2 setuptools-scm uv==0.1.20
+    python -m pip install setuptools==67.7.2 setuptools-scm uv==0.5.2
 
 # -- Adding autocomplete to pset command
 COPY pset /etc/bash_completion.d/

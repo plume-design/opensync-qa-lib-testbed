@@ -138,6 +138,34 @@ class SwitchToolGeneric:
         self.switch_api.set_daisy_chain_connection(target_device, connect_to_device)
         return self.info(self.switch_api.get_device_port_names()[target_device])
 
+    def set_bw_limit(self, port_name: str, ingress_rate: int, egress_rate: int):
+        """
+        Set PORT bandwidth limit.
+        Args:
+            port_name: (str) Name of port
+            ingress_rate: (int) Specify the upper rate limit for receiving packets from 1 to 1000000 kbps,
+            if 0 then disable the limit
+            egress_rate: (int) Specify the upper rate limit for sending packets from 1 to 1000000 kbps,
+            if 0 then disable the limit
+
+        Returns: dict(port_name: [ret_val, std_out, std_err])
+
+        """
+        results = self.tool.set_bw_limit(port_name, ingress_rate, egress_rate)
+        return results
+
+    def get_bw_limit(self, ports: str | list[str]):
+        """
+        Get PORTS bandwidth limit
+        Args:
+            ports: (str) Name of port OR (list) Name of ports
+
+        Returns: dict(port_name: [ret_val, std_out, std_err])
+
+        """
+        results = self.tool.get_bw_limit(ports)
+        return results
+
     def get_list_of_all_port_names(self):
         response = self.switch_api.get_list_of_all_port_names()
         # Merge all port names into one list for multiple switch units

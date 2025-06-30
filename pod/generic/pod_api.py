@@ -2,26 +2,25 @@ import re
 import os.path
 import time
 import json
+import traceback
+
 import pytest
 import urllib.request
-from typing import Union, TYPE_CHECKING
+from typing import Union, TYPE_CHECKING, Literal
 from uuid import UUID
 
 from lib_testbed.generic import WAN_VLAN
 from lib_testbed.generic.util.request_handler import parse_request
 from lib_testbed.generic.util.ssh.device_api import DeviceApi
 from lib_testbed.generic.util.allure_util import AllureUtil
-from lib_testbed.generic.util.common import (
-    get_git_revision,
-    mark_failed_recovery_attempt,
-    CACHE_DIR,
-)
+from lib_testbed.generic.util.common import mark_failed_recovery_attempt, CACHE_DIR
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.ssh.sshexception import SshException
 from lib_testbed.generic.switch.switch_api_resolver import SwitchApiResolver
 from lib_testbed.generic.util.object_resolver import ObjectResolver
 from lib_testbed.generic.rpower.rpowerlib import PowerControllerApi
 from lib_testbed.generic.util.opensyncexception import OpenSyncException
+from lib_testbed.generic.util.pytest_utils import safe_exit_pytest
 
 
 class PodApi(DeviceApi):
@@ -41,6 +40,7 @@ class PodApi(DeviceApi):
 
     @parse_request
     def setup_class_handler(self, request):
+        self.start_teardown_handler = True
         if not self.lib.device or not request or request.config.option.skip_init:
             return
         # Perform actions for device which is marked as main object
@@ -56,7 +56,8 @@ class PodApi(DeviceApi):
             return
         self.start_class_handler = False
 
-        if not self.lib.get_stdout(self.lib.version(timeout=20, retry=False), skip_exception=True):
+        device_version = self.lib.get_stdout(self.lib.version(timeout=20, retry=False), skip_exception=True)
+        if not device_version:
             self.pod_recovery()
 
         self.auto_limit_tx_power()
@@ -65,22 +66,12 @@ class PodApi(DeviceApi):
 
         if not request:
             return
-        # save FW versions for main object
-        version = self.version()
-        region = self.get_region(skip_exception=True)
-        AllureUtil(request.config).add_allure_group_envs(
-            f"node_{self.serial}", "version", version, f"file://{self.serial}", fixed_value=True
-        )
-        AllureUtil(request.config).add_allure_group_envs(
-            f"node_{self.serial}", "model", self.model, f"file://{self.serial}", fixed_value=True
-        )
-        if region:
-            AllureUtil(request.config).add_allure_group_envs(
-                f"node_{self.serial}", "region", region, f"file://{self.serial}"
-            )
-        git_ver = get_git_revision()
-        if git_ver:
-            AllureUtil(request.config).add_environment("git_sha", git_ver, "_error")
+
+        allure_util = AllureUtil(request.config)
+
+        # Cache information about node. The cached information also get attached to test report.
+        for info_name in "serial", "model", "version", "region", "modules":
+            allure_util.cache_node_value(self, info_name)
 
     @parse_request
     def teardown_class_handler(self, request):
@@ -92,9 +83,10 @@ class PodApi(DeviceApi):
 
     @parse_request
     def teardown_class_handler_main_object(self, request):
-        if not self.lib.main_object:
+        if not self.lib.main_object or not self.start_teardown_handler:
             super().teardown_class_handler(request)
             return
+        self.start_teardown_handler = False
 
         # check if FW is correct
         timeout = 2 * 60
@@ -116,11 +108,11 @@ class PodApi(DeviceApi):
                 first_loop = False
             time.sleep(5)
         # skip restoring FW for residential GW since we cannot upgrade them anyway
-        if self.lib.device.config["capabilities"]["device_type"] == "residential_gateway":
+        if self.lib.device.config["capabilities"]["wan_link_selection"] is False:
             super().teardown_class_handler(request)
             return
         if request:
-            exp_ver = AllureUtil(request.config).get_allure_group_env(f"node_{self.serial}", "version")
+            exp_ver = AllureUtil(request.config).get_cached_node_value(self.serial, "version")
         else:
             exp_ver = None
         try:
@@ -129,20 +121,30 @@ class PodApi(DeviceApi):
                     f"Test ended with incorrect FW version: {cur_version}, expected version: {exp_ver}.\n"
                     f"Checking if upgrade can be performed"
                 )
-                self._teardown_restore_fw(exp_ver)
+                self._teardown_restore_fw(exp_ver, request=request)
         finally:
             super().teardown_class_handler(request)
 
-    def _teardown_restore_fw(self, exp_ver):
+    def _teardown_restore_fw(self, exp_ver, request):
         if cloud_obj := self.lib.get_custbase():
             cloud_obj.clear_target_matrix()
         else:
             log.warning("Can not disable upgrading FW in the Frontline")
 
-        ret = self.lib.upgrade(exp_ver)
+        try:
+            ret = self.lib.upgrade(exp_ver)
+        except Exception as e:
+            ret = [155, "", str(e)]
         if ret[0]:
-            log.error(f"\nRestoring FW failed:\n{ret}. Trigger signal keyboard-interrupt to exit pytest session\n")
-            pytest.exit(f"Cannot restore {exp_ver} on the {self.nickname}, stopping test execution")
+            log.error(f"\nRestoring FW failed:\n{ret}.")
+            try:
+                safe_exit_pytest(
+                    request=request, msg=f"Cannot restore {exp_ver} on the {self.nickname}, stopping test execution."
+                )
+            except Exception as err:
+                log.error("Safe exit failed with: %s", "".join(traceback.format_exception(err)))
+                pytest.exit(f"Cannot restore {exp_ver} on the {self.nickname}, stopping test execution.")
+                raise
 
     @staticmethod
     def initialize_device_lib(**kwargs):
@@ -278,11 +280,22 @@ class PodApi(DeviceApi):
         """Display opensync version of node(s)"""
         return self.get_stdout(self.lib.opensync_version(**kwargs), **kwargs)
 
-    def uptime(self, timeout=20, **kwargs):
+    def module_versions(self, **kwargs) -> dict[str:str]:
+        """Return versions of modules installed on this node"""
+        modules = self.ovsdb.get_json_table("Object_Store_State", where="status!='install-done'", **kwargs)
+        if not modules:
+            return {}
+        # this happens when just one column is returned - just 1 module
+        if isinstance(modules, dict):
+            modules = [modules]
+        module_versions = {}
+        for module in modules:
+            module_versions[module["name"]] = module.get("version", "unknown")
+        return module_versions
+
+    def uptime(self, timeout=20, out_format: str = "user", **kwargs):
         """Display uptime of node(s)"""
-        response = self.lib.uptime(timeout, **kwargs)
-        if kwargs.get("out_format"):
-            del kwargs["out_format"]
+        response = self.lib.uptime(timeout, out_format, **kwargs)
         return self.get_stdout(response, **kwargs)
 
     def get_datetime(self, **kwargs):
@@ -357,6 +370,15 @@ class PodApi(DeviceApi):
         """Display BSSID of node bridge = <br-wan|br-home>-, default both"""
         return [val for val in self.get_stdout(self.lib.bssid(bridge, **kwargs)).split("\n") if val != ""]
 
+    def get_bssids(self, ssid: str, **kwargs) -> dict[str:str]:
+        """
+        Return BSSIDs of all node's VIFs that are using `ssid` SSID, keyed by radio band.
+
+        Return radio band -> BSSID mapping.
+        """
+        json_dump = self.get_stdout(self.lib.get_bssids(ssid, **kwargs))
+        return json.loads(json_dump)
+
     def get_serial_number(self, **kwargs):
         """Get node(s) serial number"""
         return self.get_stdout(self.lib.get_serial_number(**kwargs))
@@ -413,24 +435,31 @@ class PodApi(DeviceApi):
         return self.lib.poll_pod_sanity(timeout, expect, *args)
 
     def clear_crashes(self, **kwargs):
-        response = self.lib.clear_crashes(**kwargs)
-        return self.get_stdout(response, **kwargs)
-
-    def get_crash(self, **kwargs):
-        """get crash log file from node"""
-        return self.lib.get_crash(**kwargs)
-
-    def remove_crash(self, **kwargs):
         """
-        Remove crashes from device
+        Remove crash files from device
         Args:
             **kwargs:
 
         Returns: stdout
 
         """
-        response = self.lib.remove_crash(**kwargs)
+        response = self.lib.clear_crashes(**kwargs)
         return self.get_stdout(response, **kwargs)
+
+    def get_crash(self, **kwargs):
+        """Get crash log file from node"""
+        return self.lib.get_crash(**kwargs)
+
+    def get_crash_files_list(self, **kwargs) -> list:
+        """
+        Get crash files list from the node.
+        Args:
+            **kwargs:
+
+        Returns: List of crash files
+
+        """
+        return self.lib.get_crash_files_list(**kwargs)
 
     def trigger_crash(self, **kwargs):
         """
@@ -492,7 +521,8 @@ class PodApi(DeviceApi):
 
         """
         model = self.get_model()
-        if self.capabilities.get_device_type() == "residential_gateway":
+        # skip non extenders as we typically cannot upgrade Set-top boxes
+        if self.capabilities.is_wan_link_selection_enabled() is False:
             return [1, "", f"Upgrade through ssh is not supported for {model}"]
         current_version = self.version(skip_exception=True)
         # Get firmware url and key from fw_matrix_obj
@@ -775,14 +805,16 @@ class PodApi(DeviceApi):
             else:
                 raise e
 
-    def redirect_stats_to_local_mqtt_broker(self, skip_storage=False, **kwargs):
+    def redirect_stats_to_local_mqtt_broker(self, skip_storage: bool = False, pure_redirect: bool = False, **kwargs):
         """
         Updates AWLAN_Node table and redirects stats to mqtt broker started on rpi-server
         Returns: stdout
 
         No parameters, since rpi-server IP 192.168.200.1 has to match rpi-server certificates used for TLS.
         """
-        response = self.lib.redirect_stats_to_local_mqtt_broker(skip_storage=skip_storage, **kwargs)
+        response = self.lib.redirect_stats_to_local_mqtt_broker(
+            skip_storage=skip_storage, pure_redirect=pure_redirect, **kwargs
+        )
         return self.get_stdout(response, **kwargs)
 
     def restore_stats_mqtt_settings(self, **kwargs):
@@ -791,6 +823,17 @@ class PodApi(DeviceApi):
         Returns: stdout
         """
         response = self.lib.restore_stats_mqtt_settings(**kwargs)
+        return self.get_stdout(response, **kwargs)
+
+    def prepare_dev_to_use_local_mqtt_broker(self, skip_storage: bool = False, **kwargs):
+        """Set firewall rule for local mqtt broker and update pod certs.
+        Additionally store mqtt-settings for restoring purposes."""
+        response = self.lib.prepare_dev_to_use_local_mqtt_broker(skip_storage=skip_storage, **kwargs)
+        return self.get_stdout(response, **kwargs)
+
+    def set_firewall_mode(self, mode: Literal["on", "nat"], **kwargs):
+        """Set requested firewall mode."""
+        response = self.lib.set_firewall_mode(mode=mode, **kwargs)
         return self.get_stdout(response, **kwargs)
 
     def get_managers_list(self, managers_name: Union[str, list] = None, **kwargs):
@@ -887,9 +930,13 @@ class PodApi(DeviceApi):
             **kwargs,
         )
 
-    def get_wifi_associated_clients(self, **kwargs):
-        """Get all connected WiFi Clients"""
-        return self.get_stdout(self.lib.get_wifi_associated_clients(**kwargs), **kwargs)
+    def get_wifi_associated_clients(self, **kwargs) -> list[str]:
+        """Get all connected WiFi Clients. Returns an empty list if no clients are found
+        (in case of an empty ovsdb table)."""
+        if "skip_exception" not in kwargs:
+            kwargs["skip_exception"] = True
+        # the list constructor might be needed for the case of an empty ovsdb table:
+        return list(self.get_stdout(self.lib.get_wifi_associated_clients(**kwargs), **kwargs))
 
     def get_node_services(self, **kwargs):
         """Get all configured services from Node_Services table"""
@@ -949,9 +996,9 @@ class PodApi(DeviceApi):
         response = self.lib.configure_wifi_radio(freq_band=freq_band, channel=channel, ht_mode=ht_mode, **kwargs)
         return self.get_stdout(result=response, **kwargs)
 
-    def get_wps_keys(self, if_name: str) -> dict[str, str]:
+    def get_wps_keys(self, if_name: str, **kwargs) -> dict[str, str]:
         """Returns WPS keys."""
-        return self.lib.get_wps_keys(if_name=if_name)
+        return self.lib.get_wps_keys(if_name=if_name, **kwargs)
 
     def get_client_pmk(self, client_mac: str, **kwargs):
         """
@@ -1100,10 +1147,19 @@ class PodApi(DeviceApi):
         result = self.lib.trigger_single_radar_detected_event(phy_radio_name, segment_id, chirp, freq_offest, **kwargs)
         return self.get_stdout(result, **kwargs)
 
+    def get_dfs_preferred_channel(self, phy_radio_name: str, **kwargs) -> int:
+        """Get DFS preferred channel"""
+        result = self.lib.get_dfs_preferred_channel(phy_radio_name, **kwargs)
+        return int(self.get_stdout(result, **kwargs))
+
     # PROPERTIES FOR STORED DATA
     @property
     def model(self):
-        return self.get_model()
+        try:
+            model = self.get_model(timeout=10)
+        except SshException:
+            model = self.lib.device.config["model_org"]
+        return model
 
     @property
     def model_org(self):
@@ -1132,9 +1188,15 @@ class PodApi(DeviceApi):
             return self.pod_api.lib.ovsdb.get_bool(table, select, where, skip_exception, return_list)
 
         def get_str(
-            self, table: str, select: str, where: Union[str, list] = None, skip_exception=False, return_list=False
+            self,
+            table: str,
+            select: str,
+            where: Union[str, list] = None,
+            skip_exception=False,
+            return_list=False,
+            **kwargs,
         ) -> Union[str, list]:
-            return self.pod_api.lib.ovsdb.get_str(table, select, where, skip_exception, return_list)
+            return self.pod_api.lib.ovsdb.get_str(table, select, where, skip_exception, return_list, **kwargs)
 
         def get_map(
             self, table: str, select: str, where: Union[str, list] = None, skip_exception=False, return_list=False

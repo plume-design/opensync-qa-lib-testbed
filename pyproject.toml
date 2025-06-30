@@ -1,6 +1,7 @@
 [tool.black]
 line-length = 120
 include = '\.pyi?$'
+extend-exclude = '''mqtt/'''
 
 [tool.ruff]
 line-length = 120

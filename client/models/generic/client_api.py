@@ -7,6 +7,7 @@ from lib_testbed.generic.util.request_handler import parse_request
 from lib_testbed.generic.util.ssh.device_api import DeviceApi
 from lib_testbed.generic.util.object_resolver import ObjectResolver
 from lib_testbed.generic.util.common import mark_failed_recovery_attempt, compare_fw_versions
+from lib_testbed.generic.pod.pod import PodApi
 
 
 class ClientApi(DeviceApi):
@@ -34,9 +35,13 @@ class ClientApi(DeviceApi):
         self.start_class_handler = False
 
         name = self.get_nickname()
-        uptime_result = self.lib.get_stdout(self.lib.uptime(timeout=20), skip_exception=True)
-        if not uptime_result or not self.lib.check_wireless_client():
-            if self.recover_namespace_service():
+        if self.lib.check_wifi_netns():
+            wlan_iface = mgmt_check = self.get_wlan_iface()
+            self.restore_wifi_station(wlan_iface)
+        else:
+            mgmt_check = self.lib.get_stdout(self.lib.uptime(timeout=20), skip_exception=True)
+        if not mgmt_check:
+            if self.lib.check_wifi_netns() and self.recover_namespace_service():
                 return True
             assert self.lib.config.get("rpower"), (
                 f"{name} has no management access and rpower section " f"is missing in config"
@@ -78,9 +83,8 @@ class ClientApi(DeviceApi):
                 log.info(f"{name} successfully recovered")
 
         # save FW versions
-        version = self.version()
         allure_util = AllureUtil(request.config)
-        allure_util.add_allure_group_envs(f"client_{self.lib.name}", "version", version, f"file://{self.lib.name}")
+        version = allure_util.cache_client_value(self, "version")
         # example ver: "plume_rpi_client_image-1.4-66 [Wed Aug  7 17:30:52 UTC 2019]"
         # example ver: "plume_rpi_client__v1.6-86 [Thu Jan  9 13:36:01 UTC 2020]"
         # example ver: "plume_rpi_server__v1.6-85 [Thu Jan  9 12:54:38 UTC 2020]"
@@ -95,23 +99,38 @@ class ClientApi(DeviceApi):
         )
 
         # save HW info
-        hw_info = self.hw_info()
-        allure_util.add_allure_group_envs(f"client_{self.lib.name}", "hw_info", hw_info, f"file://{self.lib.name}")
+        allure_util.cache_client_value(self, "hw_info")
 
         if self.get_wifi_power_management() == "on":
             self.set_wifi_power_management("off")
 
     @parse_request
     def teardown_class_handler(self, request):
+        self.lib.clear_cached_properties()
         if not self.lib.device or not request or request.config.option.skip_init or not self.lib.main_object:
             super().teardown_class_handler(request)
             return
 
-        region = self.get_region(skip_exception=True)
-        AllureUtil(request.config).add_allure_group_envs(
-            f"client_{self.lib.name}", "region", region, f"file://{self.lib.name}"
-        )
+        AllureUtil(request.config).cache_client_value(self, "region")
         super().teardown_class_handler(request)
+
+    def restore_wifi_station(self, wlan_interface: str = None):
+        """Restore wireless interface to station mode"""
+        if not wlan_interface:
+            wlan_interface = self.get_wlan_iface()
+        if "mon" not in wlan_interface:
+            return
+        try:
+            self.wifi_station()
+        except Exception as err:
+            log.exception(err)
+            log.error(f"Can't restore wifi station for {self.get_nickname()} client. Rebooting a client...")
+            self.wait_available(timeout=120)
+            self.reboot()
+            self.wait_available(timeout=120)
+        finally:
+            # Clear cached properties
+            self.lib.clear_cached_properties()
 
     @staticmethod
     def initialize_device_lib(**kwargs):
@@ -236,6 +255,10 @@ class ClientApi(DeviceApi):
         """Return type of client based on config value"""
         return self.lib.config_type(**kwargs)
 
+    def get_netns(self):
+        """Return network namespace based on config value"""
+        return self.lib.get_netns()
+
     def eth_connect(
         self,
         pod,
@@ -295,6 +318,11 @@ class ClientApi(DeviceApi):
         eap=None,
         identity=None,
         password=None,
+        hotspot20: bool = False,
+        creds: list[dict[str, str]] = (),
+        node: PodApi | None = None,
+        node_band: str | None = None,
+        disable_mlo: bool | None = None,
         **kwargs,
     ):
         """Connect client(s) to network with wpa_supplicant"""
@@ -326,6 +354,11 @@ class ClientApi(DeviceApi):
             eap=eap,
             identity=identity,
             password=password,
+            hotspot20=hotspot20,
+            creds=creds,
+            node=node,
+            node_band=node_band,
+            disable_mlo=disable_mlo,
             **kwargs,
         )
         # some cases expect empty STDOUT for an expected connectivity failure, so clean it here
@@ -338,10 +371,31 @@ class ClientApi(DeviceApi):
 
     def disconnect(self, ifname=None, **kwargs):
         """Connect client(s) to network with wpa_supplicant"""
-        if not self.is_connected:
-            return ""
+        # wpa_supplicant can be running even when client isn't connected, so ignore is_connected
         result = self.lib.disconnect(ifname, **kwargs)
-        self.is_connected = result[0] != 0
+        self.is_connected = self.is_connected and result[0] != 0
+        return self.get_stdout(result, **kwargs)
+
+    def get_connected_bssids(self, ifname: str | None = None, **kwargs) -> set[str]:
+        """
+        Get BSSID(s) where client is associated and actively connected
+        """
+        result = self.lib.get_connected_bssids(ifname, **kwargs)
+        stdout = self.get_stdout(result, **kwargs)
+        prefix = "bssid="
+        if prefix in stdout:
+            bssid_line = [line for line in stdout.splitlines() if line.startswith(prefix)][0]
+            return set(bssid_line.removeprefix(prefix).split(","))
+        else:
+            return set()
+
+    def set_accepted_bssid(self, ifname: str | None = None, bssid: str = "", **kwargs) -> str:
+        """
+        Change which BSSID wpa_supplicant will be willing to associate with.
+
+        Client needs to be connected. Connect with any BSSID when bssid is empty string (clear bssid lock).
+        """
+        result = self.lib.set_accepted_bssid(ifname, bssid=bssid, **kwargs)
         return self.get_stdout(result, **kwargs)
 
     def start_dhcp_client(self, ifname="", cf=None, ipv4=True, ipv6=False, ipv6_stateless=False, timeout=20, **kwargs):
@@ -391,8 +445,9 @@ class ClientApi(DeviceApi):
     def stop_continuous_flood_ping(self, proc_id, file_path="/tmp/ping.log", **kwargs):
         return self.lib.stop_continuous_flood_ping(proc_id, file_path, **kwargs)
 
-    def start_continuous_ping(self, interface=None, file_path="/tmp/ping.log", wait="1", target="", interval=1,
-                              v6=False, **kwargs):
+    def start_continuous_ping(
+        self, interface=None, file_path="/tmp/ping.log", wait="1", target="", interval=1, v6=False, **kwargs
+    ):
         target = target if target else self.lib.get_ip_address_ping_check(ipv6=v6)
         return self.lib.start_continuous_ping(interface, file_path, wait, target, interval, v6, **kwargs)
 
@@ -474,7 +529,7 @@ class ClientApi(DeviceApi):
         response = self.lib.get_frequency(ifname, **kwargs)
         return self.get_stdout(response, **kwargs)
 
-    def create_ap(self, channel, ifname="", ssid="test", extra_param="", country=None, **kwargs):
+    def create_ap(self, channel, ifname="", ssid="test", extra_param="", country=None, band="2.4G", **kwargs):
         if country is None:
             if self.lib.config.get("loc_region"):
                 country = self.lib.config.get("loc_region")
@@ -484,7 +539,7 @@ class ClientApi(DeviceApi):
 
         # there is no country code like EU, so we need to switch do DE
         country = "DE" if country == "EU" else country
-        response = self.lib.create_ap(channel, ifname, ssid, extra_param, country=country, **kwargs)
+        response = self.lib.create_ap(channel, ifname, ssid, extra_param, country=country, band=band, **kwargs)
         return self.get_stdout(response, **kwargs)
 
     def disable_ap(self, ifname="", **kwargs):
@@ -533,6 +588,10 @@ class ClientApi(DeviceApi):
         response = self.lib.stop_mqtt_broker(**kwargs)
         return self.get_stdout(response, **kwargs)
 
+    def is_mqtt_broker_started(self, **kwargs) -> bool:
+        response = self.lib.is_mqtt_broker_started(**kwargs)
+        return True if response[0] == 0 else False
+
     def set_tb_nat(self, mode, **kwargs):
         """
         Set testbed's IPv6 NAT mode on testbed's server
@@ -548,6 +607,37 @@ class ClientApi(DeviceApi):
         response = self.lib.get_tb_nat(**kwargs)
         return self.get_stdout(response, **kwargs)
 
+    def set_bandwidth_limit(
+        self,
+        *values: int,
+        duration: int = 30,
+        repeats: int = 10,
+        interface: str | None = None,
+        queue_size: int | None = None,
+        **kwargs,
+    ) -> str:
+        """
+        Limit bandwidth on testbed server's `interface` to each of the `values` for ˙duration` seconds, `repeats` times.
+
+        Numbers in `values` specify bandwidth limit in megabits per second.
+
+        `duration` is in seconds, each of the limits in `values` will be active for that many seconds.
+
+        The whole cycle of limits in `values` will be repeated `repeats` times.
+
+        `interface` must be one of server's eth0.2xy WAN VLAN uplink interfaces, unless None. If None, WAN VLAN
+        interface to which gateway pod is connected will be used, or eth0.200, if gateway's uplink is unknown.
+
+        If `queue_size` is specified, it will be set to that value, in bytes.
+
+        You will probably want to run this in a separate thread, since the method blocks until the bandwidth limiting
+        finishes.
+        """
+        response = self.lib.set_bandwidth_limit(
+            *values, duration=duration, repeats=repeats, interface=interface, queue_size=queue_size, **kwargs
+        )
+        return self.get_stdout(response, **kwargs)
+
     def start_selenium_server(self, port=4444, session_timeout: int = 3600, **kwargs):
         response = self.lib.start_selenium_server(port, session_timeout=session_timeout, **kwargs)
         return self.get_stdout(response, **kwargs)
@@ -559,18 +649,6 @@ class ClientApi(DeviceApi):
     def recover_namespace_service(self, **kwargs):
         res = self.lib.recover_namespace_service(**kwargs)
         return False if res[0] else True
-
-    def get_stored_mac_address(self, iface="", **kwargs):
-        """Get stored MAC address to avoid ssh call. If not stored do ssh call"""
-        iface = iface if iface else self.get_wlan_iface(skip_exception=True)
-        iface = iface if iface else self.get_eth_iface(skip_exception=True)
-        assert iface, "No interface found"
-        client_mac = (
-            getattr(self.lib, f"{iface}_mac", None)
-            if getattr(self.lib, f"{iface}_mac", None)
-            else self.get_mac(iface, **kwargs)
-        )
-        return client_mac
 
     def get_ble_pair_token(self, serial_id, timeout=180, **kwargs):
         response = self.lib.get_ble_pair_token(serial_id, timeout, **kwargs)
@@ -622,30 +700,39 @@ class ClientApi(DeviceApi):
         response = self.lib.clear_adt(ifname, **kwargs)
         return self.get_stdout(response, **kwargs)
 
+    def move_iface_out_of_netns(self, **kwargs):
+        """Moves Wi-Fi iface out of network namespace by stopping its service"""
+        return self.lib.move_iface_out_of_network_namespace(**kwargs)
+
+    def get_wpa_supplicant_assoc_time(self) -> float | None:
+        """Get WPA-supplicant assoc time based on WPA-supplicant logs."""
+        return self.lib.get_wpa_supplicant_assoc_time()
+
     # PROPERTIES FOR STORED DATA
     @property
-    def mac(self):
-        # Cloud API requires lowercase only
-        return self.get_stored_mac_address().lower()
+    def mac(self) -> str:
+        return self.lib.mac
 
     @property
-    def type(self):
+    def eth_ifname(self) -> str:
+        return self.lib.eth_ifname
+
+    @property
+    def wlan_ifname(self) -> str:
+        return self.lib.wlan_ifname
+
+    @property
+    def ifname(self) -> str:
+        return self.lib.ifname
+
+    @property
+    def type(self) -> str:
         return self.config_type()
 
     @property
-    def nickname(self):
+    def nickname(self) -> str:
         return self.get_nickname()
 
     @property
-    def eth_ifname(self):
-        return self.get_eth_iface()
-
-    @property
-    def wlan_ifname(self):
-        return self.get_wlan_iface()
-
-    @property
-    def ifname(self):
-        if self.lib.device.config.get("eth"):
-            return self.get_eth_iface()
-        return self.get_wlan_iface()
+    def netns(self) -> str:
+        return self.get_netns()

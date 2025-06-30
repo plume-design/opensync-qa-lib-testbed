@@ -1,4 +1,5 @@
 """Dedicated library for "lib_testbed/generic/tools/rpower" tool purposes"""
+
 from lib_testbed.generic.rpower.rpowerlib import PowerControllerLib
 
 

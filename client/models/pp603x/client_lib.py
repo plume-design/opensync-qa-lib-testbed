@@ -1,7 +1,7 @@
 import time
 from lib_testbed.generic.util.base_lib import Iface
 from lib_testbed.generic.client.models.pp603x.client_tool import ClientTool
-from lib_testbed.generic.client.models.pod.client_lib import ClientLib as ClientLibGeneric
+from lib_testbed.generic.client.models.generic.client_lib import ClientLib as ClientLibGeneric
 
 
 class ClientLib(ClientLibGeneric):
@@ -57,8 +57,10 @@ class ClientLib(ClientLibGeneric):
         if bssid:
             connect_settings += f"uci set wireless.@wifi-iface[{interface_index}].bssid={bssid}; "
         if key_mgmt == "sae":
-            connect_settings += (f"uci set wireless.@wifi-iface[{interface_index}].sae=1; "
-                                 f"uci set wireless.@wifi-iface[{interface_index}].ieee80211w=2; ")
+            connect_settings += (
+                f"uci set wireless.@wifi-iface[{interface_index}].sae=1; "
+                f"uci set wireless.@wifi-iface[{interface_index}].ieee80211w=2; "
+            )
         if htmode:
             connect_settings += f"uci set wireless.wifi{interface_index}.htmode={htmode}; "
         if hwmode:
@@ -251,10 +253,6 @@ class ClientLib(ClientLibGeneric):
             result[1] = ""
         return result
 
-    # Skip this check since pod-client does not have namespace
-    def check_wireless_client(self):
-        return True
-
     def get_bit_rate(self, ifname, **kwargs):
         response = self.run_command(f"iwconfig {ifname} | grep 'Bit Rate' | awk '{{print $2}}'", **kwargs)
         return self.strip_stdout_result(response)
@@ -267,13 +265,95 @@ class ClientIface(Iface):
     def define_band_by_channel(channel, dut_band):
         if "2" in dut_band and channel in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
             return "2.4G"
-        elif "5" in dut_band and channel in [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128,
-                                             132, 136, 140, 144, 149, 153, 157, 161, 165]:
+        elif "5" in dut_band and channel in [
+            36,
+            40,
+            44,
+            48,
+            52,
+            56,
+            60,
+            64,
+            100,
+            104,
+            108,
+            112,
+            116,
+            120,
+            124,
+            128,
+            132,
+            136,
+            140,
+            144,
+            149,
+            153,
+            157,
+            161,
+            165,
+        ]:
             return "5G"
-        elif "6" in dut_band and channel in [1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61, 65, 69, 73,
-                                             77, 81, 85, 89, 93, 97, 101, 105, 109, 113, 117, 121, 125, 129, 133, 137,
-                                             141, 145, 149, 153, 157, 161, 165, 169, 173, 177, 181, 185, 189, 193, 197,
-                                             201, 205, 209, 213, 217, 221, 225, 229, 233]:
+        elif "6" in dut_band and channel in [
+            1,
+            5,
+            9,
+            13,
+            17,
+            21,
+            25,
+            29,
+            33,
+            37,
+            41,
+            45,
+            49,
+            53,
+            57,
+            61,
+            65,
+            69,
+            73,
+            77,
+            81,
+            85,
+            89,
+            93,
+            97,
+            101,
+            105,
+            109,
+            113,
+            117,
+            121,
+            125,
+            129,
+            133,
+            137,
+            141,
+            145,
+            149,
+            153,
+            157,
+            161,
+            165,
+            169,
+            173,
+            177,
+            181,
+            185,
+            189,
+            193,
+            197,
+            201,
+            205,
+            209,
+            213,
+            217,
+            221,
+            225,
+            229,
+            233,
+        ]:
             return "6G"
         assert False, f"Can not define band name for {channel} channel"
 
@@ -300,4 +380,3 @@ class ClientIface(Iface):
     @staticmethod
     def get_wireless_ifaces():
         return ["ath1", "ath0", "ath2"]
-

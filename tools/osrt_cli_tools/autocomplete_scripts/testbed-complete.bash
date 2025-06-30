@@ -22,7 +22,7 @@ _testbed_completion() {
 }
 
 _testbed_completion_setup() {
-    complete -o nosort -F _testbed_completion testbed
+    complete -F _testbed_completion testbed
 }
 
 _testbed_completion_setup;

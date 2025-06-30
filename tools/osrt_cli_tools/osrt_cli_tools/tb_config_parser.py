@@ -1,7 +1,7 @@
 """Testbed config serialization and deserialization utility.
 
 .. warning::
-    
+
     This utility code is supposed to be used only for autocomplete scripts. It will not update
     the cached config files automatically with the config file content change. The changes will
     only be updated when the dumping mechanism is triggered manually.

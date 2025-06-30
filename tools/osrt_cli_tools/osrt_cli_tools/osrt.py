@@ -7,16 +7,20 @@ import marshal
 from pathlib import Path
 from importlib.metadata import entry_points
 
-from osrt_cli_tools.utils import complete_testbeds, is_autocomplete
-
-from lib_testbed.generic.tools.osrt_cli_tools.osrt_cli_tools.utils import (
+from osrt_cli_tools.utils import (
     debug_option,
     json_option,
     disable_colors_option,
+    verbosity_option,
     prepare_logger,
     set_log_level,
+    set_log_verbosity,
+    complete_testbeds,
+    is_autocomplete,
     print_table,
 )
+
+from click_plugins import with_plugins
 
 if is_autocomplete():
     import click
@@ -31,6 +35,65 @@ else:
     click.rich_click.USE_MARKDOWN = True
     if is_ci():
         click.rich_click.COLOR_SYSTEM = None
+
+
+@click.command(name="tree")
+@click.pass_context
+def tree(ctx):
+    """Show the command tree of tools recursively.
+
+    This command might be helpful when searching for tool/command.
+    """
+    root_cmd = _CommandWrapper(ctx.find_root().command, ctx=ctx)
+    _print_tree(ctx, root_cmd)
+
+
+class _CommandWrapper:
+    def __init__(self, command, ctx, name=None):
+        """Represents command with a reference to the actual command and name.
+        Holds command name separatel, as sometimes names don't correspond to functions names,
+        e.g. cli() function for client tool.
+        """
+        self.command = command
+        self.__name = name
+        self.children = []
+        if isinstance(command, Group):
+            try:
+                for child in command.list_commands(ctx=ctx):
+                    self.children.append(_CommandWrapper(command.get_command(ctx, child), ctx=ctx, name=child))
+            except AttributeError:
+                pass  # non-group command does not have the .list_commands() method, so it will raise AttributeError
+
+    @property
+    def name(self):
+        """Get custom name/e.g. from entry points, fallback to function name/or decorator."""
+        if self.__name:
+            return self.__name
+        return self.command.name
+
+    def __repr__(self):
+        return f"<CommandWrapper for {self.name} {hex(id(self))}>"
+
+
+def _print_tree(ctx, command: _CommandWrapper, depth: int = 0, is_last_item: bool = False):
+    """Print command tree recursively."""
+    if depth == 0:
+        prefix = ""
+        tree_item = ""
+    else:
+        prefix = "│   "
+        tree_item = "└── " if is_last_item else "├── "
+
+    line = prefix * (depth - 1) + tree_item + command.name
+
+    doc = command.command.get_short_help_str(limit=120).split("\n")[0]
+
+    if doc:
+        line += " - {}".format(doc)
+
+    click.echo(line)
+    for i, child in enumerate(sorted(command.children, key=lambda x: x.name)):
+        _print_tree(ctx, child, depth=(depth + 1), is_last_item=(i == (len(command.children) - 1)))
 
 
 class OSRTGroup(Group):
@@ -61,19 +124,26 @@ class OSRTGroup(Group):
         return super().get_command(ctx, name)
 
 
+@with_plugins(entry_points(group="osrt_click_command_tree"))
 @click.group(cls=OSRTGroup, context_settings=dict(help_option_names=["-h", "--help"]))
 @debug_option
 @disable_colors_option
+@verbosity_option
 @click.pass_context
-def osrt(ctx, debug, disable_colors):
+def osrt(ctx, debug, disable_colors, verbosity):
     """OSRT toolset to control testbed clients, nodes, switch, power and cloud."""
     ctx.ensure_object(dict)
     if not ctx.obj.get("DEBUG"):
         ctx.obj["DEBUG"] = debug
+    if not ctx.obj.get("VERBOSITY"):
+        ctx.obj["VERBOSITY"] = verbosity
     if not ctx.obj.get("DISABLE_COLORS"):
         ctx.obj["DISABLE_COLORS"] = disable_colors
     if not is_autocomplete():
-        prepare_logger(ctx.obj["DEBUG"])
+        if ctx.obj.get("VERBOSITY"):
+            set_log_verbosity(ctx.obj.get("VERBOSITY"))
+        else:
+            prepare_logger(ctx.obj["DEBUG"])  # legacy
 
 
 @osrt.command
@@ -111,12 +181,12 @@ def shell(ctx, testbed_name):
             else:
                 click.secho("     TESTBED IS RESERVED BY SOMEONE ELSE!\n\n", bold=True, blink=True, fg="red", err=True)
 
-    args = ["/bin/bash"]
+    args = ["/usr/bin/env", "bash"]
     # if FRAMEWORK_CACHE_DIR is not set, assume the custom bashrc file is inside .venv
     docker_rcfile = os.path.join(os.environ.get("FRAMEWORK_CACHE_DIR", ".venv"), "bashrc")
     if os.path.isfile(docker_rcfile):
         args.extend(["--rcfile", docker_rcfile])
-    os.execvpe("/bin/bash", args, os.environ)
+    os.execvpe(args[0], args, os.environ)
 
 
 @osrt.command
@@ -165,15 +235,18 @@ def run(ctx, testbed_name, command):
 )
 @debug_option
 @json_option
-@click.option("--quiet", "-q", help="Silence logging. Overwrites --debug.", is_flag=True, default=False)
+@verbosity_option
+@click.option(
+    "--quiet", "-q", help="Silence logging. Overwrites --debug and -v (verbosity).", is_flag=True, default=False
+)
 @click.option(
     "--logfile",
     "-l",
     type=click.Path(exists=False, dir_okay=False, file_okay=True),
-    help="Store logs into file instead of printing to terminal.",
+    help="Store logs into file instead of printing to terminal. In addition to the default logger behavior.",
 )
 @click.pass_context
-def validate_locations(ctx, locations, schema, exclude, debug, json, quiet, logfile):
+def validate_locations(ctx, locations, schema, exclude, debug, json, verbosity, quiet, logfile):
     """Validate **LOCATIONS** config file/files.
 
     The argument **LOCATIONS** can either be a path to a directory with all locations, or a path
@@ -186,17 +259,27 @@ def validate_locations(ctx, locations, schema, exclude, debug, json, quiet, logf
     osrt validate-locations path/to/my-location.yaml
     ```
     """
+    import logging
+    from lib_testbed.generic.util.logger import log
+
     ctx.ensure_object(dict)
     if not ctx.obj.get("JSON"):
         ctx.obj["JSON"] = json
     if not ctx.obj.get("DEBUG"):
         ctx.obj["DEBUG"] = debug
-    prepare_logger(ctx.obj["DEBUG"])
-    import logging
+    if not ctx.obj.get("VERBOSITY"):
+        ctx.obj["VERBOSITY"] = verbosity
+    if not is_autocomplete():
+        if ctx.obj.get("VERBOSITY"):
+            set_log_verbosity(ctx.obj.get("VERBOSITY"))
+        elif ctx.obj.get("DEBUG"):
+            prepare_logger(ctx.obj["DEBUG"])  # legacy
+        else:
+            set_log_level(logging.INFO)
+
     import json
     import traceback
     import concurrent.futures
-    from lib_testbed.generic.util.logger import log
     from lib_testbed.generic.util.config import CONFIG_DIR, LOCATIONS_DIR
 
     if locations is None:
@@ -206,8 +289,6 @@ def validate_locations(ctx, locations, schema, exclude, debug, json, quiet, logf
     valid_files = []
     invalid_files = []
 
-    if not ctx.obj["DEBUG"]:
-        set_log_level(logging.INFO)
     if quiet:
         set_log_level(logging.CRITICAL)
     logging_handlers = logging.getLogger().handlers
@@ -221,7 +302,7 @@ def validate_locations(ctx, locations, schema, exclude, debug, json, quiet, logf
             schema_data = json.load(schema_file)
         log.info("✅ %s loaded successfully", schema)
     except Exception as exception:
-        log.error("Error loading json schema file: %s, Use --debug for more info", exception)
+        log.error("Error loading json schema file: %s, increse verbosity with -vv for more info", exception)
         log.debug("Traceback:\n%s", "".join(traceback.format_exception(exception)))
         sys.exit(1)
 
@@ -261,7 +342,7 @@ def validate_locations(ctx, locations, schema, exclude, debug, json, quiet, logf
                 valid_files.append(input_file)
         except Exception as exception:
             log.error(
-                "❌ An error occurred validating %s against the schema %s, use --debug for more information",
+                "❌ An error occurred validating %s against the schema %s, increase tool verbosity with -vv for more information.",
                 input_file,
                 schema_file.name,
             )

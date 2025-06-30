@@ -26,11 +26,12 @@ def _execute_tool_command(ctx, command_, *args, **kwargs):
 @click.group(context_settings=dict(help_option_names=["-h", "--help"]))
 @osrt_cli_tools.utils.debug_option
 @osrt_cli_tools.utils.json_option
+@osrt_cli_tools.utils.verbosity_option
 @osrt_cli_tools.utils.disable_colors_option
 @osrt_cli_tools.utils.dry_run_option
 @osrt_cli_tools.utils.timeout_option
 @click.pass_context
-def cli(ctx, debug, json, disable_colors, dry_run, timeout):
+def cli(ctx, debug, json, verbosity, disable_colors, dry_run, timeout):
     """OSRT server tool."""
     log.debug("Entering server tool context")
     if not sys.stdout.isatty():
@@ -40,6 +41,8 @@ def cli(ctx, debug, json, disable_colors, dry_run, timeout):
         ctx.obj["DEBUG"] = debug
     if not ctx.obj.get("JSON"):
         ctx.obj["JSON"] = json
+    if not ctx.obj.get("VERBOSITY"):
+        ctx.obj["VERBOSITY"] = verbosity
     if not ctx.obj.get("TIMEOUT"):
         ctx.obj["TIMEOUT"] = timeout
     if not ctx.obj.get("DRY_RUN"):
@@ -47,7 +50,10 @@ def cli(ctx, debug, json, disable_colors, dry_run, timeout):
     if not ctx.obj.get("DISABLE_COLORS"):
         ctx.obj["DISABLE_COLORS"] = disable_colors
     if not osrt_cli_tools.utils.is_autocomplete():
-        osrt_cli_tools.utils.prepare_logger(ctx.obj["DEBUG"])
+        if ctx.obj["VERBOSITY"]:
+            osrt_cli_tools.utils.set_log_verbosity(ctx.obj["VERBOSITY"])
+        else:
+            osrt_cli_tools.utils.prepare_logger(ctx.obj["DEBUG"])
 
 
 @cli.command(name="run")
@@ -133,6 +139,12 @@ def reboot(ctx):
 @click.option("--force", is_flag=True, help="Force operation.")
 @click.option("--version", type=click.STRING, help="Specify version.", default="stable", show_default=True)
 @click.option(
+    "--http-address",
+    type=click.STRING,
+    default=None,
+    help="Download image directly from provided HTTP server address.",
+)
+@click.option(
     "--mirror-url",
     type=click.STRING,
     default=None,
@@ -146,7 +158,7 @@ def reboot(ctx):
     show_default=True,
 )
 @click.pass_context
-def upgrade(ctx, fw_path, restore_cfg, force, version, download_locally, mirror_url):
+def upgrade(ctx, fw_path, restore_cfg, force, version, http_address, mirror_url, download_locally):
     """Upgrade OSRT server with FW from fw_path or download build version from artifactory."""
     restore_cfg = osrt_cli_tools.utils.bool_choices_to_bool(restore_cfg)
     download_locally = osrt_cli_tools.utils.bool_choices_to_bool(download_locally)
@@ -157,6 +169,7 @@ def upgrade(ctx, fw_path, restore_cfg, force, version, download_locally, mirror_
         restore_cfg=restore_cfg,
         force=force,
         version=version,
+        http_address=http_address,
         mirror_url=mirror_url,
         download_locally=download_locally,
     )
@@ -184,26 +197,24 @@ def dhcp_reservation(ctx):
     _execute_tool_command(ctx, "testbed_dhcp_reservation")
 
 
-@cli.command("tx-power-limit")
-@click.option(
-    "--state",
-    default="True",
-    type=click.Choice(choices=["True", "False"]),
-    show_default=True,
-    help="Enable or disable tx power limitation",
-)
-@click.option(
-    "--value",
-    default=None,
-    type=int,
-    show_default=False,
-    help="Limit tx power to value, in dBm",
-)
+@cli.command("tx-power-limit-set")
+@click.argument("state", type=click.Choice(choices=["enabled", "enable", "disable", "disabled"]))
+@click.argument("value", default=1, type=click.INT, required=False)
 @click.pass_context
 def limit_tx_power(ctx, state, value):
-    """Limit Wi-Fi Tx power on the devices in the testbed."""
-    state = True if state == "True" else False
+    """Limit Wi-Fi Tx power on the devices in the testbed.
+
+    Optionally provide **VALUE** in dBm when setting the Tx power enabled [defaults to 1].
+    """
+    state = True if state in ["enable", "enabled"] else False
     _execute_tool_command(ctx, "limit_tx_power", state=state, value=value)
+
+
+@cli.command("tx-power-limit-get")
+@click.pass_context
+def limit_tx_power_get(ctx):
+    """Get Wi-Fi Tx power setting for devices in the testbed."""
+    _execute_tool_command(ctx, "get_limit_tx_power")
 
 
 @cli.command("mqtt-broker-start")
@@ -227,6 +238,71 @@ def stop_mqtt_broker(ctx):
 def ssh_login_logs(ctx, last_hours, max_lines_to_print):
     """Get SSH login logs."""
     _execute_tool_command(ctx, "get_ssh_login_logs", last_hours=last_hours, max_lines_to_print=max_lines_to_print)
+
+
+@cli.command("wait")
+@click.option(
+    "--timeout",
+    default=5,
+    show_default=True,
+    help="Timeout in seconds.",
+)
+@click.pass_context
+def wait(ctx, timeout):
+    """Wait for server to be available."""
+    _execute_tool_command(ctx, "wait_available", timeout=timeout)
+
+
+@cli.command("bandwidth-limit-set")
+@click.argument("values", type=click.INT, nargs=-1, required=True)
+@click.option(
+    "--duration",
+    type=click.INT,
+    default=30,
+    show_default=True,
+    help="How long each of the VALUES limits will be active, in seconds",
+)
+@click.option(
+    "--repeats",
+    type=click.INT,
+    default=10,
+    show_default=True,
+    help="How many times to repeat the cycle through VALUES limits",
+)
+@click.option(
+    "--interface",
+    type=click.STRING,
+    default=None,
+    help="One of server's eth0.2xy WAN VLAN uplink interfaces. If unspecified, GW pod's uplink VLAN is used.",
+)
+@click.option(
+    "--queue-size",
+    type=click.INT,
+    default=None,
+    help="Queue size will be set to this value, in bytes, if specified",
+)
+@click.pass_context
+def set_bandwidth_limit(ctx, values, duration, repeats, interface, queue_size):
+    """Limit bandwidth on testbed server's --interface to each of the VALUES for --duration seconds, --repeats times.
+
+    Limits in VALUES are specified in Mbps. Requires server version newer than 3.0.48 / 2.0-208.
+
+    Example usage:
+    ```
+    server bandwidth-limit-set 100
+    server bandwidth-limit-set 50 500 5 --repeats 1
+    server bandwidth-limit-set 20 200 2 --duration 5
+    ```
+    """
+    _execute_tool_command(
+        ctx,
+        "set_bandwidth_limit",
+        *values,
+        duration=duration,
+        repeats=repeats,
+        interface=interface,
+        queue_size=queue_size,
+    )
 
 
 def get_bash_complete() -> Path:

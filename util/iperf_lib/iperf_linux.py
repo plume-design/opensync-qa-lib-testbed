@@ -26,7 +26,7 @@ class IperfLinuxCommon(IperfCommon):
         ps_cmd = "ps aux" if "Clients" == device.lib.device_type else "ps"
         pid_col_index = 1 if "Clients" == device.lib.device_type else 0
         # Preserve identifying part of command line for later, so that we don't kill a reused pid.
-        cmd_id = cmd.split(sep)[0]
+        cmd_id = cmd.split(sep)[0] + sep
         ps_res = device.lib.run_command(f'{ps_cmd} | grep -F "{cmd_id}"', timeout=10)
         # sometime SSH gets stuck here, so retry in such case
         if ps_res[0] == 137:
@@ -286,10 +286,10 @@ class IperfClientLinux(IperfLinuxCommon, IperfClientLib):
 
     def get_raw_iperf_result(self, timeout: int = None) -> str:
         if timeout is None:
-            timeout = self.duration + 10
+            # connect-timeout is set to 30 sec, so 5 sec more
+            timeout = self.duration + 35
         timeout_end = self.measurement_start_time + timedelta(seconds=timeout)
         log.info(f"Waiting for iperf results(ETA @{timeout_end})")
-        iperf_results = None
         # protection against infinite loop
         ps_cmd = "ps aux" if self.client.lib.device_type == "Clients" else "ps"
         while self.iperf_id and timeout_end > datetime.now():
@@ -301,6 +301,13 @@ class IperfClientLinux(IperfLinuxCommon, IperfClientLib):
             else:
                 log.warning("Iperf check command failed, trying again in 2 sec")
                 time.sleep(2)
+        else:
+            # in case we specified number of bytes, we might estimate timeout incorrectly, gently kill iperf to get some
+            # results in such case
+            if self.bytes_to_send:
+                log.warning("Timeout occurred, but iperf traffic did not end! Terminating ipref")
+                self.terminate_iperf()
+                time.sleep(5)
         iperf_results = self.client.lib.run_command(f"cat {self.iperf_output_file}")[1].strip()
         return iperf_results
 

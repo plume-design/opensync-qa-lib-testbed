@@ -1,10 +1,11 @@
 import hashlib
 import os
-import re
 import json
-import configparser
+import jproperties
 import logging
 
+from collections.abc import Iterable
+from typing import Literal
 from filelock import FileLock
 from allure_pytest.listener import AllureListener
 from allure_pytest.utils import allure_title
@@ -16,25 +17,35 @@ from lib_testbed.generic.util.common import BASE_DIR, CACHE_DIR, get_modified_pa
 from lib_testbed.generic.util.common import is_jenkins, SKIP_RESULT
 from lib_testbed.generic.util.logger import log, LOGGER_NAME, AllureLogger
 
-DEFAULT_SECTION = "Global"
-
 # Disable info logs for filelock module
 logging.getLogger("filelock").setLevel(logging.ERROR)
 
 
 class AllureUtil:
+    """Acts as a global, process-wide cache for information about testing environment.
+
+    Used for often needed information about cloud and testbed components that is relatively expensive to retrieve,
+    but doesn't (or at least shouldn't) change during the test run. The collected information also gets attached
+    to test reports.
+    """
+
+    # Global cache for testing environment information. Keys in the cache are always strings, while values
+    # can be either strings or dictionaries with the same restrictions.
+    _environment_info: dict[str, str | dict] = {}
+
     def __init__(self, config):
         self.config = config
-        self.option_config = config.option.config_name if "config_name" in config.option else None
+        option_config = config.option.config_name if "config_name" in config.option else None
         if location_file := getattr(config, "tb_config", {}).get("location_file"):
-            self.section = os.path.basename(location_file).split(".")[0]
-        elif self.option_config:
-            self.section = self.option_config
+            self.testbed = os.path.basename(location_file).split(".")[0]
+        elif option_config:
+            self.testbed = option_config
         else:
-            self.section = DEFAULT_SECTION
+            self.testbed = "<unknown>"
         self.lock_timeout = 120
         result_dir = self._get_results_dir()
         os.makedirs(result_dir, exist_ok=True)
+        self.cache_environment_value("config", self.testbed)
         # these lines are for debugging CI purposes, feel free to remove them
         job_name = os.environ.get("JOB_NAME", "not_jenkins").replace("/", "_")
         job_file_build_id = os.path.join(result_dir, job_name)
@@ -44,12 +55,10 @@ class AllureUtil:
                 job_file.write(f"{job_name}\n{build_url}\n")
 
     def _get_results_dir(self):
-        # this check for jenkins is temporary, should be removed in the future
-        if is_jenkins():
-            return os.path.join(BASE_DIR, "allure-results")
         report_dir = self.config.option.allure_report_dir
         if not report_dir:
-            report_dir = "%s/allure-results" % CACHE_DIR
+            # this check for jenkins is temporary, should be removed in the future
+            report_dir = os.path.join(BASE_DIR, "allure-results") if is_jenkins() else "%s/allure-results" % CACHE_DIR
         return report_dir
 
     def _get_properties_path(self):
@@ -61,20 +70,18 @@ class AllureUtil:
     def _get_lock_file(self):
         return f"{self._get_properties_path()}.lock"
 
-    def _read_config(self, config_parser):
-        properties_file = self._get_properties_path()
-        config_parser.read(properties_file)
+    def _read_properties(self, properties):
+        with open(self._get_properties_path(), "rb") as configfile:
+            properties.load(configfile, encoding="utf-8")
 
-    def _write_config(self, config_parser):
-        with open(self._get_properties_path(), "w") as configfile:
-            config_parser.write(configfile)
+    def _write_properties(self, properties):
+        with open(self._get_properties_path(), "wb") as configfile:
+            properties.store(configfile, encoding="utf-8")
 
     def _init(self):
-        config_parser = configparser.ConfigParser()
-        config_parser.clear()
-        config_parser.add_section(self.section)
-        self._write_config(config_parser)
-        return config_parser
+        # Clear the properties file first.
+        open(self._get_properties_path(), "w")
+        return self._init_and_read_properties()
 
     def init_categories(self):
         categories_path = os.path.join(self._get_results_dir(), "categories.json")
@@ -84,105 +91,20 @@ class AllureUtil:
                 fh.write(json.dumps(data))
 
     def init(self):
+        """Called by xdist autouse fixture, only in the main pytest process."""
         with FileLock(self._get_lock_file(), timeout=self.lock_timeout):
             if "allure_keep_env" not in self.config.option or not self.config.option.allure_keep_env:
                 self._init()
             else:
-                self._init_and_read_config()
+                self._init_and_read_properties()
             self.init_categories()
 
-    def _set_config(self, name, value):
-        config_parser = self._init_and_read_config()
-        try:
-            config_parser.set(self.section, self.get_option_name(name), value)
-        except configparser.NoSectionError as e:
-            log.warning(f"{e}, skip setting config: {name}")
-            return
-        self._write_config(config_parser)
-
-    def _init_and_read_config(self):
-        config_parser = configparser.ConfigParser()
-        try:
-            self._read_config(config_parser)
-            sections = config_parser.sections()
-            if self.section == DEFAULT_SECTION and sections:
-                self.section = sections[0]
-            if self.section not in sections:
-                config_parser.add_section(self.section)
-                self._write_config(config_parser)
-            config_parser.items(self.section)
-        except Exception:
-            log.exception("Recreate allure file for environment.properties")
-            config_parser = self._init()
-        return config_parser
-
-    def _get_environment(self, name):
-        config_parser = self._init_and_read_config()
-        try:
-            value = config_parser.get(self.section, self.get_option_name(name))
-        except configparser.NoOptionError:
-            value = None
-        except configparser.NoSectionError:
-            value = None
-        return value
-
-    def _get_environments(self):
-        config_parser = self._init_and_read_config()
-        try:
-            return list(config_parser.items(self.section))
-        except configparser.NoSectionError as e:
-            log.warning(f"{e}, skip getting environment variables")
-            return []
-
-    def get_option_name(self, name):
-        if not self.option_config or "," not in self.option_config or self.section not in self.option_config.split(","):
-            return name
-        config_idx = self.option_config.split(",").index(self.section)
-        return f"{name}_{config_idx}"
-
-    def get_environment(self, name):
-        with FileLock(self._get_lock_file(), timeout=self.lock_timeout):
-            config_parser = self._init_and_read_config()
-            try:
-                value = config_parser.get(self.section, self.get_option_name(name))
-            except configparser.NoOptionError:
-                value = None
-            except configparser.NoSectionError:
-                value = None
-            return value
-
-    def get_environments(self, all_sections=False):
-        with FileLock(self._get_lock_file(), timeout=self.lock_timeout):
-            config_parser = self._init_and_read_config()
-            try:
-                return list(config_parser.items()) if all_sections else list(config_parser.items(self.section))
-            except configparser.NoSectionError as e:
-                log.warning(f"{e}, skip getting environment variables")
-                return []
-
-    def add_environment(self, name, value, optional_suffix=None, warn_override=True):
-        if value in [None, ""]:
-            return
-        with FileLock(self._get_lock_file(), timeout=self.lock_timeout):
-            prev_value = self._get_environment(name)
-            # in case of config just add config files names. It's needed for CRF, FRV runs with multiple test beds
-            if name in ["config"] and prev_value:
-                value = f"{prev_value}, {value}" if value not in prev_value else prev_value
-            elif optional_suffix and prev_value and prev_value != value:
-                name = f"{name}_{optional_suffix}"
-                prev_value = self._get_environment(name)
-            if warn_override and prev_value and prev_value != value:
-                log.warning(f"Overriding: {name}, previous value: {prev_value}")
-            self._set_config(name, value)
-
-    def remove_environment(self, name):
-        with FileLock(self._get_lock_file(), timeout=self.lock_timeout):
-            config_parser = self._init_and_read_config()
-            try:
-                config_parser.remove_option(self.section, self.get_option_name(name))
-            except configparser.NoSectionError:
-                log.warning(f"No {self.section} section in allure environment")
-            self._write_config(config_parser)
+    def _init_and_read_properties(self):
+        if not os.path.exists(self._get_properties_path()):
+            return self._init()
+        properties = jproperties.Properties()
+        self._read_properties(properties)
+        return properties
 
     @staticmethod
     def get_allure_plugin(session_config):
@@ -191,83 +113,190 @@ class AllureUtil:
             if plugin.__class__.__name__ == "MyAllureListener":
                 return plugin
 
-    def add_allure_group_envs(self, group, name, value, root_url=None, fixed_value=False):  # noqa: C901
-        def add_value(data, key, value, fixed_value=False):
-            value = value.replace(", ", ",_").replace(": ", ":_")
-            for str in [", ", ": "]:
-                assert str not in key
-            if not data:
-                data = ""
-            env_values = self.get_value(data, key)
-            if not env_values:
-                # env does not exist, create it
-                delimiter = "<br>" if data else ""
-                data += f"{delimiter}<code>{key}: {value}</code>"
-                return data
-            # there is already a value, so we do not want to extend it, like FW version or model
-            if fixed_value:
-                return
-            if value in env_values.split(", "):
-                # value already set
-                return data
-            new_loc_data = []
-            envs = [e.removesuffix("</code>") for e in data.split("<br><code>")]
-            for env in envs:
-                if env.startswith(key):
-                    env = f"{env}, {value}"
-                if "://" not in env:
-                    env = "<code>" + env + "</code>"
-                new_loc_data.append(env)
-            return "<br>".join(new_loc_data)
+    def get_cached_environment_value(self, name: str) -> str | dict | None:
+        """Get information about testing environment from process-wide cache.
 
-        if value in [None, ""]:
-            log.info(f"Skip setting empty value for: {name}")
-            return
-        if not root_url:
-            root_url = "file://"
-        group_value = self.get_environment(group)
-        if not group_value:
-            # <br> tag works only first part of value is url link
-            # loc_value = add_value('', 'url', url)
-            group_value = root_url
-        group_value = add_value(group_value, name, value, fixed_value)
-        if group_value:
-            self.add_environment(group, group_value, warn_override=False)
+        Return `None` if `name` information hasn't been cached yet.
+        """
+        return self._environment_info.get(name)
 
-    def get_allure_group_env(self, group, name):
-        group_value = self.get_environment(group)
-        if not group_value:
-            return None
-        return self.get_value(group_value, name)
+    def cache_environment_value(self, name: str, value: str | dict) -> str | dict:
+        """Store information about testing environment in process-wide cache.
 
-    @staticmethod
-    def get_value(data, name):
-        if not data:
-            return None
-        envs = [e.removesuffix("</code>") for e in data.split("<br><code>")]
-        for env in envs:
-            if env.startswith(name):
-                return env.split(": ")[1]
+        Return the canonical cached value, which needs to get used to prevent races.
+        """
+        return self._environment_info.setdefault(name, value)
+
+    def _get_testbed_cache(self) -> dict:
+        return self._environment_info.setdefault("testbed", {}).setdefault(self.testbed, {})
+
+    def get_cached_testbed_value(self, name: str) -> str | dict | None:
+        """Get information about testbed from process-wide cache.
+
+        Return `None` if `name` information hasn't been cached yet.
+        """
+        return self._get_testbed_cache().get(name)
+
+    def cache_testbed_value(self, name: str, value: str | dict) -> str | dict:
+        """Store information about testbed in process-wide cache.
+
+        Return the canonical cached value, which needs to get used to prevent races.
+        """
+        return self._get_testbed_cache().setdefault(name, value)
+
+    def get_cached_node_value(self, node_id: str, name: Literal["model", "version", "region", "modules"]) -> str | None:
+        """Return cached model, version, region for node with `nide_id` serial or `None` if not yet in cache."""
+        nodes_cache = self._get_testbed_cache().setdefault("node", {})
+        for node_cache in nodes_cache.values():
+            if node_cache.get("serial") == node_id:
+                return node_cache.get(name)
         return None
 
-    @staticmethod
-    def parse_allure_env(allure_env: [str, str], values_to_parse: list = None) -> str:
-        """Parse all values from allure environment to readable text.
-        If specified values_to_parse consider only provided value names."""
-        env_name = allure_env[0]
-        env_values = allure_env[1].split("<br>")
-        parsed_values = list()
-        for env_value in env_values:
-            if (
-                env_value.startswith("file:")
-                or values_to_parse
-                and not any(value_to_parse in env_value for value_to_parse in values_to_parse)
-            ):
-                continue
-            parsed_values.append(re.sub(r"\<.*?\>", "", env_value))
-        allure_env_values = "\t".join(parsed_values)
-        parsed_allure_env = f"{env_name}: {allure_env_values}"
-        return parsed_allure_env
+    def cache_node_value(self, node, name: Literal["serial", "model", "version", "region", "modules"]) -> str | None:
+        """Return serial, model, version or region info about a node and cache it if not already cached.
+
+        `node` needs to be a `PodApi` object.
+        """
+        node_cache = self._get_testbed_cache().setdefault("node", {}).setdefault(node.nickname, {})
+        if name in node_cache:
+            return node_cache[name]
+        value = None
+        if name == "serial":
+            value = node.serial
+        elif name == "model":
+            value = node.model
+        elif name == "version":
+            value = node.version(skip_exception=True)
+        elif name == "region":
+            value = node.get_region(skip_exception=True)
+        elif name == "modules":
+            value = node.module_versions(skip_exception=True)
+        else:
+            raise ValueError(f"unsupported cached node info: '{name}'")
+        if value is not None:
+            # Node's firmware version and region can in theory change, but all tests
+            # must restore them in cleanup, so we can treat them as constant.
+            value = node_cache.setdefault(name, value)
+        return value
+
+    def cache_client_value(self, client, name: Literal["version", "hw_info", "region"]) -> str | None:
+        """Return version, hw_info or region info about a client and cache it if not already cached.
+
+        `client` needs to be a `ClientApi` object.
+        """
+        client_cache = self._get_testbed_cache().setdefault("client", {}).setdefault(client.nickname, {})
+        if name in client_cache:
+            return client_cache[name]
+        value = None
+        if name == "version":
+            value = client.version()
+        elif name == "hw_info":
+            value = client.hw_info()
+        elif name == "region":
+            value = client.get_region(skip_exception=True)
+        else:
+            raise ValueError(f"unsupported cached client info: '{name}'")
+        if value is not None:
+            # Client's region can change, but we capture it at the end of tests anyway, so treat it as constant.
+            value = client_cache.setdefault(name, value)
+        return value
+
+    def get_cached_cloud_value(self, name: str) -> str | None:
+        """Get information about cloud from process-wide cache.
+
+        Return `None` if `name` information hasn't been cached yet.
+        """
+        return self._environment_info.setdefault("cloud", {}).get(name)
+
+    def cache_cloud_value(self, cloud, name: str) -> str | None:
+        """Return deployment or version info about cloud and cache it if not already cached.
+
+        `cloud` needs to be a `CloudBase` object.
+        """
+        cloud_cache = self._environment_info.setdefault("cloud", {})
+        cloud_cache.setdefault("noc_url", cloud._config["noc_url"])
+        if name in cloud_cache:
+            return cloud_cache[name]
+        if name == "deployment":
+            cloud_info = {"deployment": cloud._config["deployment_id"]}
+        else:
+            from lib.util.common import get_cloud_version
+
+            cloud_info = get_cloud_version(cloud)
+            cloud_info["version"] = cloud_info.get("cloud_version", "")
+        for n, v in cloud_info.items():
+            cloud_cache.setdefault(n, v)
+        return cloud_cache.get(name)
+
+    def cache_web_value(self, location: str, name: str, value: str, root_url: str) -> str | None:
+        """Cache information about web location, if not already cached, and return it."""
+        location_cache = self._environment_info.setdefault("web", {}).setdefault(location, {})
+        if name in location_cache:
+            return location_cache[name]
+        return location_cache.setdefault(name, value)
+
+    def flatten_environment_info(self) -> dict[str, str]:
+        """
+        Return the complete cached testing environment info collected so far in a flattened `str->str` dict.
+
+        Dictionary typed values get prefixed with their parent keys, e.g.::
+
+            {'a': 'b', 'c': {'d': 'e', 'f': 'g'}}
+
+        would get converted to:
+
+            {'a': 'b', 'c.d': 'e', 'c.f': 'g'}
+
+        The returned dictionary can be serialized as a .properties file.
+        """
+        return dict(sorted(self._flatten_environment_info(self._environment_info, "")))
+
+    def _flatten_environment_info(self, info: dict, prefix: str) -> Iterable[tuple[str, str]]:
+        for name, value in info.items():
+            qualified_name = f"{prefix}.{name}" if prefix else name
+            if isinstance(value, dict):
+                for qn, v in self._flatten_environment_info(value, qualified_name):
+                    yield qn, v
+            elif not isinstance(value, str):
+                log.warning(f"AllureUtil: {qualified_name} contains unexpected value of type {type(value)}")
+                yield qualified_name, str(value)
+            else:
+                yield qualified_name, value
+
+    def summarize_environment_info(self) -> dict[str, object]:
+        """Return the most often used testing environment information collected so far.
+
+        Returns dict with the following items:
+            cloud_version: (str) cloud matrix version
+            deployment: (str) cloud deployment
+            node_models: (set[str]) all models of nodes cached so far
+            node_versions: (set[str]) all firmware versions of nodes cached so far
+            testbeds: (set[str]) all testbeds cached so far
+        """
+        summary = {}
+        summary["cloud_version"] = self.get_cached_cloud_value("version") or ""
+        summary["deployment"] = self.get_cached_cloud_value("deployment") or ""
+        summary["node_models"] = node_models = set()
+        summary["node_versions"] = node_versions = set()
+        summary["testbeds"] = testbeds = set()
+        config = self.get_cached_environment_value("config")
+        if config is not None:
+            testbeds.update(config.split(","))
+        for tb_name, tb_cache in self._environment_info.get("testbed", {}).items():
+            testbeds.add(tb_name)
+            for node_cache in tb_cache.get("node", {}).values():
+                if "model" in node_cache:
+                    node_models.add(node_cache["model"])
+                if "version" in node_cache:
+                    node_versions.add(node_cache["version"])
+        return summary
+
+    def save_cached_environment_info(self):
+        """Save testing environment information collected so far in Allure's environment.properties file."""
+        with FileLock(self._get_lock_file(), timeout=self.lock_timeout):
+            properties = self._init_and_read_properties()
+            properties.update(self.flatten_environment_info())
+            self._write_properties(properties)
 
 
 class MyAllureListener(AllureListener):
@@ -319,37 +348,6 @@ class MyAllureListener(AllureListener):
         return False
 
     @pytest.hookimpl(hookwrapper=True)
-    def pytest_runtest_makereport(self, item, call):
-        uuid = self._cache.get(item.nodeid)
-        if not self.allure_logger.get_test(uuid):
-            # self._cache.set(item.nodeid)
-            yield
-            return
-        yield from super().pytest_runtest_makereport(item, call)
-        self.step_idx = 1
-        if self.allure_logger._items[uuid].steps:  # removes duplicated log from test body, logs are attached per step
-            attachments = [x for x in self.allure_logger._items[uuid].attachments if x.name != "log"]
-            self.allure_logger._items[uuid].attachments = attachments
-
-    def add_test_result_parameter(self, parameters):
-        # sets additional test parameters showed in allure report
-        for name, value in parameters.items():
-            self.test_result_parameters[name] = value
-
-    @staticmethod
-    def get_allure_title(item):
-        title = allure_title(item)
-        if not title:
-            if mark := item.get_closest_marker("qase_title"):
-                title = mark.kwargs.get("title")
-        if title:
-            params = get_modified_params(item)
-            # Override allure title implementation to use parametrize id instead of parametrize value
-            return SafeFormatter().format(title, **{**item.funcargs, **params})
-        else:
-            return None
-
-    @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_setup(self, item):
         self.deregister_on_teardown = False
         # overwritten to add custom test parameters
@@ -365,6 +363,12 @@ class MyAllureListener(AllureListener):
         if title := self.get_allure_title(item):
             # Override allure title implementation to use parametrize id instead of parametrize value
             test_result.name = title
+
+        if qase_id_marker := item.get_closest_marker("qase_id"):
+            qase_id = qase_id_marker.kwargs.get("id")
+            # expose qase id in the output csv file (using description)
+            if qase_id:
+                test_result.description = str(qase_id)
 
         # Update allure test_result parameters with self.test_result_parameters
         test_result.parameters.extend(
@@ -415,6 +419,56 @@ class MyAllureListener(AllureListener):
         if item.get_closest_marker("rerun"):
             test_result.labels.extend([Label(name="feature", value="Rerun tests")])
         self.call_callbacks(test_result)
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_makereport(self, item, call):
+        uuid = self._cache.get(item.nodeid)
+        if not self.allure_logger.get_test(uuid):
+            # self._cache.set(item.nodeid)
+            yield
+            return
+        yield from super().pytest_runtest_makereport(item, call)
+        self.step_idx = 1
+        if self.allure_logger._items[uuid].steps:  # removes duplicated log from test body, logs are attached per step
+            attachments = [x for x in self.allure_logger._items[uuid].attachments if x.name != "log"]
+            self.allure_logger._items[uuid].attachments = attachments
+
+    @pytest.hookimpl
+    def pytest_runtest_logfinish(self, nodeid, location):
+        logger = logging.getLogger(LOGGER_NAME)
+        handler = next(h for h in logger.handlers if type(h) is AllureLogger)
+        # It's ok to clear buffer,
+        # because all logs which weren't attached within test-step are attached per `pytest_runtest_makereport()` hook
+        handler.clear_log_buffer()
+
+    @pytest.hookimpl
+    def pytest_sessionfinish(self, session, exitstatus):
+        """
+        Update testing environment information (testbed, cloud info) in Allure's environment.properties.
+
+        This relies on pytest_sessionfinish() getting called last in xdist master process, since that updates
+        testbed info ("config" key) with all the testbeds used.
+        """
+        allure_util = AllureUtil(session.config)
+        allure_util.save_cached_environment_info()
+
+    def add_test_result_parameter(self, parameters):
+        # sets additional test parameters showed in allure report
+        for name, value in parameters.items():
+            self.test_result_parameters[name] = value
+
+    @staticmethod
+    def get_allure_title(item):
+        title = allure_title(item)
+        if not title:
+            if mark := item.get_closest_marker("qase_title"):
+                title = mark.kwargs.get("title")
+        if title:
+            params = get_modified_params(item)
+            # Override allure title implementation to use parametrize id instead of parametrize value
+            return SafeFormatter().format(title, **{**item.funcargs, **params})
+        else:
+            return None
 
     def clean_callbacks(self):
         if self.callbacks and self.deregister_on_teardown:

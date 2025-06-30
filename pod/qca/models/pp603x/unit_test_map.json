@@ -29,7 +29,7 @@
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
-  "native-5.8.0": {
+  "native_5.8.0": {
     "proj-name": "build_attila_native_v5.8.0",
     "fn-prefix": "debugs-osync-qcaATTILA_QSDK11",
     "encryption": false,
@@ -41,7 +41,7 @@
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
-  "native-master": {
+  "native_master": {
     "proj-name": "build_attila_native_master",
     "fn-prefix": "debugs-osync-qcaATTILA_QSDK11",
     "encryption": false,

@@ -22,7 +22,7 @@ _reserve_completion() {
 }
 
 _reserve_completion_setup() {
-    complete -o nosort -F _reserve_completion reserve
+    complete -F _reserve_completion reserve
 }
 
 _reserve_completion_setup;

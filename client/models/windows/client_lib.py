@@ -1,7 +1,6 @@
 import re
 import time
 from collections import ChainMap
-from functools import partial
 from typing import List
 from time import sleep
 from ipaddress import IPv4Network
@@ -122,7 +121,7 @@ class ClientLib(ClientLibGeneric):
         """
 
         eth_info = {"eth": {}}
-        for iface_alias in self.get_eth_iface(force=True):
+        for iface_alias in self.get_eth_iface():
             get_ip_cmd = f'(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "{iface_alias}").IPAddress'
             eth_info["eth"][iface_alias] = {"eth": "true"}
             eth_info["eth"][iface_alias]["mac"] = self.get_mac(iface_alias)[1]
@@ -224,35 +223,22 @@ class ClientLib(ClientLibGeneric):
 
     def get_wlan_iface(self, **kwargs) -> str:
         """
-        Get all WLAN interfaces, if force=True get interface name directly from device
+        Get all WLAN interfaces
         Returns: (list) interfaces
 
         """
-        force = kwargs.pop("force", False)
-
-        if hasattr(self, "wlan_iface") and not force:
-            iface = self.wlan_iface
-        else:
-            primary_wifi_iface_details = self.iface.get_primary_wifi_iface_details()
-            self.wlan_iface = iface = primary_wifi_iface_details["name"]
-
+        primary_wifi_iface_details = self.iface.get_primary_wifi_iface_details()
+        iface = primary_wifi_iface_details["name"]
         return iface
 
     def get_eth_iface(self, **kwargs) -> List[str]:
         """
-        Get all eth interfaces if force=True get interface name directly from device
+        Get all eth interfaces
         Returns: (list) interfaces
 
         """
-        force = kwargs.pop("force", False)
         cmd_get_eth_interfaces = '(Get-NetAdapter).Name | Select-String -Pattern "Eth"'
-
-        if hasattr(self, "eth_iface") and not force:
-            iface = self.eth_iface
-        else:
-            iface = self.get_stdout(self.strip_stdout_result(self.run_command(cmd_get_eth_interfaces, **kwargs)))
-            self.eth_iface = iface
-
+        iface = self.get_stdout(self.strip_stdout_result(self.run_command(cmd_get_eth_interfaces, **kwargs)))
         return iface
 
     def join_ifaces(self, **kwargs):
@@ -406,7 +392,7 @@ class ClientLib(ClientLibGeneric):
         ret = self.run_command(cmd, **kwargs)
 
         if ipv4:
-            ipv4_granted = wait_for(partial(self.get_ip_address, ifname, "IPv4"), timeout=timeout + 20, tick=1.0)[0]
+            ipv4_granted = wait_for(lambda: self.get_ip_address(ifname, "IPv4"), timeout=timeout + 20, tick=1.0)[0]
             if not ipv4_granted:
                 ret[2] = "Unable to get IPv4"
             else:
@@ -415,7 +401,7 @@ class ClientLib(ClientLibGeneric):
             out = self.merge_result(out, ret)
 
         if ipv6:
-            ipv6_granted = wait_for(partial(self.get_ip_address, ifname, "IPv6"), timeout=timeout + 20, tick=1.0)[0]
+            ipv6_granted = wait_for(lambda: self.get_ip_address(ifname, "IPv6"), timeout=timeout + 20, tick=1.0)[0]
             if not ipv6_granted:
                 ret[2] = "Unable to get IPv6"
             else:
@@ -561,13 +547,13 @@ class ClientLib(ClientLibGeneric):
 
         output = self._connect_to_wlan(ssid)
         log.info("Waiting for connection established")
-        if not wait_for(partial(self._is_wifi_connected), 60, 5.0)[0]:
+        if not wait_for(lambda: self._is_wifi_connected(), 60, 5.0)[0]:
             return [1, "", "Client is not connected to WiFi"]
 
         if bssid:
             output = self.connect_client_to_expected_bssid(ssid=ssid, bssid=bssid)
 
-        if not wait_for(partial(self._is_gateway_reachable, ifname), 60, 5.0)[0]:
+        if not wait_for(lambda: self._is_gateway_reachable(ifname), 60, 5.0)[0]:
             return [1, "", "Default gateway is not reachable"]
 
         return output

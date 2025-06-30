@@ -1,6 +1,7 @@
 {
   "short-name": "PlumeV2",
   "s3-bucket": "PP203X",
+  "build-profile": "dev-debug",
   "0.2.0": {
     "proj-name": "build_caesar_v0.2",
     "fn-prefix": "openwrt-ipq806x-ipq40xx-ubi-root",
@@ -280,7 +281,7 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "legacy-master": {
+  "legacy_master": {
     "proj-name": "build_caesar_master",
     "fn-prefix": "openwrt-os-PIRANHA2_QSDK53-ap-fit",
     "encryption": true,
@@ -294,14 +295,14 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "legacy-native-master": {
+  "legacy_native_master": {
     "proj-name": "build_caesar_native_master",
     "fn-prefix": "openwrt-os-PIRANHA2_QSDK53_NATIVE-ap-fit",
     "encryption": true,
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "native-master": {
+  "native_master": {
     "proj-name": "build_caesar_sdk11_native_master",
     "fn-prefix": "qcaPIRANHA2_QSDK11_NATIVE_fit-norplusnand",
     "encryption": true,
@@ -315,9 +316,16 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "native-build_device_featurebranch": {
+  "native_build_device_featurebranch": {
     "proj-name": "build_device_featurebranch/caesar_sdk11_native",
     "fn-prefix": "qcaPIRANHA2_QSDK11_NATIVE_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "fbb": {
+    "proj-name": "build_device_featurebranch/caesar_sdk11",
+    "fn-prefix": "qcaPIRANHA2_QSDK11_fit-norplusnand",
     "encryption": true,
     "enc-suffix": "eim",
     "key-suffix": "key"

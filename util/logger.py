@@ -1,6 +1,7 @@
 """
 Logging module
 """
+
 import allure
 import json
 import logging
@@ -59,10 +60,14 @@ class AllureLogger(logging.Handler):
         """``emit`` is called every time a log is emitted thus it's easy to intercept them into the buffer."""
         self.step_log_buffer.append(self.format(record))
 
+    def clear_log_buffer(self):
+        """Clear log buffer"""
+        self.step_log_buffer = []
+
     def get_logs_and_clear_buffer(self) -> str:
         """Returns collected logs and clears an internal buffer"""
         logs = "\n".join((self.step_log_buffer))
-        self.step_log_buffer = []
+        self.clear_log_buffer()
         return logs
 
 
@@ -102,11 +107,13 @@ class MyLogger:
     WARNING = logging.WARNING
     INFO = logging.INFO
     DEBUG = logging.DEBUG
+    TRACE = 5
 
     def __init__(self):
         self.new_call = True
         self.last_attr = None
         self.new_line = True
+        logging.addLevelName(self.TRACE, "TRACE")
 
     def __getattr__(self, attr):
         orig_attr = self.get_orig_attr(attr)
@@ -123,6 +130,46 @@ class MyLogger:
             return hooked
         else:
             return orig_attr
+
+    def trace(self, msg, *args, **kwargs):
+        """Delegate a trace call to the underlying logger."""
+        self.log(self.TRACE, msg, *args, **kwargs)
+
+    def ensure_file_handler(self, logfile_dir=None):
+        """Add a new file handler if it doesn't already exist. Optionally provide custom logfile directory.
+        The logfile name will be autotestrunner-<timestamp>.log. If a file handler is already attached, do nothing."""
+        if logfile_dir is None:
+            if local_tmp := os.getenv("FRAMEWORK_CACHE_DIR"):
+                logfile_dir = local_tmp
+            else:
+                logfile_dir = tempfile.gettempdir()
+        if not any([isinstance(handler, logging.FileHandler) for handler in self.handlers]):
+            trace_log_path = os.path.join(logfile_dir, f"autotestrunner-{time.strftime("%Y%m%d-%H%M%S")}.log")
+            file_handler = logging.FileHandler(trace_log_path)
+            formatter = logging.Formatter("%(asctime)s.%(msecs)03d [%(levelname).4s] %(message)s", "%H:%M:%S")
+            file_handler.setFormatter(formatter)
+            self.info("Storing TRACE log in %s", trace_log_path)
+            self.addHandler(file_handler)
+
+    def set_default_log_levels(self):
+        """Set logger levels to defaults. Global logger level to TRACE, stream handler to INFO, allure step to INFO,
+        and file handler to TRACE."""
+        self.set_log_levels(console_level=self.INFO, allure_level=self.INFO, file_level=self.TRACE)
+
+    def set_log_levels(self, console_level=None, allure_level=None, file_level=None):
+        """Set custom logger levels. The defaults are console=INFO, allure=INFO, file=[no log level]."""
+        if console_level is None:
+            console_level = self.INFO
+        if allure_level is None:
+            allure_level = self.INFO
+        self.setLevel(self.TRACE)
+        for handler in self.handlers:
+            if isinstance(handler, logging.StreamHandler):  # note: FileHandler is a StreamHandler as well
+                handler.setLevel(console_level)
+            if isinstance(handler, AllureLogger):
+                handler.setLevel(allure_level)
+            if isinstance(handler, logging.FileHandler) and file_level:
+                handler.setLevel(file_level)
 
     def get_orig_attr(self, attr):
         if self.last_attr != attr:
@@ -216,6 +263,59 @@ class MyLogger:
 
 
 log: logging.Logger | object = MyLogger()
+
+
+class log_level:
+    """Set root console log level for context.
+
+    Usage - suppressing errors for context:
+
+    .. code-block::py
+
+        with log_level(logging.CRITICAL):
+            do_not_see_any_errors_here()
+
+    The function emitting errors will not be visible in logs.
+
+    The intention for this class is to silence expected errors while performing certain operation
+    within tools, e.g. ssh errors immediately after reboot - displaying them brings no added value
+    to the users, so this class can be used to silence them.
+    """
+
+    def __init__(self, level: int):
+        self.level = level
+        # with the assumption that all console handlers are the same level
+        self.console_handlers = self._get_console_handlers()
+        self._prev_log_level = None
+        if self.console_handlers:
+            self._prev_log_level = self.console_handlers[0].level
+
+    def _get_console_handlers(self):
+        root_logger = logging.getLogger()
+        console_handlers = [
+            hnd
+            for hnd in root_logger.handlers
+            if not isinstance(hnd, logging.FileHandler) and isinstance(hnd, logging.StreamHandler)
+        ]
+        if console_handlers:
+            return console_handlers
+        automation_logger = logging.getLogger("automation")
+        automation_handlers = [
+            hnd
+            for hnd in automation_logger.handlers
+            if not isinstance(hnd, logging.FileHandler) and isinstance(hnd, logging.StreamHandler)
+        ]
+        return automation_handlers
+
+    def __enter__(self):
+        if self.console_handlers:
+            log.trace("Entering console level %s", self.level)
+            [hnd.setLevel(self.level) for hnd in self.console_handlers]
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.console_handlers:
+            [hnd.setLevel(self._prev_log_level) for hnd in self.console_handlers]
+            log.trace("Exitted console level %s back to %s", self._prev_log_level, self.level)
 
 
 def _log_console(*args, **kwargs):
@@ -370,7 +470,31 @@ class LogCatcher:
         return self.loggers
 
     @classmethod
-    def attach_logs(cls, opensync_obj, configuration_name, failed=True, has_steps=False, scope=""):
+    def attach_logs(cls, thread_jobs: list, collected_objs: list, results_dict: dict):
+        """Wait for finish collecting logs by threads and attach them to allure report."""
+        from lib_testbed.generic.util.common import Results
+
+        # device_log_catcher waits up to 180 sec for pod to be online again, so this should be more than that
+        max_time = 300
+        start_time = time.time()
+        for job in thread_jobs:
+            exec_time = time.time() - start_time
+            timeout = max_time - exec_time if exec_time < max_time else 1
+            job.join(timeout=int(timeout))
+
+        resp_loggers = Results.get_sorted_results(results_dict, collected_objs, skip_exception=True)
+        for my_loggers in resp_loggers:
+            if not isinstance(my_loggers, list):
+                error = repr(my_loggers).replace("\\n", "\n")
+                log.error(f"[log_catcher] error occurred:\n{error}")
+        obj_loggers = [obj.log_catcher.loggers for obj in collected_objs if obj.log_catcher]
+        LogCatcher.attach_to_allure(obj_loggers)
+
+    @classmethod
+    def collect_logs_in_thread(
+        cls, opensync_obj: list, configuration_name: str, failed: bool = True, has_steps: bool = False, scope: str = ""
+    ) -> [list, list, dict]:
+        """Start collecting logs by threads for given opensync objects."""
         from lib_testbed.generic.util.common import Results
 
         for obj in opensync_obj:
@@ -379,10 +503,9 @@ class LogCatcher:
             if not hasattr(obj, "get_name"):
                 obj.get_name = LogCatcher.ModuleName(obj).get_name
 
-        jobs = []
+        thread_jobs = []
         results_dict = {}
-        objs = []
-        collecting_logs = False
+        collected_objs = []
         test_data = {
             "name": configuration_name,
             "failed": failed,
@@ -399,25 +522,23 @@ class LogCatcher:
                     and hasattr(obj.log_catcher, "cloud_base")
                     and obj.log_catcher.cloud_base
                     and id(obj) != id(obj.log_catcher.cloud_base)
-                ):
-                    # Don't call collect twice for userbase and custbase
+                ) or obj in collected_objs:
+                    # Don't call collect twice for the same object
                     continue
-                objs.append(obj)
+                collected_objs.append(obj)
                 new_test_data = test_data.copy()
                 name = obj.get_name()
                 if name.startswith("multi_") and name[len("multi_") :] in [
                     tmp_obj.get_name() for tmp_obj in opensync_obj
                 ]:
                     new_test_data.update({"skip_collect": True})
-                elif test_data["failed"] and not collecting_logs:
+                elif test_data["failed"]:
                     nickname = _obj.get_nickname() if hasattr(_obj, "get_nickname") else ""
                     if not nickname:
                         nickname = _obj.get_name() if hasattr(_obj, "get_name") else ""
                     log.info(f"[{nickname}] Collecting logs in scope {scope}...")
-                    collecting_logs = True
                 if not obj.log_catcher:
                     continue
-                # obj.log_catcher.get_all(*args)
                 thread = threading.Thread(
                     target=Results.call_method,
                     args=(
@@ -431,23 +552,8 @@ class LogCatcher:
                     daemon=True,
                 )
                 thread.start()
-                jobs.append(thread)
-
-        # device_log_catcher waits up to 180 sec for pod to be online again, so this should be more than that
-        max_time = 300
-        start_time = time.time()
-        for job in jobs:
-            exec_time = time.time() - start_time
-            timeout = max_time - exec_time if exec_time < max_time else 1
-            job.join(timeout=int(timeout))
-
-        resp_loggers = Results.get_sorted_results(results_dict, objs, skip_exception=True)
-        for my_loggers in resp_loggers:
-            if not isinstance(my_loggers, list):
-                error = repr(my_loggers).replace("\\n", "\n")
-                log.error(f"[log_catcher] error occurred:\n{error}")
-        obj_loggers = [obj.log_catcher.loggers for obj in objs if obj.log_catcher]
-        LogCatcher.attach_to_allure(obj_loggers)
+                thread_jobs.append(thread)
+        return thread_jobs, collected_objs, results_dict
 
     @staticmethod
     def attach_to_allure(loggers_list):
@@ -592,7 +698,7 @@ def setup_xdist_logger(config, log_level):
         )
         # Configure logging
         logger.addHandler(console_handler)
-        logger.setLevel(log_level)
+        console_handler.setLevel(log_level)
 
         if config_name:
             log.info("Worker: `%s` is assigned to config: `%s`", worker_id, full_config_name)

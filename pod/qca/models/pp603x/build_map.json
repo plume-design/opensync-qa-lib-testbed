@@ -1,6 +1,7 @@
 {
   "short-name": "ATTILA",
   "s3-bucket": "Attila",
+  "build-profile": "dev-debug",
   "master": {
     "proj-name": "build_attila_master",
     "fn-prefix": "qcaATTILA_QSDK11_fit-norplusemmc",
@@ -8,7 +9,7 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "native-master": {
+  "native_master": {
     "proj-name": "build_attila_native_master",
     "fn-prefix": "qcaATTILA_QSDK11_NATIVE_fit-norplusemmc",
     "encryption": true,
@@ -64,9 +65,23 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "native-5.8.0": {
+  "native_5.8.0": {
     "proj-name": "build_attila_native_v5.8.0",
     "fn-prefix": "qcaATTILA_QSDK11_NATIVE_fit-norplusemmc",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "6.6.0": {
+    "proj-name": "build_attila_v6.6.0",
+    "fn-prefix": "qcaATTILA_QSDK11_fit-norplusemmc",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "7.0.0": {
+    "proj-name": "build_attila_v7.0.0",
+    "fn-prefix": "qcaATTILA_QSDK11_fit-norplusemmc",
     "encryption": true,
     "enc-suffix": "eim",
     "key-suffix": "key"
@@ -78,9 +93,16 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "native-build_device_featurebranch": {
+  "native_build_device_featurebranch": {
     "proj-name": "build_device_featurebranch/attila-native",
     "fn-prefix": "qcaATTILA_QSDK11_NATIVE_fit-norplusemmc",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "fbb": {
+    "proj-name": "build_device_featurebranch/attila",
+    "fn-prefix": "qcaATTILA_QSDK11_fit-norplusemmc",
     "encryption": true,
     "enc-suffix": "eim",
     "key-suffix": "key"

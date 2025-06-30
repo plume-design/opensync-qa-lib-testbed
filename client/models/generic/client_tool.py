@@ -1,8 +1,9 @@
+import json
+
 from typing import TYPE_CHECKING, Literal
 
+from lib_testbed.generic.pod.pod import Pod, Pods
 from lib_testbed.generic.util.logger import log
-from lib_testbed.generic.pod.pod import Pod
-from lib_testbed.generic.util import config
 
 
 class ClientTool:
@@ -64,6 +65,7 @@ class ClientTool:
                 info_txt += f'  802.11ac = {winfo["802.11ac"]}\n'
                 info_txt += f'  802.11ax = {winfo["802.11ax"]}\n'
                 info_txt += f'  802.11ax (6E) = {winfo["6e"]}\n'
+                info_txt += f'  802.11be = {winfo["802.11be"]}\n'
         if "bt" in info:
             for bt, info in info["bt"].items():
                 info_txt += f"bt: {bt}\n"
@@ -97,12 +99,6 @@ class ClientTool:
         be deployed to client.
         """
         return self.lib.deploy(**kwargs)
-
-    def ep(self, command, **kwargs):
-        """<stop|start|restart> Control IxChariot endpoint on client(s)"""
-        if command not in ("stop", "start", "restart"):
-            raise ValueError("Wrong parameter value")
-        return self.lib.run_command(f"{self.lib.get_tool_path()}/wifi endpoint {command}", retry=False, **kwargs)
 
     def wifi_winfo(self, ifname="", **kwargs):
         """Display client(s) wireless information
@@ -157,9 +153,9 @@ class ClientTool:
         else:
             pod_name = pod_or_port
             port_alias = None
-        kwargs = {"config": self.lib.config, "multi_obj": False, "nickname": pod_name}
-        pod_obj = Pod(**kwargs)
-        pod = pod_obj.resolve_obj(**kwargs)
+        pod_kwargs = {"config": self.lib.config, "multi_obj": False, "nickname": pod_name}
+        pod_obj = Pod(**pod_kwargs)
+        pod = pod_obj.resolve_obj(**pod_kwargs)
         return self.lib.eth_connect(
             pod,
             port_alias=port_alias,
@@ -195,6 +191,8 @@ class ClientTool:
         password=None,
         global_params=None,
         net_params=None,
+        hotspot20=False,
+        creds="[]",
         node_name=None,
         node_band=None,
         **kwargs,
@@ -219,62 +217,20 @@ class ClientTool:
         password (str): password used for EAP authentication.
         global_params: extra wpa_supplicant config global parameters
         net_params: extra wpa_supplicant config network parameters
-        node_name: testbed node name to associate with (requires cloud access)
-        node_band: testbed node band to associate with (requires cloud access, e.g.: 2.4G, 5G, 5GL, 5GU, 6G)
+        hotspot20: Use Hotspot 2.0 for network selection. Add creds to specify selection criteria and parameters
+        creds: List of JSON encoded wpa_supplicant cred config sections
+        node_name: testbed node name to associate with (requires node management access)
+        node_band: testbed node band to associate with (requires node management access, e.g.: 2.4G, 5G, 5GL, 5GU, 6G)
         """
-
-        def _get_bssid_from_node_name():
-            if bssid:
-                log.warning("BSSID already specified, ignoring node name argument")
-                return bssid
-
-            node_id = None
-            for node in self.lib.config.get("Nodes"):
-                if node["name"] != node_name:
-                    continue
-                node_id = node["id"]
-                break
-            if not node_id:
-                log.warning(
-                    f"Requested node name {node_name} not found in the testbed config," f" ignoring node name argument"
-                )
-                return
-
-            # as HW related tools loads only location config, we need to load deployment
-            loc_deployment = config.get_deployment(self.lib.config)
-            deployment_cfg = config.load_file(config.find_deployment_file(loc_deployment))
-            self.lib.config.update(deployment_cfg)
-
-            try:
-                from lib.cloud.custbase import CustBase
-
-                custbase = CustBase(self.lib.config)
-            except ModuleNotFoundError:
-                log.warning("Custbase module not found, ignoring node_name argument")
-                return
-            custbase.initialize()
-            node_bssids = custbase.get_node_home_ap_bssids(node_id=node_id, group_into=dict)
-            if node_band and node_band in node_bssids:
-                return node_bssids[node_band]
-            # get the fastest band or the closest one to requested (5G -> 5GL/5GU)
-            _node_band = node_band[0] if node_band else node_band
-            for band_name in ["6G", "5GU", "5GL", "5G", "2.4G"]:
-                if not _node_band and band_name in node_bssids:
-                    return node_bssids[band_name]
-                if _node_band and _node_band in band_name and band_name in node_bssids:
-                    return node_bssids[band_name]
-            log.warning(f"No BSSID found for requested {band_name}")
-
         key_mgmt = [m.strip() for m in key_mgmt.split(",")] if key_mgmt else None
         e_gl_param = global_params.replace(":", "=") if global_params else ""
         e_net_param = net_params.replace(":", "=") if net_params else ""
-
-        if node_band and not node_name:
-            return [71, "", f"Node name not specified, while node band is set to {node_band}"]
-
-        # get node bssid from the cloud
+        creds = json.loads(creds)
+        node = None
         if node_name:
-            bssid = _get_bssid_from_node_name()
+            pod_kwargs = {"config": self.lib.config, "multi_obj": False, "nickname": node_name}
+            node_obj = Pod(**pod_kwargs)
+            node = node_obj.resolve_obj(**pod_kwargs)
 
         return self.lib.connect(
             ssid,
@@ -294,6 +250,10 @@ class ClientTool:
             password=password,
             e_gl_param=e_gl_param,
             e_net_param=e_net_param,
+            hotspot20=hotspot20,
+            creds=creds,
+            node=node,
+            node_band=node_band,
             **kwargs,
         )
 
@@ -354,20 +314,31 @@ class ClientTool:
         This is only possible for a specific clients."""
         return self.lib.client_to_pod(**kwargs)
 
-    def create_ap(self, channel, ifname="", ssid="test", extra_param="", timeout=120, dhcp=False, **kwargs):
+    def create_ap(
+        self,
+        channel,
+        ifname="",
+        ssid="test",
+        extra_param="",
+        timeout=120,
+        dhcp=False,
+        country="US",
+        band="5G",
+        **kwargs,
+    ):
         """Start hostapd on the client. Make sure to stop it at the end."""
-        return self.lib.create_ap(int(channel), ifname, ssid, extra_param, int(timeout), dhcp, **kwargs)
+        return self.lib.create_ap(int(channel), ifname, ssid, extra_param, int(timeout), dhcp, country, band, **kwargs)
 
     def disable_ap(self, ifname="", **kwargs):
         """Stop hostapd on the client"""
         return self.lib.disable_ap(ifname, **kwargs)
 
     def get_target_version(self, version: Literal["stable", "latest"]) -> str:
-        """Retrieves the actual version for client from artifactory for specified "stable" or "latest"."""
+        """Retrieves the actual version for client for specified "stable" or "latest"."""
         return self.lib.get_target_version(version=version)
 
     def upgrade(self, fw_path=None, restore_cfg=True, force=False, version=None, restore_files=None, **kwargs):
-        """Upgrade device with FW from fw_path or download build version from the artifactory
+        """Upgrade client device firmware
 
         You can also pick FW version based on the latest or stable release."""
         results = self.lib.upgrade(fw_path, restore_cfg, force, version=version, **kwargs)
@@ -387,7 +358,30 @@ class ClientTool:
 
     def limit_tx_power(self, state=True, value=None, **kwargs):
         """Limit Wi-Fi Tx power on the devices in the testbed"""
-        return self.lib.limit_tx_power(state, value, **kwargs)
+        ret = self.lib.limit_tx_power(state, value, **kwargs)
+        if state is False and "Limiting TX power was not enabled" not in ret[1]:
+            # remove created script on nodes otherwise we need to wait till the upgrade to erase it
+            pod_kwargs = {"config": self.lib.config, "multi_obj": True}
+            pods_obj = Pods(**pod_kwargs)
+            pods = pods_obj.resolve_obj(**pod_kwargs)
+            opensync_path = pods.get_opensync_path()[0]
+            pods.run(f"rm {opensync_path}/scripts/start.d/89_txpower.sh", skip_exception=True)
+            log.info("Rebooting pods to apply changes in start.d")
+            pods.reboot()
+            pods.wait_available(timeout=180)
+        return ret
+
+    def get_limit_tx_power(self, **kwargs):
+        """Return current Wi-Fi Tx power setting."""
+        return self.lib.get_tx_power_limit(**kwargs)
+
+    def set_bandwidth_limit(self, *values, duration=30, repeats=10, interface=None, queue_size=None, **kwargs):
+        """
+        Limit bandwidth on testbed server's `interface` to each of the `values` for ˙duration` seconds, `repeats` times.
+        """
+        return self.lib.set_bandwidth_limit(
+            *values, duration=duration, repeats=repeats, interface=interface, queue_size=queue_size, **kwargs
+        )
 
     def start_simulate_client(
         self, device_to_simulate, ifname="", ssid=None, psk=None, bssid=None, fake_mac=None, force=False
@@ -462,3 +456,7 @@ class ClientTool:
     def get_ssh_login_logs(self, last_hours: int = 1, max_lines_to_print: int = 100, **kwargs) -> list:
         """Get SSH login logs."""
         return self.lib.get_ssh_login_logs(last_hours, max_lines_to_print, **kwargs)
+
+    def wait_available(self, timeout=5, **kwargs):
+        """Wait for device(s) to become available"""
+        return self.lib.wait_available(int(timeout), **kwargs)

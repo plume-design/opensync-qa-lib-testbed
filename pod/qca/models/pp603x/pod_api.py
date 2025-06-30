@@ -1,5 +1,7 @@
 from lib_testbed.generic.util.common import compare_fw_versions
 from lib_testbed.generic.pod.generic.pod_api import PodApi as PodApiGeneric
+from lib_testbed.generic.util.common import wait_for
+from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.request_handler import parse_request
 
 
@@ -10,7 +12,10 @@ class PodApi(PodApiGeneric):
         self.override_version_specific_ifnames()
 
     def override_version_specific_ifnames(self) -> None:
-        none_ver = self.version()
+        ret, none_ver = wait_for(lambda: self.version(), timeout=60, tick=5)
+        if not ret:
+            log.error("Cannot check node FW version, overriding interfaces names")
+            none_ver = "100.0.0.0"
         if compare_fw_versions(none_ver, "6.0.0.0", ">"):
             self.lib.capabilities.device_capabilities["interfaces"]["backhaul_ap"] = {
                 "24g": "b-24",

@@ -22,7 +22,7 @@ _rpower_completion() {
 }
 
 _rpower_completion_setup() {
-    complete -o nosort -F _rpower_completion rpower
+    complete -F _rpower_completion rpower
 }
 
 _rpower_completion_setup;

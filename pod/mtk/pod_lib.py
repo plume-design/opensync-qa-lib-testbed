@@ -7,6 +7,13 @@ from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from lib_testbed.generic.pod.generic.pod_lib import PodLib as PodLibGeneric
 
 MANAGER_RESTART_TIMEOUT = 80  # default for DM Manager, and other non-SM Managers
+RE_PATTERN_HNAT_FLOW = re.compile(
+    r"(.*bytes=(?P<bytes>[^|]+))?"
+    r"(.*packets=(?P<packets>[^|]+))?"
+    r"(.*index=(?P<index>[^|]+))?"
+    r"(.*state=(?P<state>[^|]+))?"
+    r"(.*\btype=\b(?P<type>[^|]+))?"
+)
 
 
 class PodLib(PodLibGeneric):
@@ -134,68 +141,6 @@ class PodLib(PodLibGeneric):
         self.wait_available(timeout=120)
         return result
 
-    # optional
-    def get_tx_power(self, interface, **kwargs):
-        """
-        Get current Tx power in dBm
-        Args:
-            interface: (str) Wireless interface
-
-        Returns: raw output [(int) ret, (std) std_out, (str) str_err]
-
-        """
-        self.last_cmd["command"] = "unknown"
-        self.last_cmd["name"] = "unknown"
-        # Tx power doesn't appear in iwconfig
-        return [0, "", ""]
-
-    # MTK doesn't support manipulate of Tx power:
-    # root@opensync:~# iwconfig rai0 txpower 11dbm
-    # Error for wireless request "Set Tx Power" (8B26) :
-    #     SET failed on device rai0 ; Operation not supported.
-    # optional
-    def decrease_tx_power_on_all_ifaces(self, percent_ratio, **kwargs):
-        """
-        Decrease value of Tx power on the all home_ap, bhaul interfaces
-        Args:
-            percent_ratio: (int) Percent ratio from 0 to 100
-
-        Returns:
-
-        """
-        self.last_cmd["command"] = "unknown"
-        self.last_cmd["name"] = "unknown"
-        return [0, "", ""]
-
-    # optional
-    def increase_tx_power_on_all_ifaces(self, percent_ratio, **kwargs):
-        """
-        Increase value of Tx power on the all home_ap, bhaul interfaces
-        Args:
-            percent_ratio: (int) Percent ratio from 0 to 100
-
-        Returns:
-
-        """
-        self.last_cmd["command"] = "unknown"
-        self.last_cmd["name"] = "unknown"
-        return [0, "", ""]
-
-    # optional
-    def set_tx_power(self, tx_power, interfaces=None, **kwargs):
-        """
-        Set current Tx power in dBm
-        Args:
-            interfaces: (str) or (list) Name of wireless interfaces
-            tx_power: (int) Tx power in dBm.
-
-        Returns:
-
-        """
-        self.last_cmd["command"] = "unknown"
-        self.last_cmd["name"] = "unknown"
-        return [0, "", ""]
-
     def check_traffic_acceleration(
         self,
         ip_address,
@@ -301,6 +246,92 @@ class PodLib(PodLibGeneric):
                 status = True
             elif tcp_or_udp is True and expected_protocol == 17:  # udp
                 status = True
+
+        return status
+
+    @staticmethod
+    def parse_hnat_flows(hnat_dump: str, ip_addresses: list) -> list:
+        # parse ipv6 addresses
+        for i, ip_address in enumerate(ip_addresses):
+            if ":" not in ip_address:
+                continue
+            ip_address = common_util.get_full_ipv6_address(ip_address)
+            parsed_ipv6_address = ""
+            # IPv6 address for hnat flows need to be parsed in 4 groups: 20010ee2:170499ff:00000000:224b21d0
+            for group_id, ip_address_group in enumerate(ip_address.split(":")):
+                group_id += 1
+                if group_id % 2:
+                    parsed_ipv6_address += ip_address_group
+                else:
+                    parsed_ipv6_address += f"{ip_address_group}:"
+            parsed_ipv6_address = parsed_ipv6_address.rstrip(":")
+            ip_addresses[i] = parsed_ipv6_address
+
+        connection_flow_list = list()
+        for connection_flow in hnat_dump.splitlines():
+            if any(ip_address in connection_flow for ip_address in ip_addresses):
+                parsed_flow = re.match(RE_PATTERN_HNAT_FLOW, connection_flow).groupdict()
+                connection_flow_list.append(parsed_flow)
+        return connection_flow_list
+
+    def get_connection_flows_hnat(self, ip_addresses: list, **kwargs) -> list:
+        response = self.run_command("cat /sys/kernel/debug/hnat/all_entry | grep state=BIND", **kwargs)
+        nf_conntrack_dump = self.get_stdout(response, skip_exception=True)
+        return self.parse_hnat_flows(nf_conntrack_dump, ip_addresses)
+
+    def check_traffic_acceleration_hnat(
+        self,
+        ip_address,
+        expected_protocol=6,
+        multicast=False,
+        flow_count=1,
+        flex=False,
+        map_t=False,
+        dumps=5,
+        hnat_dump_file: str = None,
+        **kwargs,
+    ) -> bool:
+        """
+        Check traffic was accelerated
+        Args:
+            ip_address: (list) IP addresses to check
+            expected_protocol: (int) expected protocol id. 6 for TCP, 17 for UDP
+            multicast: (bool) True to check for acceleration of multicast traffic
+            flow_count: (int) minimum number of expected accelerated flows (connections)
+            flex: (bool) True to check for acceleration of Flex traffic
+            map_t: (bool): True if checking acceleration of MAP-T traffic
+            dumps: (int): How many traffic dumps / samples to check
+            hnat_dump_file: (str) Path to /sys/kernel/debug/hnat/all_entry dump file -
+            if provided then consider this file instead of collecting acceleration data
+            **kwargs:
+
+        Returns: bool()
+
+        """
+        parsed_connections_dump = list()
+        if not hnat_dump_file:
+            for i in range(dumps):
+                connection_flows = self.get_connection_flows_hnat(ip_address, **kwargs)
+                parsed_connections_dump.extend(connection_flows)
+                time.sleep(4)
+        else:
+            hnat_dump = self.get_stdout(self.run_command(f"cat {hnat_dump_file}"))
+            parsed_connections_dump.extend(self.parse_hnat_flows(hnat_dump, ip_address))
+
+        if parsed_connections_dump:
+            log.info(
+                f"Found {len(parsed_connections_dump)} accelerated flows for {ip_address} ip addresses\n"
+                f"{common_util.json_dump(parsed_connections_dump)}"
+            )
+
+        status = False
+        match expected_protocol:
+            case 6:  # There should be at least two accelerated flows for TCP protocol
+                if len(parsed_connections_dump) > 2:
+                    status = True
+            case 17:  # There should be at least one accelerated flow for UDP protocol
+                if len(parsed_connections_dump) > 1:
+                    status = True
 
         return status
 
@@ -452,6 +483,16 @@ class PodLib(PodLibGeneric):
                         flex=flex,
                         map_t=map_t,
                         nf_conntrack_dump_file=acc_dump_file,
+                    )
+                case "hnat":
+                    acceleration_status &= self.check_traffic_acceleration_hnat(
+                        ip_address=ip_address,
+                        expected_protocol=expected_protocol,
+                        multicast=multicast,
+                        flow_count=flow_count,
+                        flex=flex,
+                        map_t=map_t,
+                        hnat_dump_file=acc_dump_file,
                     )
                 case _:
                     raise OpenSyncException(

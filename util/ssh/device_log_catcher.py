@@ -205,10 +205,6 @@ class DeviceLogCatcher(LogCatcher):
                 ),
                 "syslog",
             )
-            iwconfig = (
-                self.obj.get_stdout(self.obj.run_command("iwconfig", skip_logging=True), skip_exception=True),
-                "iwconfig",
-            )
             ip_a = self.obj.get_stdout(self.obj.run_command("ip a", skip_logging=True), skip_exception=True), "ip_a"
             uptime = (
                 self.obj.get_stdout(self.obj.run_command("uptime", skip_logging=True), skip_exception=True),
@@ -222,12 +218,20 @@ class DeviceLogCatcher(LogCatcher):
                 self.obj.get_wpa_supplicant_file(lines=10000, extension="conf", timeout=60, skip_logging=True),
                 "wpa_supplicant_conf",
             )
-            if hasattr(self.obj, "wlan_iface"):
-                iface = self.obj.wlan_iface
-            elif hasattr(self.obj, "eth_iface"):
-                iface = self.obj.eth_iface
+            wlan_iface = None
+            if self.obj.__dict__.get("wlan_ifname"):
+                iface = wlan_iface = self.obj.wlan_ifname
+            elif self.obj.__dict__.get("eth_ifname"):
+                iface = self.obj.eth_ifname
             else:
                 iface = None
+            if wlan_iface:
+                iw_config = (
+                    self.obj.get_stdout(self.obj.wifi_winfo(ifname=wlan_iface, skip_logging=True), skip_exception=True),
+                    "iw_config",
+                )
+            else:
+                iw_config = ("", "")
             if iface:
                 dhcp_v4_leases = (
                     self.obj.get_stdout(
@@ -248,7 +252,7 @@ class DeviceLogCatcher(LogCatcher):
             for command_dump in [
                 dmesg,
                 syslog,
-                iwconfig,
+                iw_config,
                 ip_a,
                 uptime,
                 wpa_supplicant_log,

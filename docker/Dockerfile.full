@@ -19,13 +19,29 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 ENV JAVA_HOME /usr/lib/jvm/java-8-openjdk-amd64/
 RUN export JAVA_HOME
 
+# -- Install allure
+ARG allure_checksum="8f89bfe5e4b0a33c967ce3bb8bab92f23d89d0722fbb29b734f5b11fe6133d53"
+ARG allure_tarball="/var/cache/allure/allure-commandline-2.31.0.zip"
+RUN --mount=type=cache,target=/var/cache/allure \
+    sha256sum --check --status 2>/dev/null <<< "$allure_checksum  $allure_tarball" \
+    || wget https://repo.maven.apache.org/maven2/io/qameta/allure/allure-commandline/2.31.0/allure-commandline-2.31.0.zip -O $allure_tarball \
+    && sha256sum --check --status 2>/dev/null <<< "$allure_checksum  $allure_tarball" \
+    && unzip $allure_tarball && mv allure-* allure && mv allure /opt/
+ENV ALLURE_GEN_FILE /opt/allure/bin/allure-gen
+COPY allure-gen ${ALLURE_GEN_FILE}
+RUN chmod a+x ${ALLURE_GEN_FILE}
+ENV ALLURE_SHOW_FILE /opt/allure/bin/allure-show
+COPY allure-show ${ALLURE_SHOW_FILE}
+RUN chmod a+x ${ALLURE_SHOW_FILE}
+ENV PATH "/opt/allure/bin:${PATH}"
+
 # -- Install firefox
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     eatmydata add-apt-repository ppa:mozillateam/ppa
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    eatmydata apt update && eatmydata apt install -y -t 'o=LP-PPA-mozillateam' firefox
+    eatmydata apt update && eatmydata apt install -y -t 'o=LP-PPA-mozillateam' --no-install-recommends firefox
 
 # Disable CORS
 RUN \
@@ -39,34 +55,13 @@ RUN \
     echo 'pref("security.fileuri.strict_origin_policy", false);' >> "$JS_FILE"
 
 # -- Install GeckoDriver
-ARG geckodriver_checksum="79b2e77edd02c0ec890395140d7cdc04a7ff0ec64503e62a0b74f88674ef1313"
+ARG geckodriver_checksum="0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04"
 ARG geckodriver_tarball="/var/cache/geckodriver/geckodriver.tgz"
 RUN --mount=type=cache,target=/var/cache/geckodriver \
     sha256sum --check --status 2>/dev/null <<< "$geckodriver_checksum  $geckodriver_tarball" \
-    || wget "https://github.com/mozilla/geckodriver/releases/download/v0.34.0/geckodriver-v0.34.0-linux64.tar.gz" -O $geckodriver_tarball \
+    || wget "https://github.com/mozilla/geckodriver/releases/download/v0.36.0/geckodriver-v0.36.0-linux64.tar.gz" -O $geckodriver_tarball \
     && sha256sum --check <<< "$geckodriver_checksum  $geckodriver_tarball" \
     && tar zxf $geckodriver_tarball -C /usr/bin/
-
-# -- Install Jmeter
-ARG jmeter_checksum="f68efc17fe060f698c48a6abe2599a933927486bda2924dbe14c74895318ddde"
-ARG jmeter_tarball="/var/cache/jmeter/jmeter.tgz"
-RUN --mount=type=cache,target=/var/cache/jmeter \
-    sha256sum --check --status 2>/dev/null <<< "$jmeter_checksum  $jmeter_tarball" \
-    || wget --no-check-certificate https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.6.3.tgz -O $jmeter_tarball \
-    && sha256sum --check <<< "$jmeter_checksum  $jmeter_tarball" \
-    && tar xf $jmeter_tarball -C /opt \
-    && mv /opt/apache-jmeter-5.6.3 /opt/jmeter \
-    && ln -s /opt/jmeter/bin/jmeter /usr/local/bin/jmeter
-
-# -- Install Jmeter plugins as needed
-ARG jmeter_plugins_manager_checksum="eb5996293465d908a17b809acf8e914682840d06f58eaee18f6cdc34507f921f"
-ARG jmeter_plugins_manager_tarball="/var/cache/jmeter/jmeter-plugins-manager-1.8.jar"
-RUN --mount=type=cache,target=/var/cache/jmeter \
-    sha256sum --check --status 2>/dev/null <<< "$jmeter_plugins_manager_checksum  $jmeter_plugins_manager_tarball" \
-    || wget http://search.maven.org/remotecontent?filepath=kg/apc/jmeter-plugins-manager/1.8/jmeter-plugins-manager-1.8.jar -O $jmeter_plugins_manager_tarball \
-    && sha256sum --check <<< "$jmeter_plugins_manager_checksum  $jmeter_plugins_manager_tarball" \
-    && cp $jmeter_plugins_manager_tarball /opt/jmeter/lib/ext/jmeter-plugins-manager-1.8.jar
-RUN java -cp /opt/jmeter/lib/ext/jmeter-plugins-manager-1.8.jar org.jmeterplugins.repository.PluginManagerCMDInstaller
 
 # -- Install Databricks Dependencies
 ARG databricks_checksum="bc4163aefff3bed05bcbe96ca293020ac647341d8012d39d3107cd278185295c"

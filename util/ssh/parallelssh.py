@@ -3,10 +3,13 @@ import io
 import errno
 import shlex
 import stat
+import tempfile
 from subprocess import Popen, PIPE, STDOUT, TimeoutExpired
 import threading
 import psutil
+import hashlib
 from subprocess import getoutput as getout
+import shutil
 import sys
 import select
 
@@ -55,6 +58,7 @@ class SSHHostInfo(HostInfo):
         self.sshpass = sshpass
         self.name = name
         self.opts = opts
+        self.temp_dir = tempfile.gettempdir()
         if not self.name:
             self.name = str(threading.current_thread().ident)
 
@@ -75,7 +79,7 @@ class SSHHostInfo(HostInfo):
                 " -o StrictHostKeyChecking=no"
                 " -o UserKnownHostsFile=/dev/null"
                 " -o ForwardAgent=yes"
-                " -o HostKeyAlgorithms=+ssh-dss,ssh-rsa,ssh-ed25519"
+                " -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519"
                 f" -o ProxyCommand='{proxy_str}'"
             )
         return proxy
@@ -95,19 +99,36 @@ class SSHHostInfo(HostInfo):
             proxy = str(self.chained_host_info).split(":")[0]
             if "@" in proxy:
                 proxy = proxy.split("@")[1]
-        prefix = "/tmp/.mux"
-        max_addr_length = 90 - (len(prefix) + 1 + len(self.name) + 1 + 1 + len(proxy))
-        multiplex_cmd = (f" -o ControlMaster=auto -o ControlPersist=yes "
-                         f"-o ControlPath={prefix}_{self.name}_{self.get_short_addr(max_addr_length)}_{proxy}")
-        if max_addr_length < 0:
-            raise Exception(f"Control path too long: {multiplex_cmd}")
+        prefix = f"{self.temp_dir}/.mux."
+        # temp may be shared between users so to avoid
+        # permission and path clashes, factor in user id
+        uid = os.getuid()
+        data = f"{uid}_{self.name}_{self.get_short_addr(256)}_{proxy}"
+        # hashing means the path length is kept short, even
+        # for long hostnames, etc. md5 should be good enough
+        # while staying short too
+        suffix = hashlib.md5(bytes(data, "utf-8")).hexdigest()
+        path = prefix + suffix
+        # unix socket domain paths are limited by the
+        # sun_path[108] in sockaddr
+        # however ssh itself uses extra suffix of ".<16
+        # chars>" for its internal purposes, see
+        # openssh-portable/mux.c muxserver_listen()
+        max_len = 108 - (1 + 16)
+        path_len = len(path)
+        if path_len > max_len:
+            print(
+                f"warning: can't multiplex ssh, path '{path}' too long: {path_len} > {max_len}, expect slow operation"
+            )
+            return ""
+        multiplex_cmd = f" -o ControlMaster=auto -o ControlPersist=yes -o ControlPath={path}"
         return multiplex_cmd
 
     def replace_ssh_config(self):
         """Include ssh config file to set up multiplexing
         Options included in config file: ControlMaster, ControlPath and ControlPersist
         """
-        ssh_bin_path = f"/tmp/ssh_config/{self.name}_{self.get_short_addr()}"
+        ssh_bin_path = f"{self.temp_dir}/ssh_config/{self.name}_{self.get_short_addr()}"
         if not os.path.exists(ssh_bin_path):
             try:
                 os.makedirs(ssh_bin_path)
@@ -118,7 +139,8 @@ class SSHHostInfo(HostInfo):
         # TODO: remove bin_ssh_path after command is executed
         config_ssh = os.path.join(BASE_DIR, "lib_testbed", "generic", "util", "ssh", "config", "config")
         ssh_bin = os.path.join(ssh_bin_path, "ssh")
-        ssh_bin_body = f'/usr/bin/ssh -F {config_ssh} "$@"'
+        ssh_real_bin = shutil.which("ssh")
+        ssh_bin_body = f'{ssh_real_bin} -F {config_ssh} "$@"'
         # check first if the file has proper content, updating it over and over does not make sense
         update = True
         try:
@@ -176,7 +198,7 @@ class SSHHostInfo(HostInfo):
 
         options["keys"] = (
             " -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
-            " -o HostKeyAlgorithms=+ssh-dss,ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group1-sha1"
+            " -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group1-sha1"
             " -o PubkeyAcceptedKeyTypes=+ssh-rsa"
         )
 
@@ -356,7 +378,7 @@ def execute_commands(command_dict, timeout=EXECUTE_CMD_TIMEOUT, **kwargs):
         stdin = sys.stdin.readlines()
         stdin = "".join(stdin)
     for node, command in command_dict.items():
-        log.debug(
+        log.trace(
             "Executing command against device '%s', timeout=%s, cmd='%s', extra args=%s", node, timeout, command, kwargs
         )
         retval, stdout, stderr = execute_command(dev_name=node, cmd=command, stdin=stdin, timeout=timeout, **kwargs)
@@ -369,7 +391,7 @@ def execute_commands(command_dict, timeout=EXECUTE_CMD_TIMEOUT, **kwargs):
         stderr = stderr.decode() if isinstance(stderr, bytes) else stderr
         if "sshpass: not found" in stderr:
             log.error(stderr)
-        log.debug("Command returned exit code=%s, stdout='%s', stderr='%s'", retval, stdout, stderr)
+        log.trace("Command returned exit code=%s, stdout='%s', stderr='%s'", retval, stdout, stderr)
         results[node] = [retval, stdout, stderr]
     return results
 

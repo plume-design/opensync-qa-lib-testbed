@@ -10,7 +10,10 @@ class PodApi(PodApiGeneric):
         self.override_version_specific_ifnames()
 
     def override_version_specific_ifnames(self) -> None:
-        none_ver = self.version()
+        try:
+            none_ver = self.version()
+        except Exception:
+            none_ver = "100.0.0.0"
         if compare_fw_versions(none_ver, "6.0.0.0", ">"):
             self.lib.capabilities.device_capabilities["interfaces"]["backhaul_ap"] = {
                 "24g": "b-24",

@@ -1,4 +1,5 @@
 import atexit
+import inspect
 import re
 import datetime
 import pytest
@@ -17,9 +18,11 @@ def test_simple_set(with_force, ssh_mock, cli_runner):
                 "",
             )
         ]
-        * 6
+        * 10
     )
-    result = cli_runner.invoke(reserve.set_, [".", "1", "--force"] if with_force else [".", "1"], obj={})
+    result = cli_runner.invoke(
+        reserve.set_, [".", "1", "--skip-rpower", "--force"] if with_force else [".", "1", "--skip-rpower"], obj={}
+    )
     last_cmd = call_history[-1][1]["cmd"]  # this command is supposed to contain the reservation row (echo "...")
     echo_cmd = re.findall(r"echo\s+\".*\"\s+\|", last_cmd)[0].lstrip('echo "').rstrip('" |')
     columns = echo_cmd.split(":::")
@@ -153,7 +156,7 @@ def test_reserve_set_human_readable(ssh_mock, cli_runner, reservation_time):
         ]
         * 10
     )
-    result = cli_runner.invoke(reserve.set_, [".", reservation_time], obj={"DEBUG": True})
+    result = cli_runner.invoke(reserve.set_, [".", "--skip-rpower", reservation_time], obj={"DEBUG": True})
     assert result.exit_code == 0
     res_end = call_history[-1][1]["cmd"].split(":::")[3]
     res_end_dt = datetime.datetime.fromisoformat(res_end)
@@ -173,3 +176,27 @@ def test_reserve_set_human_readable(ssh_mock, cli_runner, reservation_time):
             assert 10 * 60 - 100 < (res_end_dt - datetime.datetime.now(datetime.UTC)).total_seconds() < 10 * 60 + 100
         case _:
             raise AssertionError("Not supported test parameter!")
+
+
+def test_reserve_old_version_warning(mock_opensync_testbed, ssh_mock, cli_runner, monkeypatch):
+    registered = []
+
+    def mocked_register(*args, **kwargs):
+        registered.append(*args, **kwargs)
+
+    monkeypatch.setattr(atexit, "register", mocked_register)
+    ssh_mock(
+        sequence=[
+            (
+                0,
+                "QA/Automation/atr_dev_verification-8:::drun:etc-docker-jenkins-slaveb42e994426d78:::"
+                "2024-08-02T08:37:44.647341+00:00:::2024-08-08T12:09:14.953311+00:00:::3000000000000.0.0:::False:::msg",
+                "",
+            )
+        ]
+        * 15
+    )
+    cli_runner.invoke(reserve.cli, ["get"])
+    assert len(registered) == 1
+    source = inspect.getsource(registered[0])
+    assert "YOU MIGHT BE USING OUTDATED VERSION OF RESERVELIB!" in source

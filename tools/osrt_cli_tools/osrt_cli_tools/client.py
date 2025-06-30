@@ -231,19 +231,22 @@ def _ip_addressing_params_to_flags(ipv4: str, ipv6: str) -> tuple[bool, bool, bo
 @click.group(context_settings=dict(help_option_names=["-h", "--help"]))
 @osrt_cli_tools.utils.debug_option
 @osrt_cli_tools.utils.json_option
+@osrt_cli_tools.utils.verbosity_option
 @osrt_cli_tools.utils.disable_colors_option
 @osrt_cli_tools.utils.dry_run_option
 @osrt_cli_tools.utils.timeout_option
 @click.pass_context
-def cli(ctx, debug, json, disable_colors, dry_run, timeout):
+def cli(ctx, debug, json, verbosity, disable_colors, dry_run, timeout):
     """OSRT client tool: manage, connect and disconnect testbed clients.
 
     **CLIENTS** is the client/clients to run the command against. Can be one of the following:
-    [<client_name>[,...] | all | wifi | eth | bt ].
+    `[<client_name>[,...] | all | wifi | eth | bt ]`.
     All commands are executed against all available clients by default. Some commands only
     get executed on given type of clients, e.g. eth-connect is only executed on Ethernet clients.
     Additionally, **CLIENTS** can be only filtered set of clients, e.g. `osrt-client run uptime wifi,bt`
     will limit the command to be executed on all Wifi and Bluetooth clients, and not on Ethernet clients.
+    The **CLIENTS** argument can be a name of a single client, as well as a comma-separated list of clients.
+    For example `client connect w1,w2` will issue a connect command to both w1 and w2 WiFi clients.
 
     Some commands require a single **CLIENT** name to be provided, e.g. interactive ssh
     session can only be opened against a single client: `osrt-client ssh w1`.
@@ -256,6 +259,8 @@ def cli(ctx, debug, json, disable_colors, dry_run, timeout):
         ctx.obj["DEBUG"] = debug
     if not ctx.obj.get("JSON"):
         ctx.obj["JSON"] = json
+    if not ctx.obj.get("VERBOSITY"):
+        ctx.obj["VERBOSITY"] = verbosity
     if not ctx.obj.get("TIMEOUT"):
         ctx.obj["TIMEOUT"] = timeout
     if not ctx.obj.get("DRY_RUN"):
@@ -264,7 +269,10 @@ def cli(ctx, debug, json, disable_colors, dry_run, timeout):
         ctx.obj["DISABLE_COLORS"] = disable_colors
     if not osrt_cli_tools.utils.is_autocomplete():
         # this saves a lot of time - skip logger initialization in autocomplete
-        osrt_cli_tools.utils.prepare_logger(ctx.obj["DEBUG"])
+        if ctx.obj.get("VERBOSITY"):
+            osrt_cli_tools.utils.set_log_verbosity(ctx.obj["VERBOSITY"])
+        else:
+            osrt_cli_tools.utils.prepare_logger(ctx.obj["DEBUG"])
 
 
 @cli.command(name="list")
@@ -290,20 +298,25 @@ def _reserve_and_execute_against_tb(
     if not isinstance(clients, list):
         clients = _process_clients(tb_name=tb_name, value=clients)
 
-    reservation_obj = reserve.get_reserve_object(tb_name, json=ctx.obj["JSON"])
-    dry_run, skip_reservation = ctx.obj["DRY_RUN"], ctx.obj["SKIP_RESERVATION"]
+    reservation_obj = reserve.get_reserve_object(tb_name, json=ctx.obj.get("JSON", False))
+    dry_run, skip_reservation = ctx.obj.get("DRY_RUN", False), ctx.obj.get("SKIP_RESERVATION", False)
     results, reservation_status, reserved = None, None, True
     if not skip_reservation:
         if not dry_run:
-            log.debug("Reserving testbed %s", tb_name)
-            reservation_status = reservation_obj.reserve_test_bed()
-            if not reservation_status["status"]:
-                click.secho(
-                    f"Could not obtain reservation for testbed {tb_name}.",
-                    err=True,
-                    fg="red" if not ctx.obj.get("DISABLE_COLORS") else None,
-                )
-                reserved = False
+            current_reservation_status = reservation_obj.get_reservation_status()
+            if current_reservation_status.get("busyByMe"):
+                # no need to unreserve testbed, status is reserved already
+                skip_reservation, reserved = True, True
+            else:
+                log.debug("Reserving testbed %s", tb_name)
+                reservation_status = reservation_obj.reserve_test_bed()
+                if not reservation_status["status"]:
+                    click.secho(
+                        f"Could not obtain reservation for testbed {tb_name}.",
+                        err=True,
+                        fg="red" if not ctx.obj.get("DISABLE_COLORS") else None,
+                    )
+                    reserved = False
         else:
             click.secho(f"DRY-RUN: Reserving testbed {tb_name}")
     else:
@@ -315,7 +328,7 @@ def _reserve_and_execute_against_tb(
     if reserved:
         try:
             if not dry_run:
-                log.info("Testbed %s reserved succesfully", tb_name)
+                log.info("Testbed %s reserved successfully", tb_name)
                 log.debug("Reservation status: %s", reservation_status)
                 if command_ != "start_simulate_client":
                     clients_obj = get_client_object(clients, tb_name)
@@ -581,13 +594,25 @@ def scan(ctx, clients, ifname, params, flush):
 @click.option("--global-params", type=click.STRING, default=None, help="Extra wpa_supplicant config global parameters.")
 @click.option("--net-params", type=click.STRING, default=None, help="Extra wpa_supplicant config network parameters.")
 @click.option(
-    "--node-name", type=click.STRING, default=None, help="Testbed node name to associate with (requires cloud access)."
+    "--hotspot20",
+    is_flag=True,
+    default=False,
+    help="Use Hotspot 2.0 for network selection. Add --creds to specify selection criteria and parameters",
+)
+@click.option(
+    "--creds", type=click.STRING, default="[]", help="List of JSON encoded wpa_supplicant cred config sections"
+)
+@click.option(
+    "--node-name",
+    type=click.STRING,
+    default=None,
+    help="Testbed node name to associate with (requires node management access).",
 )
 @click.option(
     "--node-band",
     type=click.Choice(choices=["2.4G", "5G", "5GL", "5GU", "6G"]),
     default=None,
-    help="Testbed node band to associate with (requires cloud access).",
+    help="Testbed node band to associate with (requires node management access).",
 )
 @skip_ns_option
 @click.pass_context
@@ -606,6 +631,8 @@ def connect(
     net_params,
     identity,
     password,
+    hotspot20,
+    creds,
     node_name,
     node_band,
     skip_ns,
@@ -613,12 +640,12 @@ def connect(
 ):
     """Connect WiFi **CLIENTS**.
 
-    By default **CLIENTS** will be connected to the testbed default ssid as specified
+    By default, **CLIENTS** will be connected to the testbed default ssid as specified
     in the config file.
 
     Note that the tool global --timeout option can be used with connect too.
 
-    Example: `osrt client connect --bssid=86:9f:07:00:d1:45 --ip-v4=False --ipv6=stateful w2`.
+    Example: `client connect --bssid=86:9f:07:00:d1:45 --ip-v4=False --ipv6=stateful w2`.
     """
     wps = osrt_cli_tools.utils.bool_choices_to_bool(wps)
 
@@ -643,6 +670,8 @@ def connect(
         net_params=net_params,
         identity=identity,
         password=password,
+        hotspot20=hotspot20,
+        creds=creds,
         node_name=node_name,
         node_band=node_band,
         skip_ns=skip_ns,
@@ -720,15 +749,6 @@ def info(ctx, clients):
 
 
 @cli.command
-@click.argument("command", type=click.Choice(choices=["stop", "start", "restart"]))
-@all_wifi_clients_argument
-@click.pass_context
-def ep(ctx, command, clients):
-    """Control IxChariot endpoint on **CLIENTS**."""
-    _execute_tool_command(ctx, clients, "ep", command=command)
-
-
-@cli.command
 @all_clients_argument
 @click.pass_context
 def reboot(ctx, clients):
@@ -741,10 +761,17 @@ def reboot(ctx, clients):
 @all_wifi_clients_argument
 @click.option("--ht", type=click.STRING, help="Bandwidth in MHz.", default="HT20", show_default=True)
 @click.option("--ifname", type=click.STRING, default="", help="Interface name.")
+@click.option(
+    "--band",
+    type=click.Choice(choices=["2.4G", "5G", "6G"]),
+    default="5G",
+    help="Specify band to start monitor.",
+    show_default=True,
+)
 @click.pass_context
-def wmonitor(ctx, channel, ht, ifname, clients):
+def wmonitor(ctx, channel, ht, ifname, band, clients):
     """Set **CLIENTS** interfaces to monitor mode. **CHANNEL** must be specified."""
-    _execute_tool_command(ctx, clients, "wifi_monitor", channel=channel, ht=ht, ifname=ifname)
+    _execute_tool_command(ctx, clients, "wifi_monitor", channel=channel, ht=ht, ifname=ifname, band=band)
 
 
 @cli.command
@@ -753,7 +780,7 @@ def wmonitor(ctx, channel, ht, ifname, clients):
 @click.pass_context
 def wstation(ctx, ifname, clients):
     """Set **CLIENTS** interfaces to station mode."""
-    _execute_tool_command(ctx, clients, "wifi_monitor", ifname=ifname)
+    _execute_tool_command(ctx, clients, "wifi_station", ifname=ifname)
 
 
 @cli.command("ifaces-get")
@@ -791,7 +818,7 @@ def client_to_pod(ctx, clients):
 
 @cli.command
 @all_clients_argument
-@click.option("--fw-path", default=None, type=click.Path())
+@click.option("--fw-path", default=None, type=click.Path(), help="Firmware path on the host machine.")
 @click.option(
     "--restore-cfg",
     default="True",
@@ -799,8 +826,20 @@ def client_to_pod(ctx, clients):
     show_default=True,
     help="Restore config file.",
 )
-@click.option("--force", is_flag=True, help="Force operation.")
-@click.option("--version", type=click.STRING, help="Specify version.", default="stable", show_default=True)
+@click.option("--force", is_flag=True, help="Force operation. Upgrades even if the version is the same.")
+@click.option(
+    "--version",
+    type=click.STRING,
+    help="Specify version as stable, latest or version string (e.g. 3.0.59).",
+    default="stable",
+    show_default=True,
+)
+@click.option(
+    "--http-address",
+    type=click.STRING,
+    default=None,
+    help="Download image directly from provided HTTP server address.",
+)
 @click.option(
     "--mirror-url",
     type=click.STRING,
@@ -811,12 +850,12 @@ def client_to_pod(ctx, clients):
     "--download-locally",
     default="True",
     type=click.Choice(choices=["True", "False"]),
-    help="If True download upgrade files to local machine. [Only Debian-type clients]",
+    help="If False download upgrade files directly on the client otherwise on the host machine [Only Debian-type clients].",
     show_default=True,
 )
 @click.pass_context
-def upgrade(ctx, fw_path, restore_cfg, force, version, mirror_url, download_locally, clients):
-    """Upgrade **CLIENTS** with FW from fw_path or download build version from artifactory."""
+def upgrade(ctx, fw_path, restore_cfg, force, version, http_address, mirror_url, download_locally, clients):
+    """Upgrade **CLIENTS** firmware using a local file path or by downloading a specified version from S3."""
     restore_cfg = osrt_cli_tools.utils.bool_choices_to_bool(restore_cfg)
     download_locally = osrt_cli_tools.utils.bool_choices_to_bool(download_locally)
     _execute_tool_command(
@@ -827,6 +866,7 @@ def upgrade(ctx, fw_path, restore_cfg, force, version, mirror_url, download_loca
         restore_cfg=restore_cfg,
         force=force,
         version=version,
+        http_address=http_address,
         mirror_url=mirror_url,
         download_locally=download_locally,
     )
@@ -868,8 +908,9 @@ def adt_list_devices(ctx, clients):
 @single_client_argument
 @click.pass_context
 def adt_start(ctx, device, ifname, ssid, psk, bssid, fake_mac, force, client):
-    """Start simulate **DEVICE** type on **CLIENT**. List available devices with
-    `osrt client adt-list-devices` command.
+    """Start simulate **DEVICE** type on **CLIENT**.
+
+    The list available devices with `client adt-list-devices` command.
     """
     _execute_tool_command(
         ctx,
@@ -910,8 +951,15 @@ def adt_clear(ctx, ifname, clients):
 @click.option(
     "--extra-param", type=click.STRING, default="", help="Extra parameters passed to the hostapd config file."
 )
+@click.option(
+    "--band",
+    type=click.Choice(choices=["2.4G", "5G", "6G"]),
+    default="2.4G",
+    help="Band to chose between 2.4G, 5G and 6G.",
+)
 @single_wifi_client_argument
-def ap_start(ctx, channel, ifname, ssid, timeout, country, dhcp, extra_param, client):
+@click.pass_context
+def ap_start(ctx, channel, ifname, ssid, timeout, country, dhcp, extra_param, band, client):
     """Start hostapd on **CLIENT** for **CHANNEL**."""
     # timeout is passed and processed with the context object
     _execute_tool_command(
@@ -924,6 +972,8 @@ def ap_start(ctx, channel, ifname, ssid, timeout, country, dhcp, extra_param, cl
         country=country,
         dhcp=dhcp,
         extra_param=extra_param,
+        band=band,
+        timeout=timeout,
     )
 
 
@@ -968,9 +1018,8 @@ def dhclient_start(ctx, ifname, ipv4, ipv6, reuse, static_ip, clear_dhcp, client
     if not start_dhclient:
         click.secho("This combination of flags is illegal, requires stopping dhclient.", err=True)
         sys.exit(1)
-    reuse, clear_dhcp = osrt_cli_tools.utils.bool_choices_to_bool(reuse), osrt_cli_tools.utils.bool_choices_to_bool(
-        clear_dhcp
-    )
+    reuse = osrt_cli_tools.utils.bool_choices_to_bool(reuse)
+    clear_dhcp = osrt_cli_tools.utils.bool_choices_to_bool(clear_dhcp)
     _execute_tool_command(
         ctx,
         clients,
@@ -1007,6 +1056,20 @@ def mocha_enable(ctx, clients):
 def mocha_disable(ctx, clients):
     """Disable mocha mode."""
     _execute_tool_command(ctx, clients, "mocha_disable")
+
+
+@cli.command("wait")
+@all_clients_argument
+@click.option(
+    "--timeout",
+    default=5,
+    show_default=True,
+    help="Timeout in seconds.",
+)
+@click.pass_context
+def wait(ctx, clients, timeout):
+    """Wait for client to be available."""
+    _execute_tool_command(ctx, clients, "wait_available", timeout=timeout)
 
 
 def get_bash_complete() -> Path:

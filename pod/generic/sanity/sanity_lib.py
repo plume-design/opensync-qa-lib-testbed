@@ -50,7 +50,7 @@ class SanityLib(object):
         # self arguments for methods
         self.retval = True
         self.gw_node, self.router_mode, self.wifi_vendor, self.sys_log_file_name = None, None, None, None
-        self.device_type, self.device_mode = None, None
+        self.wan_link_selection, self.device_mode = None, None
         self.table_list, self.wan_bridge, self.lan_bridge, self.home_ap, self.home_ap_all = [], [], [], [], []
         self.re_backhaul_ap, self.backhaul_ap, self.backhaul_sta, self.lan_interfaces, self.regulatory_domains = (
             [],
@@ -60,6 +60,7 @@ class SanityLib(object):
             [],
         )
         self.supported_bands, self.wan_interfaces, self.phy_radio_name = [], [], []
+        self.mld_ifaces = {}
         self.init_capabilities(capabilities)
         self.wano = self.check_wano()
         self.set_home_ap_list()
@@ -85,7 +86,7 @@ class SanityLib(object):
 
         # init interfaces
         for interface in interfaces:
-            if isinstance(interfaces[interface], dict):
+            if isinstance(interfaces[interface], dict) and interface != "mld_ifaces":
                 value = [name for iface, name in interfaces[interface].items() if name is not None]
             else:
                 value = interfaces[interface]
@@ -101,8 +102,25 @@ class SanityLib(object):
                 continue
             setattr(self, sanity, sanity_to_check[sanity])
 
+        self.home_ap_managed = "FULL_CONTROL" in capabilities["features"]
+
         # set tables to check
         self.table_list = sanity_to_check["tables"]
+
+        # remove 5GU interfaces as for Morocco 5GU radio is disabled
+        country_code = self.get_country_code(self.tables.get("Wifi_Radio_State table"), "2.4G")
+        if country_code == "MA" and "5GU" in self.supported_bands:
+            self.supported_bands.pop()
+            self.backhaul_ap.pop()
+            self.backhaul_sta.pop()
+            self.home_ap.pop()
+            self.onboard_ap.pop()
+            self.uplink_gre.pop()
+
+        # clear bhaul STA mlo iface if not supported yet
+        if_names = ovsdb.ovsdb_get_key_values(self.tables.get("Wifi_Inet_Config table"), "if_name")
+        if self.mld_ifaces.get("backhaul_sta", "unknown") not in if_names:
+            self.mld_ifaces["backhaul_sta"] = None
 
     def set_home_ap_list(self):
         self.home_ap_all = self.home_ap
@@ -356,7 +374,7 @@ class SanityLib(object):
         table = self.tables[tname]
         errs = 0
         iflist = [self.wan_bridge, self.lan_bridge] + self.home_ap
-        if self.device_type != "residential_gateway":
+        if self.wan_link_selection is True:
             iflist += self.lan_interfaces
         if len(table) == 0:
             self._create_output(tname, "ERROR", "No rows")
@@ -415,7 +433,10 @@ class SanityLib(object):
             f"{self.lan_bridge}.{iface}" for iface in ["arp", "dhcp", "dns", "dpi", "http", "l2uf", "ndp", "tx", "upnp"]
         ]
         optional = lan_bridge_ifaces + [self.lan_bridge]
-        iflist = [self.lan_bridge, self.wan_bridge] + self.backhaul_ap + self.backhaul_sta
+        sta_ifaces = self.backhaul_sta + [self.mld_ifaces["backhaul_sta"]] if self.mld_ifaces else self.backhaul_sta
+        iflist = [self.wan_bridge, self.lan_bridge] + sta_ifaces
+        # Overwrite bhaul-ap interfaces when MLO is enabled
+        iflist += self.overwrite_bhaul_ap_interfaces_with_mlo()
         if self.home_ap_managed:
             iflist += self.home_ap
 
@@ -429,13 +450,13 @@ class SanityLib(object):
                     continue
                 row = ovsdb.ovsdb_find_row(table, "if_name", n)
                 if not row:
-                    if n in self.backhaul_sta or n in optional:
+                    if n in sta_ifaces or n in optional:
                         continue
                     else:
                         self._create_output(tname, "Warning", str(n) + " row is missing")
                         errs = errs + 1
                 else:
-                    if n in self.backhaul_sta:
+                    if n in sta_ifaces:
                         if row["if_type"] != "vif":
                             self._create_output(tname, "Warning", str(n) + " if_type " + row["if_type"] + "!=vif")
                         if self.gw_node:
@@ -507,8 +528,11 @@ class SanityLib(object):
         lan_bridge_ifaces = [
             f"{self.lan_bridge}.{iface}" for iface in ["arp", "dhcp", "dns", "dpi", "http", "l2uf", "ndp", "tx", "upnp"]
         ]
-        iflist = [self.wan_bridge, self.lan_bridge] + lan_bridge_ifaces + self.backhaul_ap + self.backhaul_sta
+        sta_ifaces = self.backhaul_sta if not self.mld_ifaces else [self.mld_ifaces["backhaul_sta"]]
+        iflist = [self.wan_bridge, self.lan_bridge] + lan_bridge_ifaces + sta_ifaces
         optional = lan_bridge_ifaces + [self.lan_bridge]
+        # Overwrite bhaul-ap interfaces when MLO is enabled
+        iflist += self.overwrite_bhaul_ap_interfaces_with_mlo()
         if self.home_ap_managed:
             iflist += self.home_ap
 
@@ -555,8 +579,7 @@ class SanityLib(object):
                                 self._create_output(tname, "ERROR", f"{r} ip_assign_scheme is not set to dhcp")
                                 errs = errs + 1
                 elif r == self.wan_interfaces:
-                    # special case for tagged eth ifaces eth0/1.835
-                    if_type = "vlan" if "835" in r else "eth"
+                    if_type = "eth"
                     if row["if_type"] != if_type:
                         self._create_output(tname, "Warning", f"{r} if_type {row['if_type']} != {if_type}")
 
@@ -569,6 +592,18 @@ class SanityLib(object):
                 self._create_output(state_tname, "ERROR", f"{crow['if_name']} not found in State but exists in Config")
                 errs = errs + 1
         return True if errs else False
+
+    def overwrite_bhaul_ap_interfaces_with_mlo(self):
+        """Overwrite bhaul-ap interfaces when MLO is enabled"""
+        wifi_vif_state_table = self.tables["Wifi_VIF_State table"]
+        overwritten_interfaces = []
+        for backhaul_ap_iface in self.backhaul_ap:
+            bhaul_ap_iface_state = ovsdb.ovsdb_find_row(wifi_vif_state_table, "if_name", backhaul_ap_iface)
+            if bhaul_ap_iface_state and (mld_interface := bhaul_ap_iface_state.get("mld_if_name")):
+                overwritten_interfaces.append(mld_interface)
+                continue
+            overwritten_interfaces.append(backhaul_ap_iface)
+        return overwritten_interfaces
 
     def _ovsdb_sanity_check_wifi_radio_config_table(self):
         config_tname = "Wifi_Radio_Config table"
@@ -591,8 +626,11 @@ class SanityLib(object):
                         errs = errs + 1  # print out channel mode for Radio State table
         for row in state_table:
             if row["channel_mode"]:
+                cf = f"(CF_{row['center_freq0_chan']})" if row.get("center_freq0_chan") else ""
                 self._create_output(
-                    state_tname, "INFO", "Channel_mode " + row["freq_band"] + ": " + str(row["channel_mode"])
+                    state_tname,
+                    "INFO",
+                    f"{row['freq_band']}: ch_{row['channel']}{cf}@{row['ht_mode']} (mode: {row['channel_mode']})",
                 )
 
         return True if errs else False
@@ -650,6 +688,8 @@ class SanityLib(object):
 
     @staticmethod
     def get_country_code(wifi_radio_state_table, band_name):
+        if not wifi_radio_state_table:
+            return None
         region_map = {
             "0x37": "EU",
             "0x3a": "US",
@@ -775,7 +815,7 @@ class SanityLib(object):
             if bhaul_sta_cnt != 0:
                 self._create_output(state_tname, "ERROR", f"Number of bhaul-ap {bhaul_ap_cnt} != 0 on gateway")
                 errs = errs + 1
-        elif bhaul_sta_cnt > 1:
+        elif bhaul_sta_cnt > 1 and not self.mld_ifaces:
             self._create_output(state_tname, "Warning", "More than one bhaul-sta VIFs found " + str(bhaul_ap_cnt))
         # Make sure non-required config entries are present in state table
         for crow in config_table:
@@ -1149,7 +1189,7 @@ class SanityLib(object):
     def check_is_gateway(self):
         if self.gw_node:
             return
-        if self.device_type == "residential_gateway":
+        if self.wan_link_selection is False:
             self.gw_node = True
             self.router_mode = True
             return
@@ -1464,7 +1504,10 @@ class SanityLib(object):
 
     def sys_log_sanity_check(self):
         """
-        :brief: system log sanity check
+        Check syslog `messages` file and other files found in logpulls when running `sanity --dir <logpull-directory>`
+
+        This has effect only when running standalone sanity tool with --dir parameter. `pod sanity` doesn't transfer
+        the files checked by this method from pod.
         """
         if self.sys_log_file is None:
             return False
@@ -1508,28 +1551,23 @@ class SanityLib(object):
 
         pmf_report = getout(f"cat {self.logs_dir}/_usr_opensync_tools_pmf_--report-quick")
         if "No such file or directory" in pmf_report:
-            _report_not_possible()
             return False
 
         if not is_inside_infrastructure():
-            _report_not_possible()
             return False
 
         try:
             from lib.cloud.api.inventory import Inventory
         except (ModuleNotFoundError, OpenSyncException):
-            _report_not_possible()
             return False
 
         try:
             deployment_file = config.find_deployment_file("dogfood")
         except (KeyError, OpenSyncException):
-            _report_not_possible()
             return False
 
         _config = config.load_file(deployment_file)
         if not _config.get("inv_user") or not _config.get("inv_pwd"):
-            _report_not_possible()
             return False
 
         inv = Inventory.fromurl(_config.get("inventory_url"), _config.get("inv_user"), _config.get("inv_pwd"))

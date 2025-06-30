@@ -113,3 +113,9 @@ class SwitchLibGeneric:
 
     def action_interface(self, ports, action):
         raise NotImplementedError
+
+    def set_bw_limit(self, ports, ingress_rate, egress_rate):
+        raise NotImplementedError
+
+    def get_bw_limit(self, ports):
+        raise NotImplementedError

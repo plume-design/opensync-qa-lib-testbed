@@ -22,7 +22,7 @@ _pod_completion() {
 }
 
 _pod_completion_setup() {
-    complete -o nosort -F _pod_completion pod
+    complete -F _pod_completion pod
 }
 
 _pod_completion_setup;

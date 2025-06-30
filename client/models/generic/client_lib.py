@@ -13,21 +13,25 @@ import datetime
 
 from collections import ChainMap
 from multiprocessing import Lock
-from distutils.version import StrictVersion
 from pathlib import Path
 
+from lib_testbed.generic.util.ssh.common import EXECUTE_CMD_TIMEOUT
+from lib_testbed.generic.util.common import compare_fw_versions
 from lib_testbed.generic.util.msg import syslog_msg
-from lib_testbed.generic.util.logger import log
+from lib_testbed.generic.util.logger import log, log_level
 from lib_testbed.generic.client.client_base import ClientBase
-from lib_testbed.generic.util.common import CACHE_DIR, get_digits_value_from_text, wait_for
+from lib_testbed.generic.util.common import CACHE_DIR, get_digits_value_from_text, wait_for, get_ipv4_address_from_text
 from lib_testbed.generic.client.models.generic.client_tool import ClientTool
 from lib_testbed.generic.switch.switch_api_resolver import SwitchApiResolver
 from lib_testbed.generic.util.base_lib import Iface
 from lib_testbed.generic.util.config import FIXED_HOST_CLIENTS
+from lib_testbed.generic.pod.pod import PodApi
 
 UPGRADE_DIR = "/tmp/automation/"
 UPGRADE_LOCAL_CACHE_DIR = CACHE_DIR / "client_upgrade_cache"
 KERNEL_DIR = "/home/plume/kernel-packages/"
+CACHED_PROPERTIES = ["mac", "eth_ifname", "wlan_ifname", "ifname", "key_mgmt", "wlan_information"]
+TESTBED_IMAGES_PUBLIC_URL = "https://qa-automation.opensync.io/resources/testbed_images/"
 
 
 class ClientLib(ClientBase):
@@ -49,8 +53,7 @@ class ClientLib(ClientBase):
             if runtime_wpa_mode == "sae":
                 return "SAE"
             # Fallback to default key_mgmt selection for "sae-mixed" mode
-        client_capab = self.get_wlan_information()[1]
-        client_wpa3_capab = client_capab["wlan"][self.wlan_iface].get("wpa3", False)
+        client_wpa3_capab = self.wlan_information.get("wpa3", False)
         return ["SAE", "WPA-PSK"] if client_wpa3_capab else "WPA-PSK"
 
     def ping(self, host=None, v6=False, **kwargs):
@@ -113,9 +116,9 @@ class ClientLib(ClientBase):
         ifname = self.get_wlan_iface(**kwargs)
         if not ifname:
             return [1, mode, "No wlan interface"]
-        result = self.run_command(f'sudo iwconfig {ifname} | grep "Power Management"')
+        result = self.run_command(f"sudo iw dev {ifname} get power_save")
         if self.result_ok(result):
-            mode = self.strip_stdout_result(result)[1].replace("Power Management:", "")
+            mode = self.strip_stdout_result(result)[1].removeprefix("Power save:").strip()
         return [0, mode, ""]
 
     def set_wifi_power_management(self, state, **kwargs):
@@ -124,7 +127,7 @@ class ClientLib(ClientBase):
         ifname = self.get_wlan_iface(**kwargs)
         if not ifname:
             return [1, "", "No wlan interface"]
-        cmd = f"sudo iwconfig {ifname} power {state}"
+        cmd = f"sudo iw dev {ifname} set power_save {state}"
         result = self.run_command(cmd)
         if result[0] and self.check_driver_crash():
             result = self.run_command(cmd)
@@ -139,14 +142,27 @@ class ClientLib(ClientBase):
         return result
 
     def put_dir(self, directory, location, timeout=5 * 60, **kwargs):
-        as_sudo = kwargs.pop("as_sudo", True)
-        as_sudo = "sudo" if as_sudo else ""
-        command = (
+        """
+        Put directory in location onto device
+        Args:
+            directory: (str) path to local directory
+            location: (str) path to remote directory
+            **kwargs:
+                skip_logging: (bool, optional, default=True) Skip logging for internal commands.
+
+        Returns: (list) [[(int) ret, (str) stdout, (str) stderr]]
+        """
+        as_sudo = "sudo " if kwargs.pop("as_sudo", True) else ""
+        log.debug("Putting dir '%s' to path '%s' on '%s'", directory, location, self.name)
+        remote_command = (
             f"cd {directory}; tar -cf - *  |"
-            + self.device.get_remote_cmd(f"{as_sudo} mkdir -p {location}; cd {location}; {as_sudo} tar -xof -")
+            + self.device.get_remote_cmd(f"{as_sudo}mkdir -p {location}; cd {location}; {as_sudo}tar -xof -")
             + " 2>/dev/null"
         )
-        return self.run_command(command, **kwargs, timeout=timeout, skip_remote=True)
+        with log_level(log.INFO):
+            result = self.run_command(remote_command, **kwargs, timeout=timeout, skip_remote=True)
+        log.debug("Command returned exit code=%s, stdout='%s', stderr='%s'", result[0], result[1].strip(), result[2])
+        return result
 
     def info(self, **kwargs):
         """
@@ -377,6 +393,10 @@ class ClientLib(ClientBase):
         wlan_info["wlan"][iface]["802.11ax"] = False
         if "HE" in iw_info:
             wlan_info["wlan"][iface]["802.11ax"] = True
+        # Mark client Wi-Fi 7 capable only if it supports Extremely High Throughput on 2.4GHz, 5GHz and 6GHz bands
+        wlan_info["wlan"][iface]["802.11be"] = False
+        if len(re.findall(r"EHT\s+Iftypes:\s+managed", iw_info)) >= 3:
+            wlan_info["wlan"][iface]["802.11be"] = True
         wlan_info["wlan"][iface]["6e"] = False
         if re.search(r"6\d\d\d(\.\d+)? MHz", iw_info):
             wlan_info["wlan"][iface]["6e"] = True
@@ -468,6 +488,7 @@ class ClientLib(ClientBase):
                 raise EnvironmentError(f"Bluetooth adapter {iface} does not support all of {required_settings}")
 
             self.run_command(f"{cmd} power off", **kwargs)
+            time.sleep(1)
             self.run_command(f"{cmd} le on", **kwargs)
             self.run_command(f"{cmd} power on", **kwargs)
 
@@ -506,53 +527,35 @@ class ClientLib(ClientBase):
 
     def get_wlan_iface(self, **kwargs):
         """
-        Get WLAN interface name, if force=True get interface name directly from device
+        Get WLAN interface name
         Returns: (str) interface name
 
         """
         if self.device.config.get("wifi", False) is False:
             return ""
         if iface := self.device.config.get("iface"):
-            if not hasattr(self, "wlan_iface"):
-                self.wlan_iface = iface
             return iface
-        force = kwargs.pop("force", False)
-        # Store interface name to avoid additional ssh calls
-        iface = (
-            self.wlan_iface
-            if hasattr(self, "wlan_iface") and not force
-            else self.get_stdout(
-                self.strip_stdout_result(self.run_command("ls /sys/class/net | grep wl", **kwargs)), skip_exception=True
-            )
+
+        iface = self.get_stdout(
+            self.strip_stdout_result(self.run_command("ls /sys/class/net | grep wl", **kwargs)), skip_exception=True
         )
-        if iface and not hasattr(self, "wlan_iface"):
-            self.wlan_iface = iface
         return iface
 
     def get_eth_iface(self, **kwargs):
         """
-        Get ETH interface name if force=True get interface name directly from the device
+        Get ETH interface name
         Returns: (str) interface name
 
         """
         if self.device.config["name"] not in FIXED_HOST_CLIENTS and self.device.config.get("eth", False) is False:
             return ""
         if iface := self.device.config.get("iface"):
-            if not hasattr(self, "eth_iface"):
-                self.eth_iface = iface
             return iface
-        force = kwargs.pop("force", False)
-        # Store interface name to avoid additional ssh calls
-        iface = (
-            self.eth_iface
-            if hasattr(self, "eth_iface") and not force
-            else self.get_stdout(
-                self.strip_stdout_result(self.run_command('ls /sys/class/net | grep "et\\|en"', **kwargs)),
-                skip_exception=True,
-            ).split("\n")[0]
-        )
-        if iface and not hasattr(self, "eth_iface"):
-            self.eth_iface = iface
+
+        iface = self.get_stdout(
+            self.strip_stdout_result(self.run_command('ls /sys/class/net | grep "et\\|en"', **kwargs)),
+            skip_exception=True,
+        ).split("\n")[0]
         return iface
 
     def get_iface(self, **kwargs):
@@ -688,7 +691,7 @@ class ClientLib(ClientBase):
         return self.run_command(command, **kwargs)
 
     def fqdn_check(self, count=1, v6=False, show_log: bool = True, **kwargs):
-        timeout = kwargs.pop("timeout", 20)
+        timeout = kwargs.pop("timeout", EXECUTE_CMD_TIMEOUT)
         if show_log:
             log.info("Check fqdn resolving")
         domain_type = "aaaa" if v6 else "a"
@@ -708,44 +711,59 @@ class ClientLib(ClientBase):
         ip_address = self.get_stdout(result).strip()
         if not ip_address:
             return [99, "", "Dig did not return IP address"]
-        return self.ping_check(ip_address, count=count, v6=v6, fqdn_check=False, rdns=True, show_log=show_log, **kwargs)
+        return self.ping_check(
+            ip_address, count=count, v6=v6, fqdn_check=False, rdns=True, show_log=show_log, timeout=timeout, **kwargs
+        )
 
     def fqdn_type65(self, domain, **kwargs):
         cmd = f"dig -t TYPE65 {domain}"
         return self.run_command(cmd)
 
+    def _get_ifname_driver_name(self, ifname: str) -> str:
+        return self.get_stdout(
+            self.strip_stdout_result(self.run_command(f"ls -ll  /sys/class/net/{ifname}/device/driver"))
+        ).split("/")[-1]
+
+    def _enable_upper_bands_for_iwlwifi(self, ifname, band, **kwargs):
+        # Intel disables 6G channels as long as STA iface will not mark them as enabled, so we need to brig up
+        # STA iface, once channels are marked as enabled, create MON iface and then without downing STA iface
+        # set channel we need
+        self.connect(wps=True, start_supplicant_only=True)
+        time.sleep(5)
+        # for 6G from each 160Mhz band one idx, not common with 2.4G or 5G
+        chan_list = [29, 61, 93, 125, 129, 189, 221] if band == "6G" else [36, 44]
+        ret, _ = wait_for(
+            lambda: self.run_command(f"sudo wpa_cli -i {ifname} scan", **kwargs)
+            and any([_channel in chan_list for _channel in self._get_available_channels(ifname=ifname)]),
+            timeout=60,
+            tick=10,
+        )
+        if not ret:
+            log.error(f"{band} channels are disabled, probably there is no AP in the air")
+            self.disconnect()
+            return [5, "", f"{band} channels are disabled"]
+        return [0, "", ""]
+
     def wifi_monitor(self, channel, ht, ifname, band="5G", **kwargs):
-        def _create_mon_iface_for_intel_ax(ifname):
-            # Intel disables 6G channels as long as STA iface will not mark them as enabled, so we need to brig up
-            # STA iface, once channels are marked as enabled, create MON iface and then without downing STA iface
-            # set channel we need
-            wifi_driver = self.get_stdout(
-                self.strip_stdout_result(self.run_command(f"ls -ll  /sys/class/net/{ifname}/device/driver"))
-            ).split("/")[-1]
-            if wifi_driver != "iwlwifi" or band != "6G":
+        self.clear_cached_properties()
+
+        def _create_mon_iface_for_intel_ax(ifname, retry=True):
+            wifi_driver = self._get_ifname_driver_name(ifname)
+            if wifi_driver != "iwlwifi":
                 return [0, ifname, ""]
-            self.connect(wps=True, start_supplicant_only=True)
-            time.sleep(5)
-            # wait_for enabled 6G channels
-            ret, _ = wait_for(
-                lambda: self.run_command(f"sudo wpa_cli -i {ifname} scan", **kwargs)
-                and any(
-                    [
-                        _channel in self._get_available_channels(ifname=ifname)
-                        for _channel in
-                        # from each 160Mhz band one idx, not common with 2.4G or 5G
-                        [29, 61, 93, 125, 129, 189, 221]
-                    ]
-                ),
-                timeout=60,
-                tick=10,
-            )
-            if not ret:
-                log.error("6G channels are disabled, probably there is no AP in the air")
-                self.disconnect()
-                return [5, "", "6G channels are disabled"]
-            ret = self.get_stdout(self.run_command("airmon-ng start %s" % ifname))
-            if "monitor mode vif enabled" not in ret:
+            if band == "6G":
+                ret = self._enable_upper_bands_for_iwlwifi(ifname, band, **kwargs)
+                if ret[0]:
+                    return ret
+            ret = self.run_command("airmon-ng start %s" % ifname)
+            if self.check_driver_crash():
+                if retry:
+                    log.info("Trying to start sniffer once again")
+                    return _create_mon_iface_for_intel_ax(ifname, retry=False)
+                else:
+                    log.error("There was a crash detected, giving up as it was second try")
+                    return [6, "", "Wi-Fi is crashing while getting into monitor mode"]
+            if "monitor mode vif enabled" not in ret[1]:
                 self.run_command("airmon-ng stop %s" % ifname)
                 return [3, "", "Cannot create mon iface with airmon-ng command"]
             return [0, "%smon" % ifname, ""]
@@ -774,7 +792,6 @@ class ClientLib(ClientBase):
         if ifname[0]:
             return ifname
         ifname = ifname[1]
-        self.wlan_iface = ifname
         if "mon" in ifname:
             command = f"sh -c 'sudo iw {ifname} set freq {freq} {ht}; " f"iw {ifname} info | grep monitor'"
         else:
@@ -794,6 +811,8 @@ class ClientLib(ClientBase):
         return result
 
     def wifi_station(self, ifname, **kwargs):
+        self.clear_cached_properties()
+
         def _remove_mon_iface_for_intel_ax(ifname):
             wifi_ifname = self.get_stdout(
                 self.strip_stdout_result(self.run_command("ls /sys/class/net | grep wl", **kwargs)), skip_exception=True
@@ -817,7 +836,6 @@ class ClientLib(ClientBase):
         ret = _remove_mon_iface_for_intel_ax(ifname)
         # if mon interface was created we are done
         if ret[0] == 0:
-            self.wlan_iface = ifname
             return ret
 
         command = (
@@ -830,18 +848,13 @@ class ClientLib(ClientBase):
             if not result[0]:
                 result[0] = 1
             result[2] = "Can not change interface state to station mode"
-        self.wlan_iface = ifname
         return result
 
     def get_mac(self, ifname="", **kwargs):
         """Get Wi-Fi MAC address"""
         ifname = ifname if ifname else self.join_ifaces().split(",")[-1]  # TODO: replace self.join_ifaces()
         command = f"cat /sys/class/net/{ifname}/address"
-
         client_mac = self.strip_stdout_result(self.run_command(command, **kwargs))
-
-        if not client_mac[0] and not getattr(self, f"{ifname}_mac", False):
-            setattr(self, f"{ifname}_mac", self.get_stdout(client_mac, skip_exception=True))
         return client_mac
 
     def get_wpa_supplicant_base_path(self, ifname=None, **kwargs):
@@ -891,6 +904,11 @@ class ClientLib(ClientBase):
         eap=None,
         identity=None,
         password=None,
+        hotspot20: bool = False,
+        creds: list[dict[str, str]] = (),
+        node: PodApi | None = None,
+        node_band: str | None = None,
+        disable_mlo: bool | None = None,
         **kwargs,
     ):
         """
@@ -912,10 +930,16 @@ class ClientLib(ClientBase):
             wps (bool) connect using WPS-PBC
             proto (str)
             pmf_mode (str): Used only in case connection with SAE, WPA-PSK-SHA256
-            retry (int) number of connect retries in case of Wi-Fi driver crash on the client
+            retry (int) number of connect retries in case of Wi-Fi driver crash on the client or wrong BSSID used
             eap (str): which enterprise authentication method to use (e.g. PEAP, TTLS, PWD, ...).
-            identity (str): user name or id used for EAP authentication.
+            identity (str): username or id used for EAP authentication.
             password (str): password used for EAP authentication.
+            hotspot20: If true, enables interworking, auto_interworking and hs20 wpa_supplicant parameters
+                       and ignores all network parameters (SSID, BSSID, PSK, ...)
+            creds: List of wpa_supplicant cred config sections, as a dictionary of (parameter, value) pairs.
+            node: Pod object to connect to. Cannot be specified together with bssid.
+            node_band: Radio band to associate with. Requires node to be specified. One of 2.4G, 5G, 5GL, 5GU or 6G.
+            disable_mlo: (bool) Disable MLO (Multi-Link Operation) for the connection. If None, MLO flag is not set.
             **kwargs:
 
         Returns: (list) merged clients response
@@ -929,11 +953,33 @@ class ClientLib(ClientBase):
             name = self.get_network_name()
             _, psk = self.get_network(name)
 
+        bssids = bssid_accept = None
+        if node_band and not node:
+            return [71, "", f"Node not specified, while node band is set to {node_band}"]
+        if node and bssid:
+            return [72, "", f"Only one of bssid or node can be specified, got {bssid=} {node=}"]
+        elif node:
+            bssids = node.get_bssids(ssid)
+            if node_band:
+                if node_band not in bssids:
+                    return [73, "", f"{node_band} inactive on {node.nickname} node, active bands: {list(bssids)}"]
+                bssid = bssids[node_band]
+            elif self.config_type() == "rpi":
+                # RPi does not support bssid_accept= option, so connect to a specific BSSID there.
+                for radio_band in "5G", "5GL", "5GU", "2.4G":
+                    if radio_band in bssids:
+                        bssid = bssids[radio_band]
+                        break
+                else:
+                    return [74, "", f"No suitable band active on {node.nickname} node to connect RPi: {list(bssids)}"]
+            else:
+                # Use bssid_accept= wpa_supplicant option with suitable mask to connect to any of node's BSSIDs
+                bssid_accept = self._shared_bssid_with_mask(bssids.values())
+
         ifname = ifname if ifname else self.get_wlan_iface(**kwargs)
         if not ifname:
             return [1, "", "Missing wlan interface"]
         start_supplicant_only = kwargs.pop("start_supplicant_only", None)
-
         # Get default key_mgmt when function arg - key_mgmt is not specified
         key_mgmt = key_mgmt if key_mgmt else self.key_mgmt
         # Support for specifying more than one acceptable key management method
@@ -957,11 +1003,50 @@ class ClientLib(ClientBase):
             # 6G band needs more time to associate - increasing the timeout to improve stability
             timeout *= 2
 
-        if not wps:
+        global_parameters = [
+            "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev",
+            "update_config=1",
+            f"country={country}",
+        ]
+
+        global_parameters.extend(e_gl_param.split(","))
+        if "SAE" in key_mgmt and "sae_pwe=" not in e_gl_param:
+            global_parameters.append("sae_pwe=2")
+
+        if hotspot20:
+            for param in "interworking", "auto_interworking", "hs20":
+                if f"{param}=" not in e_gl_param:
+                    global_parameters.append(f"{param}=1")
+            if "access_network_type=" not in e_gl_param:
+                # 15 means wildcard match, matching any Access Network Type
+                global_parameters.append("access_network_type=15")
+
+        # Some paramteres aren't strings, so we can't use quotes around them
+        not_string = {"eap"}
+        for cred in creds:
+            global_parameters.append("\ncred={")
+            for param, val in cred.items():
+                if param in not_string:
+                    global_parameters.append(f"    {param}={val}")
+                else:
+                    global_parameters.append(f'    {param}="{val}"')
+            global_parameters.append("}")
+
+        global_parameters.append("")
+        global_params = "\n".join(global_parameters)
+
+        if not (wps or hotspot20):
             # create wpa_supp conf
             bssid_info = f"bssid={bssid}\n" if bssid else ""
-            extra_param = "\n".join(e_gl_param.split(","))
-            extra_param += "\nsae_pwe=2" if "SAE" in key_mgmt else ""
+            # Disable MLO when connecting to a specific BSSID, since bssid= doesn't work when client is using MLO
+            runtime_disable_mlo = self.config.get("runtime_disable_mlo")
+            disable_mlo = (
+                "disable_mlo=1\n"
+                if (bssid or disable_mlo or runtime_disable_mlo) and self.wlan_information.get("802.11be", False)
+                else ""
+            )
+            # bssid and bssid_accept are mutually exclusive
+            bssid_accept_info = f"bssid_accept={bssid_accept}\n" if bssid_accept else ""
             extra_net_param = "\n    ".join(e_net_param.split(","))
             wpa_supp_psk = ""
             eap_params = ""
@@ -975,17 +1060,15 @@ class ClientLib(ClientBase):
             else:
                 key_mgmt = ["NONE"]
             security = f"{wpa_supp_psk}\n    proto={proto}\n    key_mgmt={' '.join(key_mgmt)}\n    {eap_params}"
-            wpa_supp_conf = f"""ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country={country}
-{extra_param}
-
+            wpa_supp_conf = f"""{global_params}
 network={{
     ssid="{ssid}"
     {security}
     scan_ssid=1
     priority=1
     {bssid_info}
+    {disable_mlo}
+    {bssid_accept_info}
     {extra_net_param}
 }}
 """
@@ -994,11 +1077,7 @@ network={{
                 f"key mgmt: {key_mgmt}"
             )
         else:
-            wpa_supp_conf = f"""ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-ctrl_interface_group=0
-update_config=1
-country={country}
-"""
+            wpa_supp_conf = global_params
 
         # first check if old supplicant works and remove old wpa_supplicant files
         base_path = self.get_wpa_supplicant_base_path(ifname)
@@ -1035,7 +1114,11 @@ country={country}
         result = self.run_command(command, **kwargs)
         # in case of failure print wpa_supplicant.log and exit
         if result[0]:
-            log.error("Unable to start wpa_supplicant")
+            if not result[2].strip() or result[2].startswith("Warning: Permanently added"):
+                why = self.run_command(f"tail {base_path}.log")[1].strip()
+                if why:
+                    result[2] = why
+            log.error(f"Unable to start wpa_supplicant:\n{result[2]}")
             return self._retry_connect_after_driver_crash(
                 command,
                 result,
@@ -1056,6 +1139,11 @@ country={country}
                 proto=proto,
                 pmf_mode=pmf_mode,
                 retry=retry,
+                eap=eap,
+                identity=identity,
+                password=password,
+                hotspot20=hotspot20,
+                creds=creds,
                 **kwargs,
             )
         if start_supplicant_only:
@@ -1072,10 +1160,8 @@ country={country}
         while time.time() < _timeout:
             rssi_list = self.check_rssi_to_ap(ifname, ssid)
             success_rssi_check &= bool(rssi_list)
-            command = f"sudo wpa_cli -i {ifname} status"
-            result = self.run_command(command, **kwargs)
+            result = self.get_connected_bssids(ifname, **kwargs)
             if "wpa_state=COMPLETED" in result[1]:
-                result[1] = re.findall(r"(bssid=.*)\n", result[1])[0] + "\nwpa_state=COMPLETED"
                 break
             else:
                 time.sleep(5)
@@ -1087,7 +1173,6 @@ country={country}
         if not success_rssi_check:
             self.check_rssi_to_ap(ifname, ssid, check_empty=True)
 
-        # in case of failure print wpa_supplicant.log and exit
         if result[0]:
             return self._retry_connect_after_driver_crash(
                 command,
@@ -1109,11 +1194,52 @@ country={country}
                 proto=proto,
                 pmf_mode=pmf_mode,
                 retry=retry,
+                eap=eap,
+                identity=identity,
+                password=password,
+                hotspot20=hotspot20,
+                creds=creds,
                 **kwargs,
             )
         if dhclient:
             dhcp_result = self.start_dhcp_client(ifname, ipv4=ipv4, ipv6=ipv6, ipv6_stateless=ipv6_stateless, **kwargs)
             result = self.merge_result(result, dhcp_result)
+        if (bssid or bssids) and result[0] == 0:
+            # check that we really are connected to the desired BSSID
+            bssid_error = ""
+            status = self.get_connected_bssids(ifname)[1]
+            if bssid and bssid.lower() not in status:
+                bssid_error = f"connected to wrong BSSID: {bssid} not in {status}"
+            elif bssids and not any(bssid in status for bssid in bssids.values()):
+                bssid_error = f"connected to wrong BSSID: none of {set(bssids.values())} in {status}"
+            if bssid_error:
+                log.error(bssid_error)
+                return self._retry_connect_if_wrong_bssid_is_used(
+                    command,
+                    ssid=ssid,
+                    psk=psk,
+                    ifname=ifname,
+                    bssid=bssid,
+                    key_mgmt=key_mgmt,
+                    timeout=timeout,
+                    dhclient=dhclient,
+                    e_gl_param=e_gl_param,
+                    e_net_param=e_net_param,
+                    country=country,
+                    ipv4=ipv4,
+                    ipv6=ipv6,
+                    ipv6_stateless=ipv6_stateless,
+                    wps=wps,
+                    proto=proto,
+                    pmf_mode=pmf_mode,
+                    retry=retry,
+                    eap=eap,
+                    identity=identity,
+                    password=password,
+                    hotspot20=hotspot20,
+                    creds=creds,
+                    **kwargs,
+                )
         return result
 
     def check_rssi_to_ap(self, ifname, ssid, check_empty=False, **kwargs):
@@ -1140,6 +1266,109 @@ country={country}
             log.warning("AP SSID not found in the scan results")
         return all_rssi
 
+    def get_connected_bssids(self, ifname: str | None = None, **kwargs) -> list:
+        """
+        Get wpa_state and BSSID(s) where client is associated and actively connected
+        """
+        ifname = ifname if ifname else self.get_wlan_iface(**kwargs)
+        if not ifname:
+            return [1, "", "Missing wlan interface"]
+        result = self.run_command(f"sudo wpa_cli -i {ifname} status", **kwargs)
+        if "wpa_state=COMPLETED" in result[1]:
+            if "ap_mld_addr=" in result[1]:
+                # Check `iw link` and `iw info` for "real" BSSID when connecting to MLO enabled device. iw link has
+                # information about MLO AP BSSIDs, while iw info contains iformation about which MLO link is active:
+                #    Connected to 1a:0f:7a:3c:d1:24 (on wlan0)
+                #        SSID: slobox554barca
+                #        Link 0 BSSID 22:0c:7a:3c:d1:24
+                #            freq: 2412.0
+                #        Link 2 BSSID 22:0c:7a:3c:d1:25
+                #            freq: 5220.0
+                #    MLD 1a:0f:7a:3c:d1:24 stats:
+                #        RX: 1314 bytes (95 packets)
+                #        TX: 2486 bytes (15 packets)
+                #        signal: -5 dBm
+                #        tx bitrate: 34.4 MBit/s EHT-MCS 3 EHT-NSS 1 EHT-GI 0
+                #        bss flags:
+                #        dtim period: 0
+                #        beacon int: 0
+                #    Interface wlan0
+                #        ifindex 3
+                #        wdev 0x1
+                #        addr c8:15:4e:89:85:5f
+                #        ssid slobox554barca
+                #        type managed
+                #        wiphy 0
+                #        multicast TXQ:
+                #            qsz-byt	qsz-pkt	flows	drops	marks	overlmt	hashcol	tx-bytes	tx-packets
+                #            0	0	0	0	0	0	0	0		0
+                #        MLD with links:
+                #        - link ID  0 link addr 6e:bf:94:f8:eb:dc
+                #        - link ID  2 link addr ea:2c:f0:36:99:3a
+                #        channel 44 (5220 MHz), width: 80 MHz, center1: 5210 MHz
+                wifi_info = self.wifi_winfo(ifname)[1]
+                mlo_bssids = {}
+                for match in re.finditer(
+                    r"^\s*Link\s+(?P<link_id>\d+)\s+BSSID\s+(?P<ap_bssid>[0-9a-f:]+)", wifi_info, re.MULTILINE
+                ):
+                    mlo_bssids[match["link_id"]] = match["ap_bssid"]
+                active_bssids = []
+                for match in re.finditer(
+                    r"^\s*-\s+link\s+ID\s+(?P<link_id>\d+).*\n\s+channel\s+.*", wifi_info, re.MULTILINE
+                ):
+                    # Assume that link is used when its channel, frequency and width info is non-zero
+                    if match["link_id"] in mlo_bssids:
+                        active_bssids.append(mlo_bssids[match["link_id"]])
+                if not active_bssids:
+                    return [1, "", wifi_info]
+                return [0, f"bssid={','.join(active_bssids)}\nwpa_state=COMPLETED", ""]
+            bssid = re.findall(r"(bssid=.*)\n", result[1])[0].lower() + "\nwpa_state=COMPLETED"
+            return [0, bssid, ""]
+        return [1, "", result[1]]
+
+    def set_accepted_bssid(self, ifname: str | None = None, bssid: str = "", **kwargs) -> list:
+        """
+        Change which BSSID wpa_supplicant will be willing to associate with.
+
+        Client needs to be connected. Connect with any BSSID when bssid is empty string (clear bssid lock).
+        """
+        ifname = ifname if ifname else self.get_wlan_iface(**kwargs)
+        if not ifname:
+            return [1, "", "Missing wlan interface"]
+        result = [0, "", ""]
+        for command in [
+            f"set_network 0 bssid '{bssid}'",
+            "save_config",
+        ]:
+            result = self.merge_result(result, self.run_command(f"sudo wpa_cli -i {ifname} {command}"))
+            if result[0]:
+                break
+        return result
+
+    @staticmethod
+    def _shared_bssid_with_mask(bssids):
+        """
+        Return shared BSSID bits and mask separated with /, suitable for use as bssid_accept= wpa_supplicant option
+        """
+        binary_bssids = [f"{int(bssid.replace(":", ""), 16):048b}" for bssid in bssids]
+        bssid = []
+        mask = []
+        for bits_at_offset in zip(*binary_bssids):
+            if set(bits_at_offset) == {"1"}:
+                bssid.append("1")
+                mask.append("1")
+            elif set(bits_at_offset) == {"0"}:
+                bssid.append("0")
+                mask.append("1")
+            else:
+                bssid.append("0")
+                mask.append("0")
+        bssid = f"{int("".join(bssid), 2):012x}"
+        mask = f"{int("".join(mask), 2):012x}"
+        bssid = ":".join(bssid[i : i + 2] for i in range(0, len(bssid), 2))
+        mask = ":".join(mask[i : i + 2] for i in range(0, len(mask), 2))
+        return f"{bssid}/{mask}"
+
     @staticmethod
     def _is_crash_in_txt(txt):
         return (
@@ -1148,21 +1377,26 @@ country={country}
             or "brcmf_cfg80211_get_tx_power: error (-110)" in txt
             or ("Exception stack" in txt and "Workqueue" in txt and "Hardware name" in txt)
             or "Scan failed! ret -5" in txt
+            or "Hardware restart was requested" in txt
+            or "Microcode SW error detected. Restarting 0x0" in txt
         )
 
     def check_driver_crash(self):
+        self.wait_available(timeout=60)
         dmesg_output = self.run_command("dmesg -T | tail -n 1000", skip_exception=True)[1]
         if not self._is_crash_in_txt(dmesg_output):
             return False
-        log.info("BRCM driver crash detected on the Wi-Fi client, rebooting...")
+        log.info("Wi-Fi driver crash detected on the client, rebooting...")
         short_dmesg = "\n".join(dmesg_output.splitlines()[-50:])
         log.info(f"\n\nDMESG OUTPUT: \n\n:{short_dmesg}")
-        self.reboot()
+        self.reboot(retry=False)
         time.sleep(5)
         self.wait_available(5 * 60)
         # deep breath
         time.sleep(30)
         log.info("Client rebooted")
+        self.wait_available(1 * 60)
+        time.sleep(20)
         return True
 
     def _retry_connect_after_driver_crash(self, command, result, **kwargs):
@@ -1174,7 +1408,15 @@ country={country}
             return self.connect(retry=retry, **kwargs)
         else:
             self.last_cmd["command"] = command  # Update the command cache for returned result
-            return [-1, "", "Retries exhausted for connecting client"]
+            return [-1, "", "Retries exhausted for connecting client after driver crash"]
+
+    def _retry_connect_if_wrong_bssid_is_used(self, command, **kwargs):
+        retry = kwargs.pop("retry") - 1
+        if retry:
+            return self.connect(retry=retry, **kwargs)
+        else:
+            self.last_cmd["command"] = command  # Update the command cache for returned result
+            return [-1, "", "Retries exhausted for connecting client when wrong BSSID is selected"]
 
     def start_dhcp_client(
         self,
@@ -1232,14 +1474,17 @@ country={country}
             )
             start_time = time.time()
             ret = self._wait_for_dhcp_lease(cmd=command, timeout=timeout, **kwargs)
-            if ret[0]:
+            # dhcpd provides output always in stderr
+            if ret[0] or "bound to" not in ret[2]:
                 if not ret[2]:
                     ret[2], ret[1] = ret[1], ""
                 ret[2] = f"Unable to get IPv4: {ret[2].split('https://www.isc.org/software/dhcp/')[-1]}"
+                ret[0] = 1
             else:
                 ipv4_dhcp_lease_time = round(time.time() - start_time, 2)
-                log.info(f"Getting IPv4 address took: {ipv4_dhcp_lease_time} sec")
-                # Remain quiet when dhclient suceeds
+                ipv4_address = get_ipv4_address_from_text(ret[2].splitlines()[-1])
+                log.info(f"Getting {ipv4_address} IPv4 address took: {ipv4_dhcp_lease_time} sec")
+                # Remain quiet when dhclient succeeds
                 ipv4_dhcp_lease_time_stdout = f"ipv4_dhcp_lease={ipv4_dhcp_lease_time}"
                 ret[1], ret[2] = ipv4_dhcp_lease_time_stdout, ""
             out = self.merge_result(out, ret)
@@ -1248,10 +1493,10 @@ country={country}
             log.info("Starting router solicitation")
             ret = self.run_command(f"rdisc6 {ifname}", **kwargs)
             # dhclient can still succeed if client somehow has default route,
-            # despite not receiveing RA in response to rdisc6's solicitation
+            # despite not receiving RA in response to rdisc6's solicitation
             if ret[0] and not self.run_command("ip -6 route show default", **kwargs)[1]:
                 # Even when without default route we still cannot raise an error,
-                # some tests intentionally disable router advertisment but expect
+                # some tests intentionally disable router advertisement but expect
                 # dhclient to succeed by contacting all routers multicast address
                 # directly. But we can complain loudly in that case.
                 if not ret[2]:
@@ -1264,7 +1509,7 @@ country={country}
                 ret[0] = 0
                 ret[1] = ""
             else:
-                # Remain quiet when rdisc6 suceeds
+                # Remain quiet when rdisc6 succeeds
                 ret[1] = ret[2] = ""
             out = self.merge_result(out, ret)
 
@@ -1283,10 +1528,18 @@ country={country}
                     ret[2], ret[1] = ret[1], ""
                 ret[2] = f"Unable to get IPv6: {ret[2].split('https://www.isc.org/software/dhcp/')[-1]}"
             else:
+                # Sometimes resolv.conf written by dhclient gets cleared by rdnssd. Restart dhclient in such case.
+                resolv_conf = self.run_command("cat /etc/resolv.conf", **kwargs)[1]
+                if re.search(r"^nameserver\s*([a-f0-9:]+:+)+[a-f0-9]*", resolv_conf, flags=re.MULTILINE) is None:
+                    log.warning(f"Restarting dhclient due to no IPv6 nameservers in resolv.conf:\n{resolv_conf}")
+                    self.run_command(f"sudo dhclient -6 -r {ifname}", **kwargs)
+                    ret = self._wait_for_dhcp_lease(cmd=command, timeout=timeout, **kwargs)
+                    if ret[0]:
+                        return self.merge_result(out, ret)
                 ipv6_dhcp_lease_time = round(time.time() - start_time, 2)
                 log.info(f"Getting IPv6 address took: {ipv6_dhcp_lease_time} sec")
                 ipv6_dhcp_lease_time_stdout = f"ipv6_dhcp_lease={ipv6_dhcp_lease_time}"
-                # Remain quiet when dhclient suceeds
+                # Remain quiet when dhclient succeeds
                 ret[1], ret[2] = ipv6_dhcp_lease_time_stdout, ""
             out = self.merge_result(out, ret)
         return out
@@ -1312,8 +1565,16 @@ country={country}
 
     def stop_dhcp_client(self, ifname, clear_cache=False, **kwargs):
         log.info("Stopping old dhclient instances")
-        self.run_command(f"sudo dhclient -4 -r {ifname}", **kwargs)
-        self.run_command(f"sudo dhclient -6 -r {ifname}", **kwargs)
+        self.run_command(
+            f"sudo dhclient -4 -r -pf /var/run/dhclient.{ifname}.pid -lf /var/lib/dhcp/dhclient.{ifname}.leases "
+            f"-df /var/lib/dhcp/dhclient6.{ifname}.leases {ifname}",
+            **kwargs,
+        )
+        self.run_command(
+            f"sudo dhclient -6 -r -pf /var/run/dhclient6.{ifname}.pid -lf /var/lib/dhcp/dhclient6.{ifname}.leases "
+            f"-df /var/lib/dhcp/dhclient.{ifname}.leases {ifname}",
+            **kwargs,
+        )
         self.run_command(f"sudo ip addr flush {ifname} scope global", **kwargs)
         command = (
             f"sudo ps aux | grep /var/run/dhclient.{ifname}.pid | grep -v grep | awk '{{print $2}}' | "
@@ -1410,10 +1671,17 @@ country={country}
         """Return type of client based on config value"""
         return self.device.config["type"]
 
+    def get_netns(self):
+        """Return network namespace based on config value"""
+        return self.device.config["host"]["netns"]
+
     def get_client_ips(self, interface=None, ipv6_prefix=None, **kwargs):
         interface = interface if interface else self.get_iface()
         ip_adds = {"ipv4": False, "ipv6": False}
-        result = self.get_stdout(self.run_command(f"ip --oneline address show dev {interface}", **kwargs))
+        # sometimes there is STDOUT but ret code is 255, try to get IP from it
+        result = self.get_stdout(
+            self.run_command(f"ip --oneline address show dev {interface}", **kwargs), skip_exception=True
+        )
         if result and re.search("inet", result.strip()):
             for ip_entry in result.splitlines():
                 # inet 192.168.24.12 peer 192.168.24.1/32 scope global ppp0\    valid_lft forever preferred_lft forever
@@ -1503,7 +1771,8 @@ country={country}
         ifname = ifname if ifname else self.get_iface()
         ping_ver = self.which_ping(v6)
 
-        self.run_command(f"sudo killall {ping_ver}", **kwargs)
+        if not kwargs.pop("do_not_kill", False):
+            self.run_command(f"sudo killall {ping_ver}", **kwargs)
         cmd = f"sudo {ping_ver} -I {ifname} -W {wait} -i {interval} {target} > {file_path} 2>&1 &"
         log.info(f"Starting infinite ping with: {cmd}")
         ret = self.run_command(cmd)
@@ -1516,16 +1785,21 @@ country={country}
         ping_ver = self.which_ping(v6)
         self.run_command(f"sudo killall -s INT {ping_ver}", **kwargs)
         cmd_output = self.run_command(f"sudo cat {file_path}", **kwargs)
-        self.run_command("sudo rm /tmp/ping.log", **kwargs)
+        self.run_command("sudo rm %s" % file_path, **kwargs)
         if cmd_output[0] != 0:
             return response
 
         ping_results = pingparsing.PingParsing().parse(cmd_output[1]).as_dict()
-        response["result"] = ping_results["packet_loss_count"] <= int(threshold)
-        response["all_pings"] = ping_results["packet_transmit"]
-        response["success_ping"] = ping_results["packet_receive"]
-        response["missed_ping"] = ping_results["packet_loss_count"]
-        response["max_time"] = ping_results["rtt_max"]
+        response["result"] = (
+            ping_results["packet_loss_count"] <= int(threshold)
+            if ping_results["packet_loss_count"] is not None
+            else False
+        )
+        response["all_pings"] = ping_results.pop("packet_transmit")
+        response["success_ping"] = ping_results.pop("packet_receive")
+        response["missed_ping"] = ping_results.pop("packet_loss_count")
+        response["max_time"] = ping_results.pop("rtt_max")
+        response |= ping_results
         return response
 
     def set_hostname(self, new):
@@ -1651,7 +1925,16 @@ country={country}
         raise NotImplementedError("This method is implemented for specific client only")
 
     def create_ap(
-        self, channel, ifname="", ssid="test", extra_param="", timeout=120, dhcp=False, country="US", **kwargs
+        self,
+        channel,
+        ifname="",
+        ssid="test",
+        extra_param="",
+        timeout=30,
+        dhcp=False,
+        country="US",
+        band="2.4G",
+        **kwargs,
     ):
         """
         Create access point on the client.
@@ -1663,23 +1946,49 @@ country={country}
             timeout: (int) timeout for hostapd to go into AP-ENABLED state
             dhcp: (bool) start DHCP server
             country: (str) country code
+            band: (str) band name selector
 
         Returns: (list) [status, std_out, std_err]
 
         """
+        if band == "6G":
+            return [100, "", "6G band is not supported (yet)"]
+
+        if band in ["5GL", "5GU"]:
+            band = "5G"
+        elif band == "2G":
+            band = "2.4G"
+
         ifname = ifname if ifname else self.get_wlan_iface()
-        if not ifname:
-            log.info("No WiFi interface, probably previous hostapd not stopped")
-            # make sure that hostapd is not running
-            self.disable_ap(ifname, **kwargs)
-            ifname = ifname if ifname else self.get_wlan_iface()
+        if band == "5G" and self._get_ifname_driver_name(ifname) == "iwlwifi":
+            # Starting AP on 5G with scan workaround causes some two AP visible in the air. There is an option to use
+            # wpa_suppliant to start SoftAP. Manual check looks promising. Here is an example config file:
+            # (nswifi1:wlan0)root@debian-client:/home/plume# cat /tmp/wpa_supplicant_wlan0.conf
+            # ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+            # update_config=1
+            # country=US
+            # sae_pwe=2
+            #
+            # network={
+            # 	ssid="test_5180"
+            # 	psk="test1212test"
+            # 	proto=RSN
+            # 	key_mgmt=SAE
+            # 	mode=2
+            # 	frequency=5180
+            # 	ieee80211w=2
+            # }
+            return [101, "", "5G band is broken for Intel"]
+
+        # make sure that hostapd is not running
+        self.disable_ap(ifname, **kwargs)
 
         if not ifname:
             return [1, "No WiFi interface on the device", "No WiFi interface on the device"]
 
-        hw_mode = "g" if 1 <= channel <= 13 else "a"
+        hw_mode = "g" if band == "2.4G" else "a"
         dfs_params = ""
-        if 52 <= channel <= 144:
+        if 52 <= channel <= 144 and band == "5G":
             dfs_params = "ieee80211d=1\nieee80211h=1"
 
         extra_param = extra_param if extra_param else ""
@@ -1696,10 +2005,11 @@ channel={channel}
 
         # in case we need DHCP and provide internet access to the AP clients we need to move out Wi-Fi iface
         # out of its network namespace
-        ns_out = False
+        ns_out = True if self.get_netns_status()[1] != "active" else False
         if dhcp:
-            self.move_iface_out_of_network_namespace()
-            ns_out = True
+            if not ns_out:
+                self.move_iface_out_of_network_namespace()
+                ns_out = True
             # for Tb client we need to forward traffic over mgmt iface to have internet access
             if "rpi_server" not in self.version(short=False, skip_ns=ns_out)[1]:
                 # add route over mgmt iface
@@ -1721,9 +2031,12 @@ channel={channel}
                     return res
 
         self.run_command(f"sudo rm /tmp/hostapd_{ifname}.conf; sudo rm /tmp/hostapd_{ifname}.log", skip_ns=ns_out)
-        # save hostap.conf on the client
+        # save hostapd.conf on the client
         command = f"echo '{hostapd_cfg}' > /tmp/hostapd_{ifname}.conf"
         self.run_command(command, skip_ns=ns_out, **kwargs)
+
+        if band in ["5G", "6G"] and self._get_ifname_driver_name(ifname) == "iwlwifi":
+            self._enable_upper_bands_for_iwlwifi(ifname, band, **kwargs)
 
         command = (
             f"sudo hostapd -d -f /tmp/hostapd_{ifname}.log -t -B -P /tmp/hostapd_{ifname}.pid"
@@ -1733,14 +2046,27 @@ channel={channel}
 
         # Validate hostapd
         wait = timeout + time.time()
+        ext_timeout = False
         while wait > time.time():
             response = self.run_command(f"sudo cat /tmp/hostapd_{ifname}.log", skip_ns=ns_out, **kwargs)
             if re.search("AP-ENABLED", response[1], re.IGNORECASE):
                 break
+            elif re.search("AP-DISABLED", response[1], re.IGNORECASE):
+                log.error("HostAP cannot be started!")
+                # return log file as stderr
+                return [1, response[1], response[1]]
             elif re.search("Wait for CAC to complete", response[1], re.IGNORECASE):
                 time.sleep(60)
-                break
+                # update timeout while waiting for CAC
+                if not ext_timeout:
+                    wait = 90 + time.time()
+                    ext_timeout = True
+                continue
             time.sleep(5)
+        else:
+            # if we did not hit break, change ret code, as catting log file is always successful
+            response[0] = 1
+            response[2] += response[1]
         # store last command in case we need return later "response"
         last_cmd = self.last_cmd
         # Sometimes even though hostapd start successfully we can't start him with expected configuration
@@ -1749,7 +2075,7 @@ channel={channel}
             f'sudo cat /tmp/hostapd_{ifname}.log | grep "operation not permitted"', skip_ns=ns_out, **kwargs
         )
         if not overlapping_check[0]:
-            return [5, "", overlapping_check[1]]
+            return [5, "", "Overlapping check failed"]
 
         if response[0]:
             self.last_cmd = last_cmd
@@ -1789,7 +2115,7 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         response = self.merge_result(response, ret)
         return response
 
-    def disable_ap(self, ifname="", **kwargs):
+    def disable_ap(self, ifname: str = "", netns_recovery: bool = True, **kwargs):
         ns_out = True if self.get_netns_status()[1] != "active" else False
         kwargs["skip_ns"] = ns_out
         ifname = ifname if ifname else self.get_wlan_iface(**kwargs)
@@ -1798,8 +2124,11 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         hostapd_path = f"/tmp/hostapd_{ifname}.pid"
         command = f"sudo ps aux | grep -P {hostapd_path} | grep -v grep"
         response = self.run_command(command, **kwargs)
+        # starting HostApd on 5G or 6G starts also wpa_supplicant to enable upper bands for iwlwifi
+        # self.disconnect()
         if not response[1]:
-            self.recover_namespace_service(**kwargs)
+            if netns_recovery:
+                self.recover_namespace_service(**kwargs)
             return [0, f"Hostapd not running for ifname: {ifname}", ""]
 
         command = f"sudo ps aux | grep -P {hostapd_path} | grep -v grep | awk '{{print $2}}' | " f"xargs sudo kill"
@@ -1818,7 +2147,8 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         command = f"sudo ps aux | grep -P {dhcpd_path} | grep -v grep"
         response = self.run_command(command, **kwargs)
         if not response[1]:
-            self.recover_namespace_service(**kwargs)
+            if netns_recovery:
+                self.recover_namespace_service(**kwargs)
             return [0, f"DHCPD not running for ifname: {ifname}", ""]
 
         command = f"sudo ps aux | grep -P {dhcpd_path} | grep -v grep | awk '{{print $2}}' | " f"xargs sudo kill"
@@ -1827,7 +2157,8 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         if response[0] and "Usage:" not in response[2]:
             log.warning(f"Unable to kill dhcpd for {self.device.name}, error: {response[2]}")
 
-        self.recover_namespace_service(**kwargs)
+        if netns_recovery:
+            self.recover_namespace_service(**kwargs)
         return [0, "", ""]
 
     def refresh_ip_address(
@@ -1875,7 +2206,11 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
                     return [1, "", "No dhclient running, nothing to restart"]
                 log.warning("Cannot get running dhclient. Starting with default parameters")
             else:
-                dhclient = cur_dhclient[1][cur_dhclient[1].find("dhclient") :]
+                if (_cur_dhclient := cur_dhclient[1].find("dhclient")) != -1:
+                    dhclient = cur_dhclient[1][_cur_dhclient:]
+                else:
+                    log.error("Cannot get running dhclient. Starting with default parameters")
+                    dhclient = ""
 
         if clear_dhcp:
             self.stop_dhcp_client(iface, clear_cache=not reuse)
@@ -1890,6 +2225,7 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
 
     def set_mac(self, interface, new_mac, **kwargs):
         self.run_command(f"sudo ifconfig {interface} down", **kwargs)
+        time.sleep(0.5)
         ret = self.run_command(f"sudo ifconfig {interface} hw ether {new_mac}", **kwargs)
         # short pause is needed here, otherwise we are not able to read the address right after
         time.sleep(1)
@@ -1911,9 +2247,16 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         return out
 
     def get_target_version(self, version: Literal["stable", "latest"]) -> str:
-        """Only retrieve target version from artifactory."""
-        linux_upgrade = LinuxClientUpgrade(lib=self)
-        return linux_upgrade.get_target_version(version=version)
+        """Retrieves the actual target version for stable/latest from the client model properties file.
+        Returns string with version.
+        """
+        match version:
+            case "latest":
+                return self.device.config["capabilities"]["latest_fw_version"]
+            case "stable":
+                return self.device.config["capabilities"]["fw_version"]
+            case _:
+                raise ValueError("Invalid version type. Use 'stable' or 'latest'.")
 
     def upgrade(self, fw_path=None, restore_cfg=True, force=False, http_address="", version=None, **kwargs):
         """
@@ -1952,6 +2295,10 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         # It is designed for testbed server only
         raise NotImplementedError("Testbed server only")
 
+    def is_mqtt_broker_started(self, **kwargs):
+        # It is designed for testbed server only
+        raise NotImplementedError("Testbed server only")
+
     def set_tb_nat(self, mode, **kwargs):
         # It is designed for testbed server only
         raise NotImplementedError("Testbed server only")
@@ -1965,6 +2312,10 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         raise NotImplementedError("Testbed server only")
 
     def limit_tx_power(self, state, value, **kwargs):
+        # It is designed for testbed server only
+        raise NotImplementedError("Testbed server only")
+
+    def set_bandwidth_limit(self, *values, duration=30, repeats=10, interface=None, queue_size=None, **kwargs):
         # It is designed for testbed server only
         raise NotImplementedError("Testbed server only")
 
@@ -2020,7 +2371,7 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         return [
             0,
             f"{device_to_simulate} is simulated with following MAC address: {adt_lib.new_client_mac}\n"
-            f'To clear client state, use "clear-adt" command',
+            f'To clear client state, use "adt-clear" command',
             "",
         ]
 
@@ -2143,8 +2494,26 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         Returns: (list) [status, std_out, std_err]
 
         """
+        # Make sure wpa-supplicant and hostapd is disabled, otherwise the interface won't be moved
+        self.disable_ap(netns_recovery=False)
+        self.run_command("sudo killall iperf3")
+        self.run_command("sudo killall iperf")
+        self.run_command("sudo killall tcpdump")
+        self.disconnect()
         netns = self.device.config.get("host", {}).get("netns")
         ret = self.run_command(f"sudo systemctl stop {netns}.service")
+        wlan_interface = self.get_wlan_iface(skip_ns=True)
+        if not wlan_interface and self.name in ["w1", "w2"]:
+            log.warning(
+                f"Wlan interface is missing on {self.name} after stopping {netns}.service. Rebooting a client..."
+            )
+            self.reboot(skip_ns=True, retry=False)
+            self.wait_available(timeout=120, skip_ns=True)
+            ret = self.run_command(f"sudo systemctl stop {netns}.service")
+            wlan_interface = self.get_wlan_iface(skip_ns=True)
+        if not wlan_interface:
+            raise Exception(f"Wlan interface is missing on {self.name} after stopping {netns}.service.")
+        log.info(f"Wlan interface successfully moved out of namespace for {self.name} client")
         return ret
 
     def get_temperature(self, **kwargs):
@@ -2171,7 +2540,7 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         # Make sure skip_ns flag is set to False in case of executing next tests.
         self.set_skip_ns_flag(False)
         kwargs.pop("skip_ns", False)
-        if self.get_wlan_iface(force=True, skip_ns=False, **kwargs):
+        if self.get_wlan_iface(skip_ns=False, **kwargs):
             return [0, "Network namespace is up and running", ""]
 
         uptime_result = self.get_stdout(self.uptime(timeout=20, skip_ns=True, **kwargs), skip_exception=True)
@@ -2186,22 +2555,41 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         # Log namespace status to find True reason what was going on
         namespace_status = self.run_command(f"sudo systemctl status {client_namespace}.service", skip_ns=True, **kwargs)
         log.info(f"Namespace status:\n{namespace_status[1]}")
-        # Before restart namespace service make sure wpa-supplicant process is killed
+        # Before restart namespace service make sure wpa-supplicant and hostapd process is killed
         self.disconnect(ifname="", skip_ns=True, **kwargs)
+        self.disable_ap(netns_recovery=False)
+        self.run_command("sudo killall iperf3", skip_ns=True)
+        self.run_command("sudo killall iperf", skip_ns=True)
+        self.run_command("sudo killall tcpdump", skip_ns=True)
         self.run_command(f"sudo systemctl restart {client_namespace}.service", skip_ns=True, **kwargs)
-        timeout = time.time() + 60
+        # Reboot w1, w2 clients only. Skip it for testbed server
+        if self.name in ["w1", "w2"]:
+            self.wait_available(timeout=120, skip_ns=True)
+            self.reboot(skip_ns=True)
+            self.wait_available(timeout=120, skip_ns=True)
+
+        if self.wait_for_enable_wifi_netns():
+            return [0, "Network namespace successfully restored", ""]
+        return [2, "Cannot restore network namespace", "Cannot restore network namespace"]
+
+    def wait_for_enable_wifi_netns(self, time_wait: int = 120, **kwargs) -> bool:
+        timeout = time.time() + time_wait
         while timeout > time.time():
             if self.get_stdout(
                 self.uptime(timeout=10, skip_ns=False, **kwargs), skip_exception=True
-            ) and self.get_wlan_iface(force=True, skip_ns=False, **kwargs):
-                return [0, "Network namespace successfully restored", ""]
+            ) and self.get_wlan_iface(skip_ns=False, **kwargs):
+                return True
             time.sleep(2)
-        return [2, "Cannot restore network namespace", "Cannot restore network namespace"]
+        return False
 
-    def check_wireless_client(self):
-        if not self.device.config.get("wifi"):
-            return True
-        return True if self.get_wlan_iface() else False
+    def is_wifi_client(self) -> bool:
+        return self.device.config.get("wifi", False)
+
+    def check_wifi_netns(self) -> bool:
+        if not self.is_wifi_client():
+            return False
+        netns = self.device.config.get("host", {}).get("netns", "")
+        return True if netns else False
 
     def make_dir(self, path, **kwargs):
         response = self.run_command(f"mkdir -p {path}", **kwargs)
@@ -2222,7 +2610,9 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         return response
 
     def get_pid_by_cmd(self, cmd, **kwargs):
-        response = self.run_command(f'ps aux | grep "{cmd}" | grep -v "grep"' + " | awk '{print $2}'", **kwargs)
+        response = self.run_command(
+            f'ps aux | grep "{cmd}" | grep -v "grep" | grep -v "netns exec"' + " | awk '{print $2}'", **kwargs
+        )
         if response[0] or not response[1]:
             return response
         response = self.get_stdout(response, **kwargs)
@@ -2410,6 +2800,76 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
         )
         return host_name[1]
 
+    def get_wpa_supplicant_assoc_time(self) -> float | None:
+        """Get WPA-supplicant assoc time based on WPA-supplicant logs."""
+        assoc_time = None
+        log_file = self.get_wpa_supplicant_base_path(self.wlan_ifname)
+        wpa_supplicant_logs = self.run_command(f"cat {log_file}.log")[1]
+        if not wpa_supplicant_logs:
+            return assoc_time
+        wpa_supplicant_split_logs = wpa_supplicant_logs.splitlines()
+        connect_event = "CTRL-EVENT-CONNECTED"
+        init_log_entry = wpa_supplicant_split_logs[0]
+        assoc_log_entry = next(filter(lambda log_entry: connect_event in log_entry, wpa_supplicant_split_logs), None)
+        if not assoc_log_entry:
+            return assoc_time
+        try:
+            init_timestamp = float(re.search(r"\d+\.\d+", init_log_entry).group())
+            assoc_timestamp = float(re.search(r"\d+\.\d+", assoc_log_entry).group())
+            assoc_time = round(assoc_timestamp - init_timestamp, 2)
+        except Exception as err:
+            log.error("Can't calculate wpa-supplicant assoc time")
+            log.exception(err)
+        return assoc_time
+
+    def clear_cached_properties(self):
+        for cached_property in CACHED_PROPERTIES:
+            self.__dict__.pop(cached_property, None)
+
+    # PROPERTIES FOR STORED DATA
+    @functools.cached_property
+    def mac(self) -> str:
+        if wlan_ifname := self.wlan_ifname:
+            client_ifname = wlan_ifname
+        else:
+            client_ifname = self.eth_ifname
+        assert client_ifname, "No interface found"
+        mac_address = self.get_stdout(self.get_mac(client_ifname))
+        # Cloud API requires lowercase only
+        return mac_address.lower()
+
+    @functools.cached_property
+    def eth_ifname(self) -> str:
+        return self.get_eth_iface()
+
+    @functools.cached_property
+    def wlan_ifname(self) -> str:
+        return self.get_wlan_iface()
+
+    @functools.cached_property
+    def ifname(self) -> str:
+        if self.device.config.get("eth"):
+            return self.get_eth_iface()
+        return self.get_wlan_iface()
+
+    @functools.cached_property
+    def wlan_information(self) -> dict[str:object]:
+        """
+        Get information about wlan interface
+
+        Returns: {
+            'driver': (str) driver_name,
+            'mac': (str) (mac_addr),
+            'phy': (str) phy,
+            'FT': (bool) state,
+            'channels': (list)(int),
+            'ip': (str) ip_address,
+            'phy': (str) phy index,
+            ...
+        }
+        """
+        return self.get_wlan_information()[1].get("wlan", {}).get(self.wlan_ifname, {})
+
 
 class ClientIface(Iface):
     pass
@@ -2493,15 +2953,6 @@ class LinuxClientUpgrade:
             f"Upgrade finished unsuccessfully. " f"Current version: {cur_version}. Expected version: {target_version}",
         ]
 
-    def get_target_version(self, version: Literal["stable", "latest"]) -> str:
-        """Retrieves the actual target version for stable/latest from artifactory.
-        Returns string with version.
-        """
-        download_url = self.get_latest_brix_upgrade_url(version=version)
-        expected_file = download_url.split("/")[-1]
-        target_version = re.findall(r"(\d+\.\d+[-,.]\d+)", expected_file)[0]
-        return target_version
-
     def start_upgrade(self, fw_path=None, force=False, version=None, **kwargs):
         """
         Upgrade Brix client to the target firmware, if fw_path=None download the latest build version from the
@@ -2520,7 +2971,7 @@ class LinuxClientUpgrade:
         self.lib.run_command(f"sudo date +%s -s @{current_date}")
 
         self.current_version = self.get_version()
-        if StrictVersion("1.0.3") > StrictVersion(self.current_version):
+        if compare_fw_versions(self.current_version, "1.0.3", "<"):
             return [2, "", "Upgrade is supported > 1.0.3. Upgrade your device manually"]
 
         if fw_path is None:
@@ -2531,7 +2982,7 @@ class LinuxClientUpgrade:
             download_url = None
             target_version = re.findall(r"(\d+\.\d+[-,.]\d+)", str(fw_path))[0]
 
-        if StrictVersion(self.current_version) >= StrictVersion(target_version) and force is False:
+        if compare_fw_versions(self.current_version, target_version, ">=") and force is False:
             return [
                 3,
                 "",

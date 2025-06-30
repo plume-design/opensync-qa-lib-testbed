@@ -94,7 +94,7 @@ class Sanity(object):
                     gw_node = True
                     eth_uuid = []
                     for iface in tables["Port table"]:
-                        if iface["name"] in ["eth0", "eth1", "eth0.835", "eth1.835"]:
+                        if iface["name"] in ["eth0", "eth1"]:
                             eth_uuid.append(iface["_uuid"])
                     if eth_uuid:
                         for bridge in tables["Bridge table"]:

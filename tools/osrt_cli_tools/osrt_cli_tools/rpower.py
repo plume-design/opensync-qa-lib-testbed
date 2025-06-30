@@ -1,5 +1,7 @@
+import os
 import sys
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from lib_testbed.generic.util.common import threaded
@@ -10,12 +12,15 @@ from osrt_cli_tools.utils import (
     devices_optional_argument,
     debug_option,
     json_option,
+    verbosity_option,
     disable_colors_option,
     prepare_logger,
+    set_log_verbosity,
     get_testbed_name,
     is_autocomplete,
 )
-
+from lib_testbed.generic.util.config import load_tb_config
+from lib_testbed.generic.rpower.rpowerlib import PowerControllerLib
 
 if is_autocomplete():
     import click
@@ -49,36 +54,36 @@ def print_tasks_output(ctx, output) -> str | None:
 
 def get_rpower_object(tb_name: str = None):
     """Lazy load PowerControllerLib. Speeds up the help."""
-    from lib_testbed.generic.util.config import load_tb_config
-    from lib_testbed.generic.rpower.rpowerlib import PowerControllerLib
-
     if not tb_name:
         tb_name = get_testbed_name()
     config = load_tb_config(tb_name, skip_deployment=True)
     return PowerControllerLib(config)
 
 
-@threaded
 def rpower_task(ctx, command: str, tb_name: str, devices: str = None, **kwargs) -> dict[str, list[int, str, str]]:
-    """Task for truning on devices for given testbed name. If command is on/off/cycle, then reservation is performed.
-    The testbed is reeserved before executing the command (hardcoded to 15 minutes), and then it is unreserved after
-    the command.
+    """Task for setting status for devices for given testbed name. If command is on/off/cycle, then reservation
+    is performed. The testbed is reeserved before executing the command (hardcoded to 15 minutes), and then it
+    is unreserved after the command.
 
     Raises :py:exc:`ValueError` when incorrect/not supported command is passed over.
     """
     from osrt_cli_tools.reserve import get_reserve_object
-    from lib_testbed.generic.util.logger import log
 
     reservation_status = None
+    skip_reservation = ctx.obj.get("SKIP_RESERVATION")
     try:
         if command in ["on", "off", "cycle"]:
-            if not ctx.obj.get("SKIP_RESERVATION"):
-                log.debug("Reserving testbed '%s'", tb_name)
+            if not skip_reservation:
                 reserve_obj = get_reserve_object(tb_name=tb_name)
-                reservation_status = reserve_obj.reserve_test_bed(timeout=15).get("status")
-                if reservation_status is False:
-                    click.echo(f"Could not reserve testbed {tb_name}")
-                    return {command: [1, "", "Could not set reservation"]}
+                current_reservation = reserve_obj.get_reservation_status()
+                if current_reservation.get("busyByMe"):
+                    skip_reservation = True
+                else:
+                    log.debug("Reserving testbed '%s'", tb_name)
+                    reservation_status = reserve_obj.reserve_test_bed(timeout=15).get("status")
+                    if reservation_status is False:
+                        click.echo(f"Could not reserve testbed {tb_name}")
+                        return {command: [1, "", "Could not set reservation"]}
 
         rpower = get_rpower_object(tb_name=tb_name)
         if devices:
@@ -87,7 +92,7 @@ def rpower_task(ctx, command: str, tb_name: str, devices: str = None, **kwargs) 
             log.info("DRY-RUN: Will execute command: '%s', devices '%s'", command, devices)
             return {command: [0, f"dry-run: {command} devices: {devices}", ""]}
 
-        log.debug("Executing command: '%s', devices '%s'", command, devices)
+        log.debug("Executing command against testbed '%s': '%s', devices '%s'", tb_name, command, devices)
         match command:
             case "on":
                 return rpower.on(devices)
@@ -105,22 +110,35 @@ def rpower_task(ctx, command: str, tb_name: str, devices: str = None, **kwargs) 
                 raise ValueError(f"Command '{command}' not supportred by rpower_task")
     finally:
         if command in ["on", "off", "cycle"]:
-            if not ctx.obj.get("SKIP_RESERVATION"):
+            if not skip_reservation:
                 if reservation_status:
                     log.debug("Unreserving testbed '%s'", tb_name)
                     reserve_obj.unreserve()
 
 
-def exeute_tasks(ctx, command: str, devices: str = None, **kwargs) -> None:
-    """Execute tasks for given command across testbeds as defined in the provided click context."""
-    from lib_testbed.generic.util.logger import log
+# Rpower threads are IO-bound, so allow more workers than Python's default
+_rpower_executor = ThreadPoolExecutor(min(32, (os.cpu_count() or 5) * 5))
+threaded_rpower_task = threaded(rpower_task, executor=_rpower_executor)
 
-    tasks, results = {}, {}
-    for tb_name in ctx.obj.get("TESTBEDS"):
-        tasks[tb_name] = rpower_task(ctx=ctx, command=command, tb_name=tb_name, devices=devices, **kwargs)
+
+def exeute_tasks(ctx, command: str, devices: str = None, **kwargs) -> None:
+    """Execute tasks for given command across testbeds as defined in the provided click context.
+    For rpower it cannot be performed in parallel due to threading issues of Python's requests when
+    combined with :py:mod:`concurrent.futures`.
+    """
+    futures, results = {}, {}
+    # Don't execute `rpower on` and `rpower cycle` in parallel, since it could result in big power spikes
+    if command not in ("on", "cycle"):
+        for tb_name in ctx.obj.get("TESTBEDS"):
+            futures[tb_name] = threaded_rpower_task(
+                ctx=ctx, command=command, tb_name=tb_name, devices=devices, **kwargs
+            )
     for tb_name in ctx.obj.get("TESTBEDS"):
         try:
-            results[tb_name] = tasks[tb_name].result()
+            if command in ("on", "cycle"):
+                results[tb_name] = rpower_task(ctx=ctx, command=command, tb_name=tb_name, devices=devices, **kwargs)
+            else:
+                results[tb_name] = futures[tb_name].result()
         except Exception as err:
             err_str = "".join(traceback.format_exception(err))
             log.debug("Testbed %s resulted with error:\n%s", tb_name, err_str)
@@ -131,13 +149,22 @@ def exeute_tasks(ctx, command: str, devices: str = None, **kwargs) -> None:
 @click.group(context_settings=dict(help_option_names=["-h", "--help"]))
 @debug_option
 @json_option
+@verbosity_option
 @disable_colors_option
 @click.pass_context
-def cli(ctx, debug, json, disable_colors):
+def cli(ctx, debug, json, verbosity, disable_colors):
     """Rpower control tool.
 
     **DEVICES** are the devices to run the command on. Can be one of the following:
-    {<device_name>[,...] | all | pods | clients}
+    `{<device_name>[,...] | all | pods | clients}`. A device name or a comma-separated list of devices is accepted.
+
+    Example usage:
+
+    ```
+    rpower status gw,l2,w1
+    rpower on pods
+    rpower cycle w1,w2,gw
+    ```
     """
     log.debug("Entering rpower tool context")
     if not sys.stdout.isatty():
@@ -147,17 +174,35 @@ def cli(ctx, debug, json, disable_colors):
         ctx.obj["DEBUG"] = debug
     if not is_autocomplete():
         prepare_logger(ctx.obj["DEBUG"])
+    if not ctx.obj.get("VERBOSITY"):
+        ctx.obj["VERBOSITY"] = verbosity
     if not ctx.obj.get("JSON"):
         ctx.obj["JSON"] = json
     if not ctx.obj.get("DISABLE_COLORS"):
         ctx.obj["DISABLE_COLORS"] = disable_colors
+    if not is_autocomplete():
+        if ctx.obj.get("VERBOSITY"):
+            set_log_verbosity(ctx.obj["VERBOSITY"])
+        else:
+            prepare_logger(ctx.obj["DEBUG"])
 
 
 @cli.command()
 @devices_optional_argument
 @click.pass_context
 def status(ctx, devices):
-    """Return the power state of **DEVICES**."""
+    """Return the power state of **DEVICES**.
+
+    The **DEVICES** can either be a device name or a comma-separated list of devices.
+
+    Example usage:
+
+    ```
+    rpower status gw
+    rpower status pods
+    rpower status l2,l1,w2
+    ```
+    """
     if ctx.obj.get("TESTBEDS"):
         exeute_tasks(ctx=ctx, command="status", devices=devices)
     else:
@@ -170,7 +215,10 @@ def status(ctx, devices):
 @devices_optional_argument
 @click.pass_context
 def consumption(ctx, devices):
-    """Return power consumption of **DEVICES**. Supported only on Shelly PDUs."""
+    """Return power consumption of **DEVICES**. Supported only on Shelly PDUs.
+
+    The **DEVICES** can either be a device name or a comma-separated list of devices.
+    """
     if ctx.obj.get("TESTBEDS"):
         exeute_tasks(ctx=ctx, command="consumption", devices=devices)
     else:
@@ -183,7 +231,18 @@ def consumption(ctx, devices):
 @devices_argument
 @click.pass_context
 def on(ctx, devices):
-    """Turns on specified **DEVICES**."""
+    """Turns on specified **DEVICES**.
+
+    The **DEVICES** can either be a device name or a comma-separated list of devices.
+
+    Example usage:
+
+    ```
+    rpower on gw
+    rpower on pods
+    rpower on l2,l1,w2
+    ```
+    """
     if ctx.obj.get("TESTBEDS"):
         exeute_tasks(ctx=ctx, command="on", devices=devices)
     else:
@@ -196,7 +255,18 @@ def on(ctx, devices):
 @devices_argument
 @click.pass_context
 def off(ctx, devices):
-    """Turns off specified **DEVICES**."""
+    """Turns off specified **DEVICES**.
+
+    The **DEVICES** can either be a device name or a comma-separated list of devices.
+
+    Example usage:
+
+    ```
+    rpower off gw
+    rpower off pods
+    rpower off l2,l1,w2
+    ```
+    """
     if ctx.obj.get("TESTBEDS"):
         exeute_tasks(ctx=ctx, command="off", devices=devices)
     else:
@@ -217,7 +287,18 @@ def off(ctx, devices):
 @devices_argument
 @click.pass_context
 def cycle(ctx, devices, timeout):
-    """Power cycles (off->wait timeout->on) **DEVICES**."""
+    """Power cycles (off->wait timeout->on) **DEVICES**.
+
+    The **DEVICES** can either be a device name or a comma-separated list of devices.
+
+    Example usage:
+
+    ```
+    rpower cycle gw
+    rpower cycle pods
+    rpower cycle l2,l1,w2
+    ```
+    """
     if ctx.obj.get("TESTBEDS"):
         exeute_tasks(ctx=ctx, command="cycle", devices=devices, timeout=timeout)
     else:

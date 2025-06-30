@@ -1,6 +1,7 @@
 {
   "short-name": "BCM947622DVT",
   "s3-bucket": "",
+  "build-profile": "dev-debug",
   "fn-regex": "bcm947622GW.*_nand_fs_image_256_pureubi_5.02L.07p2",
   "4.2.0": {
     "proj-name": "build_BCM947622DVT_v4.2.0",
@@ -69,6 +70,13 @@
     "img-suffix": "pkgtb"
   },
   "build_device_featurebranch": {
+    "proj-name": "build_device_featurebranch",
+    "fn-regex": "bcm947622GW.*_nand_squashfs_update",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "fbb": {
     "proj-name": "build_device_featurebranch",
     "fn-regex": "bcm947622GW.*_nand_squashfs_update",
     "encryption": true,

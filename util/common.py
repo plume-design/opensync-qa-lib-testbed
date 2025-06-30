@@ -12,6 +12,7 @@ import subprocess
 import logging
 import concurrent.futures
 from copy import deepcopy
+from statistics import mean
 from functools import wraps
 from time import time, sleep
 from typing import Any
@@ -25,6 +26,7 @@ from lib_testbed.generic.util.logger import log
 BASE_DIR = Path(__file__).absolute().parents[3]
 CACHE_DIR = BASE_DIR / ".framework_cache"
 SKIP_RESULT = "[SKIP_RESULT]"
+NOT_APPLICABLE = "[NOT_APPLICABLE]"
 ALL_MARKERS_NAME = "all_markers"  # Variable assignation is done in lib/util/conftest_base.py
 OVERWRITE_MARK_NAME = "overwrite_markers"
 QASE_ID_MARKER_NAME = "qase_id"
@@ -32,112 +34,32 @@ QASE_TITLE_MARKER_NAME = "qase_title"
 UNIT_TEST_MARKER_NAME = "gen_unit_test"
 _DEFAULT_THREAD_EXECUTOR = concurrent.futures.ThreadPoolExecutor()
 POSSIBLE_BANDS = ["2.4G", "5G", "5GL", "5GU", "6G"]
-CHANNEL_GROUPS = {
-    "5G": {
-        "40": [
-            [36, 40],
-            [44, 48],
-            [52, 56],
-            [60, 64],
-            [100, 104],
-            [108, 112],
-            [116, 120],
-            [124, 128],
-            [132, 136],
-            [140, 144],
-            [149, 153],
-            [157, 161],
-        ],
-        "80": [
-            [36, 40, 44, 48],
-            [52, 56, 60, 64],
-            [100, 104, 108, 112],
-            [116, 120, 124, 128],
-            [132, 136, 140, 144],
-            [149, 153, 157, 161],
-        ],
-        "160": [
-            [36, 40, 44, 48, 52, 56, 60, 64],
-            [100, 104, 108, 112, 116, 120, 124, 128],
-        ],
-    },
-    "6G": {
-        "40": [
-            [1, 5],
-            [9, 13],
-            [17, 21],
-            [25, 29],
-            [33, 37],
-            [41, 45],
-            [49, 53],
-            [57, 61],
-            [65, 69],
-            [73, 77],
-            [81, 85],
-            [89, 93],
-            [97, 101],
-            [105, 109],
-            [113, 117],
-            [121, 125],
-            [129, 133],
-            [137, 141],
-            [145, 149],
-            [153, 157],
-            [161, 165],
-            [169, 173],
-            [177, 181],
-            [185, 189],
-            [193, 197],
-            [201, 205],
-            [209, 213],
-            [217, 221],
-            [225, 229],
-        ],
-        "80": [
-            [1, 5, 9, 13],
-            [17, 21, 25, 29],
-            [33, 37, 41, 45],
-            [49, 53, 57, 61],
-            [65, 69, 73, 77],
-            [81, 85, 89, 93],
-            [97, 101, 105, 109],
-            [113, 117, 121, 125],
-            [129, 133, 137, 141],
-            [145, 149, 153, 157],
-            [161, 165, 169, 173],
-            [177, 181, 185, 189],
-            [193, 197, 201, 205],
-            [209, 213, 217, 221],
-        ],
-        "160": [
-            [1, 5, 9, 13, 17, 21, 25, 29],
-            [33, 37, 41, 45, 49, 53, 57, 61],
-            [65, 69, 73, 77, 81, 85, 89, 93],
-            [97, 101, 105, 109, 113, 117, 121, 125],
-            [129, 133, 137, 141, 145, 149, 153, 157],
-            [161, 165, 169, 173, 177, 181, 185, 189],
-            [193, 197, 201, 205, 209, 213, 217, 221],
-        ],
-        "320": [
-            [1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61],
-            [65, 69, 73, 77, 81, 85, 89, 93, 97, 101, 105, 109, 113, 117, 121, 125],
-            [129, 133, 137, 141, 145, 149, 153, 157, 161, 165, 169, 173, 177, 181, 185, 189],
-            [33, 37, 41, 45, 49, 53, 57, 61, 65, 69, 73, 77, 81, 85, 89, 93],
-            [97, 101, 105, 109, 113, 117, 121, 125, 129, 133, 137, 141, 145, 149, 153, 157],
-            [161, 165, 169, 173, 177, 181, 185, 189, 193, 197, 201, 205, 209, 213, 217, 221],
-        ],
-    },
-}
+POD_CRASH_PLACES = [
+    "/usr/plume/log_archive/crash/",
+    "/sys/fs/pstore/",
+    "/var/log/lm/crash/",
+    "/usr/opensync/log_archive/crash/",
+]
 
 
-def skip_exception(*errors, log_traceback: bool = True, reraise: bool = False, log_level: int = logging.ERROR):
+def skip_exception(
+    *errors,
+    log_traceback: bool = True,
+    reraise: bool = False,
+    log_level: int = logging.ERROR,
+    log_short_exception: bool = False,
+):
     """
     Decorator that accepts all Exceptions, e.g. :py:exc:`IOError`, :py:exc:`ValueError`
     and wraps the whole function and skips those Exceptions.
     When reraise=True, the exception is re-raised after being logged. This flag is useful for logging exceptions
-    in multi-threaded applications.
+    in multi-threaded applications. Note that exceptions raised in threads are not automatically re-raised in the
+    main thread. This can be done by the user, or through the :py:meth:`concurrent.futures.Future.result` call.
     It is possible to enforce desired log level through the argument log_level, which accepts standard/configured
     Python :py:mod:`logging` levels, e.g. ``logging.DEBUG``.
+    If ``log_short_exception`` is set to True, then in addition the exception message is logged on error level.
+
+
     Usage:
 
     .. code-block:: py
@@ -155,10 +77,12 @@ def skip_exception(*errors, log_traceback: bool = True, reraise: bool = False, l
             try:
                 return func(*args, **kwargs)
             except errors as e:
+                if log_short_exception:
+                    log.error("And error occurred: %s", str(e))
                 if log_traceback and log_level == logging.ERROR:
                     log.exception("An error occurred")
                 elif log_traceback:
-                    log.log(log_level, "An error occurred: %s", "\n".join(traceback.format_exception(e)))
+                    log.log(log_level, "An error occurred: %s", "".join(traceback.format_exception(e)))
                 else:
                     log.log(log_level, "An error occurred: %s", e)
                 if reraise:
@@ -198,6 +122,42 @@ def threaded(f, executor=None) -> concurrent.futures.Future:
         return (executor or _DEFAULT_THREAD_EXECUTOR).submit(f, *args, **kwargs)
 
     return wrap
+
+
+def get_ping_statistics(ping_output):
+    ping_pattern = (
+        r"(?P<size>\d+) bytes from [a-zA-Z0-9_.(): ]+: icmp_seq=(?P<seq>\d+) ttl=(?P<ttl>\d+) time=(?P<time>[\d.]+)"
+    )
+    ret = {
+        "packet_transmit": 0,
+        "packet_receive": 0,
+        "packet_loss_percent": 0,
+        "packet_loss_count": 0,
+        "rtt_min": 0,
+        "rtt_avg": 0,
+        "rtt_max": 0,
+    }
+
+    matches = re.finditer(ping_pattern, ping_output, re.MULTILINE)
+    seq = []
+    rtt = []
+    for match in matches:
+        ping_stats = match.groupdict()
+        seq.append(int(ping_stats["seq"]))
+        rtt.append(float(ping_stats["time"]))
+    if not seq:
+        return ret
+    ret["packet_transmit"] = max(seq) - min(seq) + 1
+    ret["packet_receive"] = len(seq)
+    try:
+        ret["packet_loss_percent"] = round(100 - (ret["packet_receive"] / ret["packet_transmit"]) * 100, 2)
+    except ZeroDivisionError:
+        ret["packet_loss_percent"] = 100
+    ret["packet_loss_count"] = ret["packet_transmit"] - ret["packet_receive"]
+    ret["rtt_min"] = min(rtt)
+    ret["rtt_avg"] = round(mean(rtt), 2)
+    ret["rtt_max"] = max(rtt)
+    return ret
 
 
 class JsonPrettyPrinter(pprint.PrettyPrinter):
@@ -270,7 +230,7 @@ def wait_for(predictable: callable, timeout: int, tick: float) -> tuple[bool, An
     Either non-empty string, or non-zero or a non-empty container. After ``timeout`` (in seconds) is reached,
     the function returns the most recent return value of the predicable. The ``tick`` (in seconds) specifies
     the time to sleep before attempts to evaluate the ``predictable`` again. The ``predictable`` must not
-    take any additional arguments. Use either :py:func:`functools.partial` or ``lambda``."""
+    take any additional arguments (use ``lambda`` to bypass this)."""
     start = time()
     condition = False
     ret = None
@@ -290,12 +250,23 @@ def compare_fw_versions(fw_version: str, reference_fw: str, condition: str = ">"
     """Compare two FW version and returns True if fw_version is newer than reference_fw.
     It is possible to compare version with the >, <, >=, <= or == conditions.
     """
+    # These version strings should all pass - synthetic examples:
+    # 1.2
+    # 1.2-55
+    # 1.2-55-a6b7c8
+    # 1.2.3
+    # 1.2.3-55
+    # 1.2.3-55-a6b7c8
+    # 1.2.3.4
+    # 1.2.3.4-55
+    # 1.2.3.4-55-a6b7c8
+    fw_version_pattern = r"(\d+\.\d+([-.]\d+)?([-.]\d+)?([-.]\d+)?)"
     try:
-        firmware_version = re.search(r"(\d+\.\d+\.\d+([-.]\d+)?)", fw_version).group().replace("-", ".")
+        firmware_version = re.search(fw_version_pattern, fw_version).group()
     except AttributeError:
         firmware_version = fw_version
     try:
-        reference_fw_version = re.search(r"(\d+\.\d+\.\d+([-.]\d+)?)", reference_fw).group().replace("-", ".")
+        reference_fw_version = re.search(fw_version_pattern, reference_fw).group()
     except AttributeError:
         reference_fw_version = reference_fw
     try:
@@ -316,6 +287,18 @@ def compare_fw_versions(fw_version: str, reference_fw: str, condition: str = ">"
         return None
 
 
+def get_md5sum(file_path: str) -> str:
+    """Calculate and return the md5 hash of the file in `file_path`."""
+    import hashlib
+
+    hash_md5 = hashlib.md5()
+    with open(file_path, "rb") as file:
+        for chunk in iter(lambda: file.read(4096), b""):
+            hash_md5.update(chunk)
+    md5sum = hash_md5.hexdigest()
+    return md5sum
+
+
 class DeviceCommon:
     @staticmethod
     def convert_model_name(model):
@@ -333,8 +316,8 @@ class DeviceCommon:
         return config["Nodes"][0]["capabilities"]["interfaces"].get("lan_bridge")
 
     @staticmethod
-    def get_gw_dev_type(config):
-        return config["Nodes"][0]["capabilities"]["device_type"]
+    def get_gw_wan_link_selection_enabled(config):
+        return config["Nodes"][0]["capabilities"]["wan_link_selection"]
 
     @staticmethod
     def get_device_hw_modes(device_capabilities_cfg):
@@ -486,7 +469,7 @@ def generate_network_credentials(tb_config, network_id):
 
 
 def generate_mac_address(mac_prefix=None):
-    mac_prefix = ["dc", "a6"] if not mac_prefix else mac_prefix
+    mac_prefix = ["dc", "a6", "32"] if not mac_prefix else mac_prefix
     while len(mac_prefix) < 6:
         mac_prefix.append(f"{random.randint(0, 255):02x}")
     new_mac = ":".join(mac_prefix)
@@ -528,6 +511,11 @@ def get_string_value_from_text(value_to_take, text_response):
     if not value:
         return ""
     return value.group()
+
+
+def get_ipv4_address_from_text(text_response):
+    ip = re.findall(r"[0-9]+(?:\.[0-9]+){3}", text_response)
+    return ip[0] if ip else None
 
 
 def get_full_ipv6_address(abbreviated_ipv6_addr):
@@ -693,5 +681,22 @@ def is_unit_test(all_markers: list) -> bool:
     return True if get_target_pytest_mark(all_markers, UNIT_TEST_MARKER_NAME) else False
 
 
-def json_dump(data: dict, indent: int = 2) -> str:
+def json_dump(data: dict | list, indent: int = 2) -> str:
     return json.dumps(data, indent=indent)
+
+
+class classproperty:  # noqa N801
+    """
+    Decorator that converts a method with a single cls argument into a property
+    that can be accessed directly from the class.
+    """
+
+    def __init__(self, method=None):
+        self.fget = method
+
+    def __get__(self, instance, cls=None):
+        return self.fget(cls)
+
+    def getter(self, method):
+        self.fget = method
+        return self

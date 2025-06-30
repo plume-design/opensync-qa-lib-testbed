@@ -1,6 +1,7 @@
 {
   "short-name": "AUG",
   "s3-bucket": "Augustus",
+  "build-profile": "dev-debug",
   "3.2.0": {
     "proj-name": "build_augustus_v3.2.0",
     "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi_secureboot",
@@ -141,6 +142,20 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
+  "6.6.0": {
+    "proj-name": "build_augustus_sdk542_v6.6.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_nand_squashfs_update_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "7.0.0": {
+    "proj-name": "build_augustus_sdk542_v7.0.0",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_nand_squashfs_update_secureboot",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
   "reimage-5.8.0": {
     "proj-name": "build_augustus_sdk542_v5.8.0",
     "fn-prefix": "bcmAUGUSTUS_BCM542_REIMAGE-5.02-TO-5.04_secureboot",
@@ -148,9 +163,16 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "master": {
+  "master_sdk527": {
     "proj-name": "build_augustus_master",
     "fn-prefix": "bcmAUGUSTUS_BCM527_nand_fs_image_128_puresqubi",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "master": {
+    "proj-name": "build_augustus_sdk542_master",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_nand_squashfs_update",
     "encryption": true,
     "enc-suffix": "eim",
     "key-suffix": "key"
@@ -162,7 +184,7 @@
     "enc-suffix": "eim",
     "key-suffix": "key"
   },
-  "native-master": {
+  "native_master": {
     "proj-name": "build_augustus_native_master",
     "fn-prefix": "bcmAUGUSTUS_BCM52_NATIVE_nand_fs_image_128_puresqubi",
     "encryption": true,
@@ -177,6 +199,13 @@
     "key-suffix": "key"
   },
   "build_device_featurebranch_sdk542": {
+    "proj-name": "build_device_featurebranch/augustus_sdk542",
+    "fn-prefix": "bcmAUGUSTUS_BCM542_nand_squashfs_update-",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "fbb": {
     "proj-name": "build_device_featurebranch/augustus_sdk542",
     "fn-prefix": "bcmAUGUSTUS_BCM542_nand_squashfs_update-",
     "encryption": true,

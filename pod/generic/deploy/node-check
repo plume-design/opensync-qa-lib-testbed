@@ -125,10 +125,10 @@ case ${node_model} in
         ;;
     "PP703X")
         echo -n "PP703X (Barca):  "
-        home_ap="h-24 h-50 h-60"
-        bhaul_ap="b-24 b-50 b-60"
-        bhaul_sta="bhaul-sta-24 bhaul-sta-50 bhaul-sta-60"
-        bh_sta_identifier="bhaul-sta-24|bhaul-sta-50|bhaul-sta-60"
+        home_ap="h-24 h-50 h-60 mld2"
+        bhaul_ap="b-24 b-50 b-60 mld1"
+        bhaul_sta="bhaul-sta-24 bhaul-sta-50 bhaul-sta-60 mld0"
+        bh_sta_identifier="bhaul-sta-24|bhaul-sta-50|bhaul-sta-60|mld0"
         ;;
     *)
         exit 0
@@ -306,8 +306,9 @@ display_store_success ${ret}
 sta_cnt=0
 for i in ${bhaul_sta}; do
     vif="$(ovsh s Wifi_VIF_State enabled --where if_name==${i} -r | xargs)"
+    mld_vif="$(ovsh s Wifi_VIF_State enabled --where mld_if_name==${i} -r 2>> /dev/null | xargs)"
     inet="$(ovsh s Wifi_Inet_State network --where if_name==${i} -r | xargs)"
-    test "${vif}" == "true" && test "${inet}" == "true"
+    (test "${vif}" == "true" || test "${mld_vif}" == "true") && test "${inet}" == "true"
     if test $? -eq 0; then
         # interface exists
         let sta_cnt="sta_cnt + 1"

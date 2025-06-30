@@ -77,9 +77,15 @@
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
-  "master": {
+  "master_sdk527": {
     "proj-name": "build_augustus_master",
     "fn-prefix": "bcmAUGUSTUS_BCM527_debugs_utest",
+    "encryption": false,
+    "img-suffix": "tar.bz2"
+  },
+  "master": {
+    "proj-name": "build_augustus_sdk542_master",
+    "fn-prefix": "bcmAUGUSTUS_BCM54_debugs_utest",
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
@@ -89,7 +95,7 @@
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
-  "native-master": {
+  "native_master": {
     "proj-name": "build_augustus_native_master",
     "fn-prefix": "bcmAUGUSTUS_BCM52_NATIVE_debugs_utest",
     "encryption": false,

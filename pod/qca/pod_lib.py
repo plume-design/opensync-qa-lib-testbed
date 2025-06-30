@@ -10,6 +10,9 @@ from lib_testbed.generic.pod.generic.pod_lib import PodLib as PodLibGeneric
 
 
 class PodLib(PodLibGeneric):
+    # Which value needs to be used with iw <dev> set txpower to reset it to default value
+    TX_POWER_RESET_VALUE = "fixed 0"
+
     def get_radio_temperature(self, radio_index, **kwargs):
         ret = self.run_command(f"cat /sys/class/net/wifi{radio_index}/thermal/temp", **kwargs)
         return ret
@@ -25,13 +28,19 @@ class PodLib(PodLibGeneric):
 
     def get_tx_power(self, interface, **kwargs):
         """
-        Get current Tx power in dBm
+        Get current Tx power in dBm. Make sure interface is up, otherwise returned value is incorrect.
         Args:
             interface: (str) Wireless interface
 
-        Returns: raw output [(int) ret, (std) std_out, (str) str_err]
+        Returns: raw output [(int) ret, (str) std_out, (str) str_err]
 
         """
+        # On QSDK 11.00 and newer use iw tool (cfg80211 kernel interface)
+        if self.qsdk_version >= 0x1100:
+            return super().get_tx_power(interface, **kwargs)
+        return self.get_tx_power_wext(interface, **kwargs)
+
+    def get_tx_power_wext(self, interface: str, **kwargs) -> list[int, str, str]:
         cmd = "iwconfig %s | grep Tx-Power | awk '{print $4}'" % interface
         response = self.strip_stdout_result(self.run_command(cmd, **kwargs))
         if not response[0]:
@@ -44,9 +53,15 @@ class PodLib(PodLibGeneric):
         Args:
             percent_ratio: (int) Percent ratio from 0 to 100
 
-        Returns:
+        Returns: raw output [(int) ret, (str) std_out, (str) str_err]
 
         """
+        # On QSDK 11.00 and newer use iw tool (cfg80211 kernel interface)
+        if self.qsdk_version >= 0x1100:
+            return super().decrease_tx_power_on_all_ifaces(percent_ratio, **kwargs)
+        return self.decrease_tx_power_on_all_ifaces_wext(percent_ratio, **kwargs)
+
+    def decrease_tx_power_on_all_ifaces_wext(self, percent_ratio: int, **kwargs) -> list[int, str, str]:
         percent_ratio = percent_ratio / 100
         all_interfaces = self.iface.get_all_home_bhaul_ifaces()
         cmd = ""
@@ -65,9 +80,15 @@ class PodLib(PodLibGeneric):
         Args:
             percent_ratio: (int) Percent ratio from 0 to 100
 
-        Returns:
+        Returns: raw output [(int) ret, (str) std_out, (str) str_err]
 
         """
+        # On QSDK 11.00 and newer use iw tool (cfg80211 kernel interface)
+        if self.qsdk_version >= 0x1100:
+            return super().increase_tx_power_on_all_ifaces(percent_ratio, **kwargs)
+        return self.increase_tx_power_on_all_ifaces_wext(percent_ratio, **kwargs)
+
+    def increase_tx_power_on_all_ifaces_wext(self, percent_ratio: int, **kwargs) -> list[int, str, str]:
         percent_ratio = percent_ratio / 100
         all_interfaces = self.iface.get_all_home_bhaul_ifaces()
         cmd = ""
@@ -85,9 +106,17 @@ class PodLib(PodLibGeneric):
             interfaces: (str) or (list) Name of wireless interfaces
             tx_power: (int) Tx power in dBm.
 
-        Returns:
+        Returns: raw output [(int) ret, (str) std_out, (str) str_err]
 
         """
+        # On QSDK 11.00 and newer use iw tool (cfg80211 kernel interface)
+        if self.qsdk_version >= 0x1100:
+            return super().set_tx_power(tx_power, interfaces=interfaces, **kwargs)
+        return self.set_tx_power_wext(tx_power, interfaces=interfaces, **kwargs)
+
+    def set_tx_power_wext(
+        self, tx_power: int, interfaces: str | list[str] | None = None, **kwargs
+    ) -> list[int, str, str]:
         if not interfaces:
             interfaces = self.iface.get_all_home_bhaul_ifaces()
         if isinstance(interfaces, str):
@@ -212,29 +241,20 @@ class PodLib(PodLibGeneric):
         Returns: list [retval, stdout, stderr]
 
         """
-        result = self.run_command(f"ls {self.get_node_deploy_path()}/crash_qca.ko", **kwargs)
-        if result[0]:
-            log.info("Deploying tools...")
-            deploy_status = self.deploy()
-            if deploy_status[0] != 0:
-                err_msg = f"Deploy to POD has failed! {deploy_status[2]}"
-                return [1, err_msg, err_msg]
-
-        # insmod ends immediately with crash and reboot, so sleep here otherwise command ends with timeout exception
-        result = self.run_command(
-            f"sh -c 'sleep 3; insmod {self.get_node_deploy_path()}/crash_qca.ko' > /dev/null 2>&1 &", **kwargs
-        )
+        result = self.run_command("sh -c 'echo c > /proc/sysrq-trigger' > /dev/null 2>&1 &", **kwargs)
         time.sleep(20)
         self.wait_available(timeout=120)
         return result
 
     @functools.cached_property
     def qsdk_version(self):
-        response = self.run_command("sed -n 's/.*CONFIG_QSDK_VERSION=//p' /usr/opensync/etc/kconfig")
-        if response[0]:
-            return 0
-        version = self.get_stdout(response)
-        return int(version, 16)
+        for i in range(3):
+            response = self.run_command("sed -n 's/.*CONFIG_QSDK_VERSION=//p' /usr/opensync/etc/kconfig")
+            if response[0] == 0:
+                version = self.get_stdout(response)
+                return int(version, 16)
+            time.sleep(3)
+        raise OpenSyncException(f"Failed to read QSDK version: {response}")
 
     def get_connection_flows(self, ip, **kwargs):
         """
@@ -761,3 +781,15 @@ class PodLib(PodLibGeneric):
     def set_sub_channel_marking(self, ifname: str, state: int, **kwargs) -> [int, str, str]:
         """Set sub channel marking on specified interface."""
         return self.run_command(f"cfg80211tool {ifname} mark_subchan {state}", **kwargs)
+
+    def get_dfs_preferred_channel(self, phy_radio_name: str, **kwargs):
+        """Get DFS preferred channel"""
+        response = self.get_stdout(
+            self.strip_stdout_result(self.run_command(f"cfg80211tool {phy_radio_name} getNxtRadarFreq", **kwargs)),
+            skip_exception=True,
+        )
+        preferred_freq = common_util.get_digits_value_from_text("getNxtRadarFreq:", response)
+        if not preferred_freq:
+            return [1, "", f"DFS preferred channel is not specified for {phy_radio_name} phy interface"]
+        channel = int((preferred_freq - 5000) / 5)
+        return [0, str(channel), ""]

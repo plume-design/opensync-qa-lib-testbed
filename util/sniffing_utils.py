@@ -7,8 +7,10 @@ import allure
 import pyshark
 
 from pyshark.packet import packet
+from pyshark.capture.capture import TSharkCrashException
 
 from lib_testbed.generic.client.models.generic.client_api import ClientApi
+from lib_testbed.generic.pod.generic.pod_api import PodApi
 from lib_testbed.generic.util.common import threaded
 from lib_testbed.generic.util.logger import log
 
@@ -64,6 +66,8 @@ def start_sniffer_on_client(
         client_obj.run(
             f"tcpdump {tcpdump_flags} -U -i {client_obj.ifname} -w {remote_sniff_file_path} > {tcpdump_log_file} 2>&1 &"
         )
+        # just to see in allure if there are some crashes
+        client_obj.run("dmesg | tail -n 500")
     except Exception as err:
         log.info("Something went wrong, restoring %s into station mode", client_obj.nickname)
         log.info("Traceback: %s", "\n".join(traceback.format_exception(err)))
@@ -78,19 +82,21 @@ def stop_sniffer_and_get_file(
     remote_sniff_file_path: str | pathlib.Path,
     tmp_path: pathlib.Path,
     check_file_size: bool = True,
+    scp_timeout: int | float = 600,
 ) -> pathlib.Path:
     """Closes tcpdump, pulls the capture file from remote_sniff_file_path to the local temp file.
     Returns path to the local file"""
     log.info("Stopping sniffer")
     client_obj.run("killall tcpdump", skip_exception=True)
     client_obj.wifi_station(skip_exception=True)
+    time.sleep(1)
     log.info(
         "Downloading file from client %s: %s to local path: %s",
         client_obj.nickname,
         remote_sniff_file_path,
         tmp_path,
     )
-    client_obj.get_file(remote_sniff_file_path, tmp_path, timeout=300)
+    client_obj.get_file(remote_sniff_file_path, tmp_path, timeout=scp_timeout)
     client_obj.run(f"rm -rf {remote_sniff_file_path}", skip_exception=True)
     local_sniff_file_path = tmp_path / client_obj.nickname / remote_sniff_file_path.split("/")[-1]
     if check_file_size:
@@ -100,7 +106,13 @@ def stop_sniffer_and_get_file(
 
 
 def sniff_packets_on_client(
-    client_obj: ClientApi, channel: int, tmp_path: pathlib.Path, timeout: int = 10, band: str = "5G", ht: str = "HT80"
+    client_obj: ClientApi,
+    channel: int,
+    tmp_path: pathlib.Path,
+    timeout: int = 10,
+    band: str = "5G",
+    ht: str = "HT80",
+    scp_timeout: int | float = 600,
 ) -> pathlib.Path:
     """Generates a unique sniff file name, turns client into Wi-Fi monitor,
     starts sniffing with ``tcpdump``, waits given timeout. Makes sure to
@@ -110,8 +122,36 @@ def sniff_packets_on_client(
     sniff_file_name, remote_sniff_file_path = start_sniffer_on_client(client_obj, channel=channel, band=band, ht=ht)
     log.info(f"Waiting requested {timeout} sec...")
     time.sleep(timeout)
-    local_sniff_file_path = stop_sniffer_and_get_file(client_obj, remote_sniff_file_path, tmp_path)
+    local_sniff_file_path = stop_sniffer_and_get_file(
+        client_obj, remote_sniff_file_path, tmp_path, scp_timeout=scp_timeout
+    )
     return local_sniff_file_path
+
+
+def start_tcpdump(device: ClientApi | PodApi, tcpdump_args) -> (str, int):
+    sniff_file_name = uuid.uuid4().hex
+    remote_sniff_file_path = "/tmp/%s.pcap" % sniff_file_name
+    dump_cmd = "sudo tcpdump %s -w %s > /tmp/tcpdump.out 2>&1 &" % (tcpdump_args, remote_sniff_file_path)
+    device.run(dump_cmd)
+    tcpdump_pid = device.get_pid_by_cmd(dump_cmd[:28])
+    return remote_sniff_file_path, tcpdump_pid
+
+
+def stop_tcpdump(
+    device: ClientApi | PodApi,
+    remote_sniff_file_path: str | pathlib.Path,
+    local_sniff_file_path: str | pathlib.Path,
+    pid: int = None,
+) -> str:
+    if pid:
+        device.run("sudo killall tcpdump; sync; sleep 1", skip_exception=True)
+        # device.run(f"sudo kill {pid}; sync; sleep 1", skip_exception=True)
+    else:
+        device.run("sudo killall tcpdump; sync; sleep 1", skip_exception=True)
+
+    device.get_file(remote_sniff_file_path, local_sniff_file_path)
+    device.run("sudo rm %s" % remote_sniff_file_path)
+    return os.path.join(local_sniff_file_path, device.nickname, os.path.basename(remote_sniff_file_path))
 
 
 def load_pyshark_packets(file_path: str | pathlib.Path, pyshark_filter: str, **kwargs) -> list[packet.Packet]:
@@ -134,7 +174,12 @@ def parse_capture_file(*args, **kwargs) -> list[packet.Packet]:
     Returns: (list) of packets found in pcap file
     """
     future = _parse_capture_file(*args, **kwargs)
-    return future.result()
+    try:
+        return future.result()
+    except TSharkCrashException as e:
+        log.error(f"Tshark exception: {e}\n\n trying again with debug enabled")
+        future = _parse_capture_file(*args, debug=True, **kwargs)
+        return future.result()
 
 
 @threaded

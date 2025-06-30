@@ -4,11 +4,29 @@
   "master": {
     "proj-name": "build_alder_master",
     "fn-prefix": "qcaALDER_norplusnand-ipq9574-single",
-    "encryption": false,
-    "img-suffix": "img"
+    "encryption": true,
+    "img-suffix": "img",
+    "enc-suffix": "eim",
+    "key-suffix": "key"
   },
   "build_device_featurebranch": {
     "proj-name": "build_device_featurebranch/alder",
+    "fn-prefix": "qcaALDER_norplusnand-ipq9574-single",
+    "encryption": true,
+    "img-suffix": "img",
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "fbb": {
+    "proj-name": "build_device_featurebranch/alder",
+    "fn-prefix": "qcaALDER_norplusnand-ipq9574-single",
+    "encryption": true,
+    "img-suffix": "img",
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "6.6.0": {
+    "proj-name": "build_alder_v6.6.0",
     "fn-prefix": "qcaALDER_norplusnand-ipq9574-single",
     "encryption": false,
     "img-suffix": "img"

@@ -3,7 +3,9 @@ import os
 import re
 import time
 import pexpect
+from pathlib import Path
 from pexpect import spawn
+
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.switch.generic.switch_lib_generic import SwitchLibGeneric
 from lib_testbed.generic.switch.util import get_switch_config_path
@@ -69,6 +71,7 @@ class SwitchLib(SwitchLibGeneric, spawn):
     def admin_login(self):
         self.login()
         self.enable_admin_mode()
+        self._disable_switch_logger()
         self._cache_switch_interfaces()
 
     def admin_logout(self):
@@ -346,7 +349,12 @@ class SwitchLib(SwitchLibGeneric, spawn):
             return [5, "", "Failed to copy switch config file"]
         filename = os.path.basename(config_path)
         self.admin_login()
+        log.info("Using: %s configuration file" % filename)
         out = self.send_command(f"copy tftp startup-config ip-address 192.168.5.1 filename {filename}")
+        if "Failed to load" in out:
+            log.warning("Loading cfg file failed, trying without extension")
+            filename = Path(config_path).stem
+            out = self.send_command(f"copy tftp startup-config ip-address 192.168.5.1 filename {filename}")
         self.admin_logout()
         if "Failed to load" in out:
             return [25, "", out]
@@ -660,6 +668,63 @@ class SwitchLib(SwitchLibGeneric, spawn):
 
     def map_port_names_to_port_numbers(self, port_names: list) -> dict:
         return {port_name: self.aliases[port_name]["port"] for port_name in port_names if self.aliases.get(port_name)}
+
+    def set_bw_limit(self, ports: list, ingress_rate: int, egress_rate: int):
+        """
+        Set bandwidth limit
+        Args:
+            ports: (list) List of port number
+            ingress_rate: (int) The upper rate limit for receiving packets from 1 to 1000000 kbps,
+            if 0 then disable the limit
+            egress_rate: (int) The upper rate limit for sending packets from 1 to 1000000 kbps,
+            if 0 then disable the limit
+
+        Returns: list([ret_val, std_out, std_err], ...)
+
+        """
+        port_action = f"bandwidth ingress {ingress_rate} egress {egress_rate}"
+        return self.action_interface(ports, port_action)
+
+    def get_bw_limit(self, ports: list):
+        """
+        Get bandwidth limit
+        Args:
+            ports: (list) List of port number
+
+        Returns: list([ret_val, std_out, std_err], ...)
+
+        """
+        self.admin_login()
+        out = self.send_command("show bandwidth interface")
+        retval = list()
+        for port in ports:
+            port_number = f"1/0/{port}"
+            re_match = re.search(rf"{port_number}.*", out)
+            if not re_match:
+                retval.append([1, "", f"Can not find bandwidth limit information for {port_number} port"])
+            port_bw_limit = re_match.group()
+            port, ingress_rate, egress_rate, lag = port_bw_limit.split()
+            parsed_port_bw_limit = "port: {}\nIngressRate(kbps): {}\nEgressRate(kbps): {}\nLAG: {}\n".format(
+                port, ingress_rate, egress_rate, lag
+            )
+            retval.append([0, parsed_port_bw_limit, ""])
+
+        self.admin_logout()
+        return retval
+
+    def _disable_switch_logger(self):
+        """Disable switch logger to don't capture warning logs in switch output"""
+        disable_admin_mode = False
+        if self.after == pexpect.EOF or not self.after.endswith(b"#"):
+            self.enable_admin_mode()
+            disable_admin_mode = True
+        try:
+            self.send_command("configure")
+            self.send_command("logging monitor level 0")
+        finally:
+            self.send_command("exit")
+            if disable_admin_mode:
+                self.send_command("exit")
 
     @staticmethod
     def init_switch_alias(aliases: str) -> dict:

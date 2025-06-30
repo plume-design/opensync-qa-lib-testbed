@@ -65,7 +65,7 @@
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
-  "legacy-master": {
+  "legacy_master": {
     "proj-name": "build_caesar_master",
     "fn-prefix": "debugs-PIRANHA2_QSDK53-squashfs-ap",
     "encryption": false,
@@ -77,13 +77,13 @@
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
-  "legacy-native-master": {
+  "legacy_native_master": {
     "proj-name": "build_caesar_native_master",
     "fn-prefix": "debugs-PIRANHA2_QSDK53_NATIVE-squashfs-ap",
     "encryption": false,
     "img-suffix": "tar.bz2"
   },
-  "native-master": {
+  "native_master": {
     "proj-name": "build_caesar_sdk11_native_master",
     "fn-prefix": "debugs-osync-qcaPIRANHA2_QSDK11",
     "encryption": false,

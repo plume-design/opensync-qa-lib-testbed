@@ -1,6 +1,6 @@
 import os
 import time
-from lib_testbed.generic.util.logger import log
+from lib_testbed.generic.util.logger import log, log_level
 from lib_testbed.generic.client.models.mac.client_tool import ClientTool
 from lib_testbed.generic.client.models.generic.client_lib import ClientLib as ClientLibGeneric
 
@@ -295,23 +295,26 @@ class ClientLib(ClientLibGeneric):
         command = self.device.get_remote_cmd(f"sudo cat {remote_file} > {location}/{file_name}__{self.device.name}")
         return self.run_command(command, skip_remote=True, **kwargs)
 
-    def put_dir(self, directory, location, **kwargs):
+    def put_dir(self, directory, location, timeout=5 * 60, **kwargs):
         """
-        Put for on client(s)
+        Put directory in location onto device
         Args:
-            directory: (str) local path on computer
-            location: (str) remote path on client
-            **kwargs:
+            directory: (str) path to local directory
+            location: (str) path to remote directory
 
         Returns: (list) [[(int) ret, (str) stdout, (str) stderr]]
-
         """
-        command = (
+        as_sudo = "sudo " if kwargs.pop("as_sudo", True) else ""
+        log.debug("Putting dir '%s' to path '%s' on '%s'", directory, location, self.name)
+        remote_command = (
             f"cd {directory}; tar -cf - *  |"
-            + self.device.get_remote_cmd(f"sudo mkdir -p {location}; cd {location}; sudo tar -xof -")
+            + self.device.get_remote_cmd(f"{as_sudo}mkdir -p {location}; cd {location}; {as_sudo}tar -xof -")
             + " 2>/dev/null"
         )
-        return self.run_command(command, **kwargs, timeout=5 * 60, skip_remote=True)
+        with log_level(log.INFO):
+            result = self.run_command(remote_command, **kwargs, timeout=timeout, skip_remote=True)
+        log.debug("Command returned exit code=%s, stdout='%s', stderr='%s'", result[0], result[1].strip(), result[2])
+        return result
 
     def wifi_monitor(self, channel, ifname="", **kwargs):
         """

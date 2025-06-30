@@ -25,17 +25,13 @@ class ClientLib(ClientLibGeneric):
         )
         return ext_path
 
-    # Skip this check since pod-client does not have namespace
-    def check_wireless_client(self):
-        return True
-
     def connect(
         self,
         ssid=None,
         psk=None,
         bssid=None,
         node_band="2.4G",
-        key_mgmt="WPA-PSK",
+        key_mgmt=None,
         timeout=60,
         dhclient=True,
         e_gl_param="",
@@ -66,6 +62,7 @@ class ClientLib(ClientLibGeneric):
         Returns: (list) merged clients response
 
         """
+        key_mgmt = "WPA-PSK" if not key_mgmt else key_mgmt
         ssid, psk = self.verify_credentials(ssid=ssid, psk=psk)
         ifname = self.iface.get_interface_from_band(node_band)
         if not ifname:
@@ -266,7 +263,7 @@ class ClientLib(ClientLibGeneric):
         self.run_command("pmf -e", **kwargs)
         time.sleep(10)
         log.info("Wait client be ready")
-        self.wait_available(timeout=2 * 60, **kwargs)
+        self.wait_available(**dict(kwargs, timeout=2 * 60))
         self.remove_wireless_interfaces_from_bridge()
         self.run_command('echo "100.1.1 [$(cat /.version)]" > /.version')
         return [0, "Pod device was successfully changed to be a client", ""]
@@ -507,14 +504,10 @@ class ClientLib(ClientLibGeneric):
             raise Exception("Use img file for unencrypted image")
 
         self.run_command("mkdir -p /tmp/pfirmware", **kwargs)
-        self.put_file(fw_path, "/tmp/pfirmware")
-        remote_md5sum = self.run_command(f'md5sum /tmp/pfirmware/{image_file} | cut -d" " -f1', **kwargs)
-        remote_md5sum = self.get_stdout(remote_md5sum)
-        local_md5sum = os.popen(f'md5sum {fw_path} | cut -d" " -f1').read().strip()
-
-        md5sum = remote_md5sum.strip()
-        if md5sum != local_md5sum:
-            return [1, "", f"Failed MD5sum image: {local_md5sum} node: {md5sum} "]
+        scp_response = self.put_file(fw_path, "/tmp/pfirmware")
+        if scp_response[0]:
+            scp_response[2] = f"SCP failed while uploading the image file\n{scp_response[2]}"
+            return scp_response
 
         # determine which command should be used for upgrade
         if dec_passwd:

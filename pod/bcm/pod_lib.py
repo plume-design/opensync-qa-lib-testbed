@@ -42,7 +42,7 @@ FLOW_CACHE_ENTRY_SDK_5_02 = re.compile(
     re.VERBOSE | re.MULTILINE,
 )
 
-FLOW_CACHE_ENTRY_SDK_5_04 = re.compile(
+FLOW_CACHE_ENTRY_SDK_5_04_02 = re.compile(
     r"""
     ^\s*
     (?P<flow_id>\d+)\s+                     # Flow
@@ -68,6 +68,42 @@ FLOW_CACHE_ENTRY_SDK_5_04 = re.compile(
     (?P<IqPrio>\d+)\s+                      # IqPrio
     (?P<SkbMark>0x[a-f\d]+)                 # SkbMark
     # nflist has eight more fields, while mcastlist has a bunch more, but they are not shared
+    # and the latter writes those extra fields as a separate line, so we just ignore them.
+    """,
+    re.VERBOSE | re.MULTILINE,
+)
+
+FLOW_CACHE_ENTRY_SDK_5_04_04 = re.compile(
+    r"""
+    ^\s*
+    (?P<flow_id>\d+)\s+                     # Flow
+    (?P<K_U>[KU-])\s+                       # K/U, mostly guessing what we'll see here
+    (?P<U_M>[UM-])\s+                       # U/M, mostly guessing what we'll see here
+    (?P<M_C>[MC-])\s+                       # M/C, mostly guessing what we'll see here
+    (?P<idle>\d+):\s*                       # idle:
+    (?P<swhit>\d+)\s+                       # +swhit
+    (?P<TotalHits>\d+)\s+                   # TotalHits:
+    (?P<TotalBytes>\d+)\s+                  # TotalBytes
+    (?P<SW_TotHits>\d+):\s*                 # SW_TotHits:
+    (?P<SW_TotalBytes>\d+)\s*               # SW_TotalBytes:
+    (?P<HW_tpl>0x[a-f\d]+)\s+               # HW_tpl
+    (?P<Fhw_idx>\d+)\s+                     # Fhw_idx
+    (?P<HW_Hits>\d+)\s+                     # HW_Hits
+    (?P<HW_TotHits>\d+)\s+                  # HW_TotHits
+    (?P<HW_TotalBytes>\d+)\s+               # HW_TotalBytes
+    (?P<L1>\w+)\s+                          # L1-
+    (?P<Info>\d+)\s+                        # Info
+    (?P<Prot>\d+)\s+                        # Prot
+    <(?P<src_addr_port>[a-f.:\d]+)>\s*      # SourceIpAddress:Port
+    <(?P<dst_addr_port>[a-f.:\d]+)>\s+      # DestinIpAddress:Port
+    (?P<Vlan0>0x[a-f\d]+)\s+                # Vlan0(mcast)
+    (?P<Vlan1>0x[a-f\d]+)\s+                # Vlan1(mcast)
+    (?P<tag>\d+)\s+                         # tag#
+    (?P<ToS>[a-f\d]+)\s+                    # ToS
+    (?P<IqPrio>\d+)\s+                      # IqPrio
+    (?P<ClientId>0x[a-f\d]+)\s+             # ClientId
+    (?P<SkbMark>0x[a-f\d]+)                 # SkbMark
+    # nflist has ten more fields, while mcastlist has a bunch more, but they are not shared
     # and the latter writes those extra fields as a separate line, so we just ignore them.
     """,
     re.VERBOSE | re.MULTILINE,
@@ -371,8 +407,10 @@ class PodLib(PodLibGeneric):
             case ["MA", 3]:
                 # Morocco cannot be set on 5GU radio to not brick PP403Z. works on FW > 6.6.0
                 fw_version = self.get_stdout(self.version())
-                if compare_fw_versions(fw_version, "6.5.0.0", '<'):
-                    return [100, "", "Cannot change region for POD with OS < 6.6"]
+                if compare_fw_versions(fw_version, "6.5.0.0", "<"):
+                    # Return error message in both stdout and stderr, dfs tests expect it to be in stdout
+                    err = "Region MA is not supported for POD with OS < 6.6"
+                    return [100, err, err]
                 num_of_radios = 2
                 rev_num = 763
             case _:
@@ -393,6 +431,7 @@ class PodLib(PodLibGeneric):
                 self.run_command(f"pmf -regrv{reg_revision} -fw {rev_num}")
             self.run_command("pmf --commit")
         finally:
+            self.wait_available(timeout=300)
             self.exit_factory_mode(**kwargs)
         timeout = time.time() + 120
         while time.time() < timeout:
@@ -438,20 +477,35 @@ class PodLib(PodLibGeneric):
         """
         Return regular expression pattern matching common FlowCache entry fields
         """
+        if compare_fw_versions(self.sdk_version, "5.04.04", ">="):
+            return FLOW_CACHE_ENTRY_SDK_5_04_04
+        elif compare_fw_versions(self.sdk_version, "5.04.02", ">="):
+            return FLOW_CACHE_ENTRY_SDK_5_04_02
+        else:
+            return FLOW_CACHE_ENTRY_SDK_5_02
+
+    @functools.cached_property
+    def sdk_version(self) -> str:
+        """
+        Retrieves the SDK version.
+
+        This method provides a cached property that returns the current version
+        of the SDK being used.
+
+        Returns:
+            str: The version string of the SDK.
+        """
         result = self.run_command("cat /etc/patch.version")
         contents = self.get_stdout(result)
         sdk_version = yaml.safe_load(contents)
-        if sdk_version["version"] >= "5" and sdk_version["release"] >= "04":
-            return FLOW_CACHE_ENTRY_SDK_5_04
-        else:
-            return FLOW_CACHE_ENTRY_SDK_5_02
+        return f"{sdk_version['version']}.{sdk_version['release']}.{sdk_version.get('extraversion', '00')}"
 
     def _get_parsed_connection_flows(self, ip_addresses, multicast=False, **kwargs):
         """
         Get flow cache entries from pod and parse them into dicts
 
         Args:
-            ip_adresses: (list of str) limit flows to those coming from or going to specified addresses
+            ip_addresses: (list of str) limit flows to those coming from or going to specific addresses
             multicast: (bool) look for multicast traffic flows
             **kwargs:
 
@@ -565,6 +619,8 @@ class PodLib(PodLibGeneric):
         flow_cache_accelerated_flows = 0
         for flow_id, cached_flows in grouped_cached_flows:
             total_hit_counts = []
+            sw_total_hit_counts = []
+            hw_total_hit_counts = []
             for cached_flow in cached_flows:
                 if cached_flow["idle"] != 0:
                     continue
@@ -572,6 +628,10 @@ class PodLib(PodLibGeneric):
                     # Ignore flows for protocol we don't care about, e.g. for iperf control connection
                     # (which is always TCP) when testing UDP.
                     continue
+                if cached_flow["SW_TotHits"] > 10:
+                    sw_total_hit_counts.append(cached_flow["SW_TotHits"])
+                if cached_flow["HW_TotHits"] > 10:
+                    hw_total_hit_counts.append(cached_flow["HW_TotHits"])
                 tot_hits = cached_flow["SW_TotHits"] + cached_flow["HW_TotHits"]
                 # exclude flows if they have less than 20 total hits
                 if tot_hits < 20:
@@ -586,6 +646,11 @@ class PodLib(PodLibGeneric):
             # flow is accelerated if number of software or hardware accelerated hits increased during observation
             if total_hit_counts and total_hit_counts[0] < total_hit_counts[-1]:
                 flow_cache_accelerated_flows += 1
+
+            if sw_total_hit_counts and sw_total_hit_counts[0] < sw_total_hit_counts[-1]:
+                log.info(f"{flow_id=} is accelerated by software")
+            if hw_total_hit_counts and hw_total_hit_counts[0] < hw_total_hit_counts[-1]:
+                log.info(f"{flow_id=} is accelerated by hardware")
 
         if flow_cache_accelerated_flows < flow_count:
             log.error(
@@ -844,13 +909,14 @@ class PodLib(PodLibGeneric):
 
         """
         traffic_acceleration_monitor = dict()
-        traffic_acceleration_monitor |= self._run_traffic_acceleration_monitor(
-            acc_name="archer_flows",
-            acc_tool="dmesg -c > /dev/null && archer flows --all && dmesg -c",
-            samples=samples,
-            interval=interval,
-            delay=delay,
-        )
+        if compare_fw_versions(self.sdk_version, "5.04.04", "<"):
+            traffic_acceleration_monitor |= self._run_traffic_acceleration_monitor(
+                acc_name="archer_flows",
+                acc_tool="dmesg -c > /dev/null && archer flows --all && dmesg -c",
+                samples=samples,
+                interval=interval,
+                delay=delay,
+            )
 
         if kwargs.pop("multicast", None):
             cmd_cached_flows = "cat /proc/fcache/misc/mcastlist"
@@ -925,9 +991,30 @@ class PodLib(PodLibGeneric):
         iface_list = " ".join(self.capabilities.get_home_ap_ifnames(return_type=list))
         cmd = (
             f"sh -c 'for iface in {iface_list}; do hostapd_cli -i $iface "
+            f"-p /var/run/hostapd raw GET_PMK {client_mac} | grep -v FAIL; done'"
+        )
+        # due to many ifaces ret code is invalid
+        pmk = self.get_stdout(self.strip_stdout_result(self.run_command(cmd, **kwargs)), skip_exception=True)
+        if pmk:
+            return [0, pmk, ""]
+        # older versions have unique per iface control paths
+        cmd = (
+            f"sh -c 'for iface in {iface_list}; do hostapd_cli -i $iface "
             f"-p /var/run/hostapd-$(cat /var/run/hostapd-$iface.config | grep ctrl_interface | cut -c 33-) "
             f"raw GET_PMK {client_mac} | grep -v FAIL; done'"
         )
-        # due to many ifaces ret code might be invalid
+        # due to many ifaces ret code is invalid
         pmk = self.get_stdout(self.strip_stdout_result(self.run_command(cmd, **kwargs)), skip_exception=True)
         return [0 if pmk else 1, pmk, f"No PMK for {client_mac}" if not pmk else ""]
+
+    def get_dfs_preferred_channel(self, phy_radio_name: str, **kwargs):
+        """Get DFS preferred channel"""
+        response = self.get_stdout(
+            self.strip_stdout_result(self.run_command(f"wl -i {phy_radio_name} dfs_channel_forced", **kwargs)),
+            skip_exception=True,
+        )
+        preferred_channel = response.split("\n")
+        if len(preferred_channel) == 1:
+            return [1, "", f"DFS preferred channel is not specified for {phy_radio_name} phy interface"]
+        channel = int(re.search(r"\d+", preferred_channel[1]).group())
+        return [0, str(channel), ""]

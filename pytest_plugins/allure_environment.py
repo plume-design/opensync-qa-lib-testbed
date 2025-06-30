@@ -31,49 +31,34 @@ def allure_environment(request):
         server_session = request.getfixturevalue("server_session")
         snapshot = get_osrt_snapshot(server_session)
         if snapshot:
-            allure_util.add_environment("osrt_snapshot", "file://<br><code>" + snapshot + "</code>")
+            allure_util.cache_testbed_value("osrt_snapshot", snapshot)
 
-    try:
-        gw = request.getfixturevalue("gw_session")
-        l1, l2 = request.getfixturevalue("l1_session"), request.getfixturevalue("l2_session")
-    # catch also Exception raised by device_discovery in case there is no mgmt access
-    except (pytest.FixtureLookupError, Exception):
-        # config has already been loaded by now, however when only tests with modified tb-config are loaded
-        # getting the pods and cloud objects might not always work.
-        return
-
-    for node in [gw, l1, l2]:
-        allure_util.add_allure_group_envs(
-            f"node_{node.serial}",
-            "version",
-            node.version(),
-            f"file://{node.serial}",
-            fixed_value=True,
-        )
-        allure_util.add_allure_group_envs(
-            f"node_{node.serial}", "model", node.model, f"file://{node.serial}", fixed_value=True
-        )
-        modules = node.ovsdb.get_json_table("Object_Store_State", where="status!='install-done'", skip_exception=True)
-        if not modules:
+    nodes = []
+    for node_name in "gw", "l1", "l2":
+        try:
+            node = request.getfixturevalue(f"{node_name}_session")
+        # catch also Exception raised by device_discovery in case there is no mgmt access
+        except (pytest.FixtureLookupError, Exception):
+            # config has already been loaded by now, however when only tests with modified tb-config are loaded
+            # getting the pods and cloud objects might not always work.
             continue
-        if isinstance(modules, dict):  # this happens when just one column is returned - just 1 module
-            modules = [modules]
-        for module in modules:
-            allure_util.add_allure_group_envs(
-                f"node_{node.serial}",
-                module["name"],
-                module.get("version", "unknown"),
-                f"file://{node.serial}",
-                fixed_value=True,
-            )
+        else:
+            nodes.append(node)
+
+    for node in nodes:
+        if not node:
+            continue
+        # Cache information about node. The cached information also get attached to test report.
+        for info_name in "serial", "model", "version", "region", "modules":
+            allure_util.cache_node_value(node, info_name)
+
     git_ver = get_git_revision()
     if git_ver:
-        allure_util.add_environment("git_sha", git_ver, "_error")
-    else:
-        framework_version = get_framework_version()
-        if framework_version:
-            allure_util.add_environment("framework_version", framework_version, "_error")
+        allure_util.cache_environment_value("git_sha", git_ver)
+    framework_version = get_framework_version()
+    if framework_version:
+        allure_util.cache_environment_value("framework_version", framework_version)
 
     if "LTE" in loaded_config.get("capabilities", []):
         lte_uplink = "LTE" if loaded_config.get("runtime_lte_only_uplink") else "WAN"
-        allure_util.add_environment("uplink", lte_uplink, "_error")
+        allure_util.cache_testbed_value("uplink", lte_uplink)

@@ -1,4 +1,5 @@
 import re
+from typing import Literal
 
 
 class Capabilities:
@@ -55,19 +56,35 @@ class Capabilities:
         return self.device_capabilities["frv_logread"]
 
     def is_fan(self):
-        return self.device_capabilities["active_cooling"]
+        return "FAN" in self.device_capabilities["features"]
 
     def is_dfs(self):
-        return self.device_capabilities["dfs"]
+        return "DFS" in self.device_capabilities["features"]
+
+    def is_mlo_fh(self):
+        return "MLO_FH" in self.device_capabilities["features"]
+
+    def is_mlo_bh(self):
+        return "MLO_BH" in self.device_capabilities["features"]
+
+    def is_tx_power_configurable(self):
+        return "TX_POWER_CONFIGURABLE" in self.device_capabilities["features"]
+
+    def is_mld_iface(self, iftype):
+        return iftype in self.device_capabilities["interfaces"].get("mld_ifaces", {}).keys()
 
     def get_regulatory_domain(self):
         return self.device_capabilities.get("regulatory_domain", False)
 
     def is_regulatory_domain_managed(self):
-        return self.device_capabilities.get("regulatory_domain_managed", False)
+        return "REGION_CHANGE" in self.device_capabilities["features"]
 
-    def get_device_type(self):
-        return self.device_capabilities["device_type"]
+    def is_wan_link_selection_enabled(self):
+        """
+        In other words: Is OpenSync allowed to manage WAN link?
+        Returns: (bool)
+        """
+        return self.device_capabilities["wan_link_selection"]
 
     def get_fw_download_path(self):
         return self.device_capabilities["fw_download_path"]
@@ -96,9 +113,7 @@ class Capabilities:
 
     def get_ifnames(self, return_type=dict, freq_band="", iftype=""):
         freq_band = self.parse_freq_band(freq_band)
-        return self.parse_results(
-            self.device_capabilities["interfaces"][iftype], return_type, freq_band=freq_band
-        )
+        return self.parse_results(self.device_capabilities["interfaces"][iftype], return_type, freq_band=freq_band)
 
     def get_bhaul_sta_ifname(self, freq_band):
         freq_band = self.parse_freq_band(freq_band)
@@ -171,6 +186,20 @@ class Capabilities:
     def get_vif_radio_idx(self):
         return self.device_capabilities["interfaces"]["vif_radio_idx"]
 
+    def get_mld_ifaces(self) -> dict[str, str]:
+        """
+        Retrieves MLD interfaces from the device capabilities.
+        """
+        return self.device_capabilities["interfaces"].get("mld_ifaces", {})
+
+    def get_mld_iface(
+        self, iface_type: Literal["backhaul_sta", "backhaul_ap", "home_ap", "onboard_ap", "fhaul_ap"]
+    ) -> str:
+        """
+        Retrieves the MLD interface name for a given interface type.
+        """
+        return self.get_mld_ifaces().get(iface_type)
+
     def get_supported_radio_channels(self, freq_band):
         freq_band = self.parse_freq_band(freq_band)
         return self.device_capabilities["interfaces"]["radio_channels"].get(freq_band)
@@ -188,6 +217,24 @@ class Capabilities:
         # set expected channel var type
         all_supported_channels = [channel_type(channel) for channel in all_supported_channels]
         return all_supported_channels
+
+    def define_band_by_channel(self, channel: int, expected_band: Literal["24g", "5g", "6g"] = None) -> str:
+        """Define band name based on provided channel number."""
+        all_supported_channels = self.get_all_supported_radio_channels()
+        for band, channels in all_supported_channels.items():
+            if channel not in channels:
+                continue
+            # Specify expected_band param to get expected band for overlapped channels between 5g and 6g
+            if expected_band and expected_band not in band:
+                continue
+            target_band = band
+            break
+        else:
+            raise Exception(
+                f"Can not define band name for expected channel: {channel}. "
+                f"All supported bands: {all_supported_channels.keys()}"
+            )
+        return target_band
 
     def get_bridge_ifname(self, bridge_type: str):
         return self.device_capabilities["interfaces"][bridge_type]

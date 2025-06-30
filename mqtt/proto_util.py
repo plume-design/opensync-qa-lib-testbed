@@ -53,5 +53,7 @@ class ProtoUtil:
         )
         assert proto_decoder, f"Can not find suitable proto decoder for: {topic} topic"
         proto_decoder_lib = PROTO_DECODER_MAP[proto_decoder]
-        # Create new reference of object
+        # Specify name for proto descriptor based on MQTT topic prefixes defined in PROTO_DECODER_MAP.
+        # The name needs to be unique to run (pre/post)-processing only on specified topics.
+        proto_decoder_lib.name = proto_decoder
         return proto_decoder_lib()

@@ -13,7 +13,7 @@
             "type": "array",
             "items": {
                 "type": "string",
-                "enum": ["CLIENT_POD", "CMTS", "E2E", "FUT", "HOME", "LTE", "LimitTxPower", "MDU", "MOTION", "NEW_SDK", "NO LTE", "OSRT", "PERFORMANCE", "PoE", "ROMAN", "SLOTH", "SPIRENT", "TESTHOUSE", "WIFI6"]
+                "enum": ["CLIENT_POD", "CMTS", "E2E", "FUT", "HOME", "LTE", "LimitTxPower", "MDU", "MOTION", "NEW_SDK", "NO LTE", "OSRT", "PERFORMANCE", "PoE", "POWER_METER", "ROMAN", "SLOTH", "SPIRENT", "TESTHOUSE", "WIFI6", "SAM_KNOWS"]
             }
         },
         "profile": {"type": "string"},

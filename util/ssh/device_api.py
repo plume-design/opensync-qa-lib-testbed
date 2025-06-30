@@ -1,7 +1,6 @@
 import os
 import inspect
 import threading
-from lib_testbed.generic.util.allure_util import AllureUtil
 from lib_testbed.generic.util.common import Results
 from lib_testbed.generic.util.ssh.sshexception import SshException
 from lib_testbed.generic.util.logger import log
@@ -13,6 +12,7 @@ DEVICE_TIMEOUT = 60 * 60
 class DeviceApi:
     def __init__(self, **kwargs):
         self.start_class_handler = True
+        self.start_teardown_handler = True
         self.lib = None
 
     def get_device_dir(self):
@@ -46,14 +46,8 @@ class DeviceApi:
 
     @parse_request
     def setup_method_handler(self, request):
-        def get_location_name(config):
-            return os.path.basename(config.get("location_file", "")).split(".")[0]
-
-        if not request:
-            return
-        AllureUtil(request.config).add_environment(
-            "config", get_location_name(self.lib.config), request.node.originalname
-        )
+        # Needed so that super().setup_method_handler() works
+        pass
 
     def get_name(self):
         """
@@ -219,6 +213,18 @@ class DevicesApi:
             if not isinstance(sanity, int):
                 raise sanity
         return any(sanities)
+
+    def group_devices_mgmt_access(self) -> [list, list]:
+        """Group devices between those that have mgmt access and those that don't have mgmt access."""
+        devices_response = self.uptime(timeout=10, skip_exception=True, skip_logging=True, retry=False)
+        mgmt_devices = list()
+        no_mgmt_devices = list()
+        for device, response in zip(self.get_devices(), devices_response):
+            if response:
+                mgmt_devices.append(device)
+            else:
+                no_mgmt_devices.append(device)
+        return mgmt_devices, no_mgmt_devices
 
     class UseDevices:
         def __init__(self, api_obj_list):

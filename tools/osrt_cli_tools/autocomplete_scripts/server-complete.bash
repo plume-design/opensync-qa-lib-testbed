@@ -22,7 +22,7 @@ _server_completion() {
 }
 
 _server_completion_setup() {
-    complete -o nosort -F _server_completion server
+    complete -F _server_completion server
 }
 
 _server_completion_setup;

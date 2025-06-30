@@ -32,13 +32,13 @@ def test_off(cli_runner, ssh_mock):
 def test_parallel_restart(cli_runner, ssh_mock):
     # mock reservation status to be successful:
     reserve_obj = reserve.get_reserve_object()
-    machine_uuid = reserve_obj._get_machine_uuid()
+    owner, machine_uuid = reserve_obj.get_owner_machine_uuid()
     ssh_mock(
         sequence=[
             (
                 0,
-                f"QA/Automation/atr_dev_verification-8:::{machine_uuid}:::"
-                "2024-08-02T08:37:44.647341+00:00:::2034-08-08T12:09:14.953311+00:00:::3.3.0:::False:::msg",
+                f"{owner}:::{machine_uuid}:::2024-08-02T08:37:44.647341+00:00:::2034-08-08T12:09:14.953311+00:00"
+                f":::4.3.0:::False:::msg",
                 "",
             )
         ]

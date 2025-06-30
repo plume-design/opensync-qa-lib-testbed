@@ -1,0 +1,8 @@
+{
+  "first_released_fw": "4.2.0-142-gcfc366-dev-debug",
+  "latest_released_fw": "5.2.0-43-g129f0d-dev-debug",
+  "ga_released_fw": "4.2.0-142-gcfc366-dev-debug",
+  "rounds": 1,
+  "sdn_fw": "6.6.0-21-g73f41d-dev-debug",
+  "ovs_fw": "5.4.0-34-g6cc8ca-dev-debug"
+}

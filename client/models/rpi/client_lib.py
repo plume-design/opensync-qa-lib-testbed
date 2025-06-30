@@ -1,7 +1,6 @@
 import os
 import time
 import random
-from typing import Literal
 
 from lib_testbed.generic.client.models.debian.client_lib import DebianClientUpgrade, UPGRADE_DIR
 from lib_testbed.generic.client.models.debian.client_lib import ClientLib as DebianClientLib
@@ -16,13 +15,6 @@ class ClientLib(DebianClientLib):
 
     def pod_to_client(self, **kwargs):
         return ["1", "", "Rpi client is not a pod"]
-
-    def get_target_version(self, version: Literal["stable", "latest"]) -> str:
-        """Retrieves the actual target version for stable/latest from artifactory.
-        Returns string with version.
-        """
-        rpi_upgrade = RpiClientUpgrade(lib=self, restore_cfg=True, download_locally=True, restore_files=None)
-        return rpi_upgrade.get_target_version(version=version)
 
     def upgrade(
         self,
@@ -123,12 +115,13 @@ class ClientLib(DebianClientLib):
     def hackrf_generate_radar_pulse(self, channel, region="us", vector=0, **kwargs):
         return [1, "", "RPi does not support HackRF"]
 
+    def roam_client(self, ifname: str, bssid: str, timeout, **kwargs) -> list:
+        return [1, "", "RPi roaming is failing all the time"]
+
 
 class RpiClientUpgrade(DebianClientUpgrade):
     upgrade_script = "upgrade-rpi"
     compression_type = "tar.gz"
     checksum_type = "md5"
-    build_name = "build_rpi_c_plume"
-    build_separator = r"\.|-"
     type_version_separator = "__"
     version_pattern = r"(\d+\.\d+\-\d+)"

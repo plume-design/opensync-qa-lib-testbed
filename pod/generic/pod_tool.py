@@ -197,28 +197,23 @@ class PodTool:
 
         Upgrading from file:
                     pod <gw|l1|l2|all> upgrade <image_location> <optional>
-        Upgrading from artifactory:
+        Upgrading from artifactory (use TAB for the autocomplete to list possible branches):
             Newest version:
-                    pod <gw|l1|l2|all> upgrade <version|native-version|master> <optional>
+                    pod <gw|l1|l2|all> upgrade <version|native_version|master> <optional>
                         e.g.
                             pod gw upgrade master
-                            pod gw upgrade native-master
-                            pod gw upgrade legacy-native-master
+                            pod gw upgrade native_master
                             pod all upgrade 4.2.0
-                            pod gw upgrade native-5.8.0
-                            pod gw upgrade 6.2.0  -> Note missing "native" prefix
+                            pod gw upgrade native_5.8.0
 
             Requested build:
-                    pod <gw|l1|l2|all> upgrade <version|native-version|master|fbb>-<build_num> <optional>
+                    pod <gw|l1|l2|all> upgrade <version|native_version|master>-<build_num> <optional>
                         e.g.
                             pod all upgrade master-1777
-                            pod all upgrade native-master-1777
-                            pod all upgrade legacy-master-1777
+                            pod all upgrade legacy_master-1777
+                            pod all upgrade build_device_featurebranch-1777
                             pod l1 upgrade 4.2.0-15
-                            pod gw upgrade fbb-13422
-                            pod gw upgrade native-fbb-13422
-                            pod gw upgrade native-5.8.0-12
-                            pod gw upgrade 6.2.0-3  -> Note missing "native" prefix
+                            pod gw upgrade native_5.8.0-12
         """
         custbase = None
         deployment_file = None
@@ -306,9 +301,9 @@ class PodTool:
         """Get DFS regional domain"""
         return self.lib.get_region(retry=False, **kwargs)
 
-    def trigger_radar(self, **kwargs):
-        """Trigger radar event"""
-        return self.lib.trigger_radar_detected_event(retry=False, **kwargs)
+    def trigger_radar(self, freq_band="", **kwargs):
+        """Trigger radar event."""
+        return self.lib.trigger_radar_detected_event(retry=False, freqband=freq_band, **kwargs)
 
     def simulate_clients(self, count=1, **kwargs):
         """Simulate ethernet clients"""
@@ -347,11 +342,11 @@ class PodTool:
     def list_builds(self, requested_version):
         """List of builds of desired version
 
-        pod <gw|l1|l2|all> list-builds <version|master|native-version>
+        pod <gw|l1|l2|all> list-builds <version|master|native_version>
         eg.
             pod gw list-builds 4.2.0
             pod l1 list-builds master
-            pod l1 list-builds native-5.8.0
+            pod l1 list-builds native_5.8.0
         """
         return self.lib.list_builds(requested_version)
 
@@ -375,3 +370,11 @@ class PodTool:
     def eth_disconnect(self, **kwargs):
         """Disconnect pod from Ethernet ports."""
         return self.lib.eth_disconnect()
+
+    def set_tx_power_limit(self, tx_power, **kwargs):
+        """Limit tx power on node with start.d script"""
+        return self.lib.set_tx_power_limit(tx_power, **kwargs)
+
+    def get_tx_power_limit(self, **kwargs):
+        """Get tx power limit on node from the start.d script"""
+        return self.lib.get_tx_power_limit(**kwargs)

@@ -15,7 +15,7 @@ class ClientTool(ClientToolGeneric):
         **kwargs,
     ):
         """
-        Upgrade device with FW from fw_path or download build version from the artifactory
+        Upgrade client device firmware
 
         You can also pick FW version based on the latest or stable release.
         """
@@ -33,7 +33,7 @@ class ClientTool(ClientToolGeneric):
             download_locally,
             version,
             restore_files,
-            mirror_url=mirror_url,
+            mirror_url,
             **kwargs,
         )
         return results

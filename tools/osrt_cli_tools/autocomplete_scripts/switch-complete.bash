@@ -22,7 +22,7 @@ _switch_completion() {
 }
 
 _switch_completion_setup() {
-    complete -o nosort -F _switch_completion switch
+    complete -F _switch_completion switch
 }
 
 _switch_completion_setup;

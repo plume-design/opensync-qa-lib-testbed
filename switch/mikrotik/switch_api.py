@@ -8,8 +8,7 @@ class SwitchApi(SwitchApiGeneric):
         super().__init__(config=config, switch_unit_cfg=switch_unit_cfg)
 
     # Not needed for mikrotik switches
-    def restore_rpi_dongle_vlan(self, device_port, pod_name):
-        ...
+    def restore_rpi_dongle_vlan(self, device_port, pod_name): ...
 
     def change_untagged_vlan(self, port_name, target_vlan, enable_port=True):
         """
@@ -51,7 +50,7 @@ class SwitchApi(SwitchApiGeneric):
         if enable_port:
             log.info(f"Enabling {port_name}")
             self.switch_ctrl.interface_up(port_name)
-        port_info = self.switch_ctrl.switch_info_parsed(port_name)[port_name]
+        port_info = self.get_parsed_port_info(port_name)
         assert target_vlan in port_info["tagged"], f"Adding tagged vlan to {port_name} failed"
         log.info(f"Adding tagged vlan {target_vlan} to port {port_name} finished successfully")
         return True
@@ -74,7 +73,7 @@ class SwitchApi(SwitchApiGeneric):
         if enable_port:
             log.info(f"Enabling {port_name}")
             self.switch_ctrl.interface_up(port_name)
-        port_info = self.switch_ctrl.switch_info_parsed(port_name)[port_name]
+        port_info = self.get_parsed_port_info(port_name)
         assert target_vlan not in port_info["tagged"], f"Removing tagged vlan: {target_vlan} from {port_name} failed"
         log.info(f"Removing tagged vlan {target_vlan} from port {port_name} finished successfully")
         return True

@@ -32,6 +32,8 @@ sanity = "osrt_cli_tools.sanity:cli"
 server = "osrt_cli_tools.server:cli"
 switch = "osrt_cli_tools.switch:cli"
 testbed = "osrt_cli_tools.testbed:cli"
+attenuator = "osrt_cli_tools.attenuator:cli"
+tree = "osrt_cli_tools.osrt:tree"
 
 # each tool should advertise its bash-autocomplete location
 [project.entry-points.osrt_bash_complete]
@@ -45,6 +47,10 @@ sanity = "osrt_cli_tools.sanity:get_bash_complete"
 server = "osrt_cli_tools.server:get_bash_complete"
 switch = "osrt_cli_tools.switch:get_bash_complete"
 testbed = "osrt_cli_tools.testbed:get_bash_complete"
+attenuator = "osrt_cli_tools.attenuator:get_bash_complete"
+
+[osrt_click_command_tree]
+tree = "osrt_cli_tools.osrt.tree"
 
 # entry points section needs to be at the end so that a bash script can generate bash autocomplete
 [project.scripts]
@@ -60,3 +66,4 @@ sanity = "osrt_cli_tools.sanity:cli"
 server = "osrt_cli_tools.server:cli"
 switch = "osrt_cli_tools.switch:cli"
 testbed = "osrt_cli_tools.testbed:cli"
+attenuator = "osrt_cli_tools.attenuator:cli"

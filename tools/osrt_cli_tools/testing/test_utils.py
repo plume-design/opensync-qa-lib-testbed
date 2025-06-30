@@ -62,3 +62,37 @@ def test_print_command_with_error(patch_sys_exit, ctx, capsys, with_json):
     if with_json:
         assert "Error creating json output, fallback to tables:" in captured.out
     assert ctx.call_on_close_result == 1
+
+
+def test_complete_devices(mock_osrt_testbed):
+    results = utils.complete_devices(None, None, "l")
+    assert "l1" in results
+    assert "l2" in results
+
+
+def test_complete_devices_comma(mock_osrt_testbed):
+    results = utils.complete_devices(None, None, "w1,")
+    for result in results:
+        assert result.startswith("w1,")
+    assert "w1,w1" not in results
+    assert "w1,clients" in results
+    assert "w1,pods" in results
+    assert "w1,gw" in results
+    assert "w1,e1" in results
+
+
+def test_complete_testbeds():
+    results = utils.complete_testbeds(None, None, "slo")
+    assert results
+    for res in results:
+        assert res.startswith("slo")
+
+
+@pytest.mark.parametrize("val", ["true", "on", "1", "True", "TRUE", True])
+def test_bool_true(val):
+    assert utils.bool_choices_to_bool(val)
+
+
+@pytest.mark.parametrize("val", ["false", "off", "0", "False", "FALSE", False])
+def test_bool_false(val):
+    assert not utils.bool_choices_to_bool(val)

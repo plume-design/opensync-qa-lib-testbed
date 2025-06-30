@@ -22,7 +22,7 @@ _osrt_completion() {
 }
 
 _osrt_completion_setup() {
-    complete -o nosort -F _osrt_completion osrt
+    complete -F _osrt_completion osrt
 }
 
 _osrt_completion_setup;

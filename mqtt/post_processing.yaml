@@ -1,0 +1,25 @@
+# This file contains listed MQTT topic prefixes which should be considered by post-processing action:
+# i.e. decrypting stats keys.
+#
+# Structure of config:
+# MQTT_TOPIC_PREFIX:
+#   STATS_TYPE: [NAME_OF_STATS_KEY, ...]
+#
+# Allowed stats types: "mac_address", "ipv4_address", "ipv6_address", "encoded_string"
+#
+# NOTE: MQTT topic prefix should correspond with prefixes defined in `lib_testbed/generic/mqtt/proto_util.py` file.
+
+"WC/Stats/Hero/":
+  "mac_address": ["deviceId"]
+  "ipv4_address": ["addrIpv4", "ipv4"]
+
+"DPI/ADT/":
+    "mac_address": ["deviceId"]
+    "ipv6_address": ["destinationIpv6", "sourceIpv6"]
+    "ipv4_address": ["destinationIpv4", "sourceIpv4"]
+
+"MDNS/Records/":
+    "encoded_string": ["resDesc"]
+
+"Latency/":
+    "mac_address": ["macAddress"]

@@ -1,4 +1,5 @@
 import atexit
+import time
 import os
 import sys
 import fnmatch
@@ -8,6 +9,7 @@ import datetime
 from pathlib import Path
 
 from lib_testbed.generic.util.logger import log
+from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from osrt_cli_tools.utils import (
     json_option,
     debug_option,
@@ -19,6 +21,8 @@ from osrt_cli_tools.utils import (
     get_testbed_name,
     is_autocomplete,
     set_log_level,
+    verbosity_option,
+    set_log_verbosity,
 )
 
 if is_autocomplete():
@@ -191,11 +195,16 @@ all_columns_option = click.option(
 
 
 def get_reserve_object(
-    tb_name: str = None, json: bool = False, force: bool = False, message: str = "", skip_tz_conversion=False
+    tb_name: str = None,
+    json: bool = False,
+    force: bool = False,
+    message: str = "",
+    skip_tz_conversion=False,
+    owner_id: str = None,
 ):
     """Return reserve lib instance. The force and message arguments are required for
     setting reservation only - the ReserveLib expects a modified testbed config dictionary with
-    ``"message"`` and ``"force"`` keys.
+    ``"message"``, ``"force"`` and ``owner`` keys.
     """
     from lib_testbed.generic.util.reservelib import ReserveLib
     from lib_testbed.generic.util.config import load_tb_config
@@ -207,17 +216,25 @@ def get_reserve_object(
         config["force"] = force
     if message:
         config["message"] = message
+    if owner_id:
+        config["owner"] = owner_id
     return ReserveLib(config=config, json=json, skip_tz_conversion=skip_tz_conversion)
 
 
 def check_reservelib_version(reserve):
     """Check the latest version of reservation; when newer available display a warning."""
+    current_version = reserve.version
+    newest_version = reserve.get_latest_stable_reservation_used()
 
     def _old_version_warning():
         with open(Path(os.path.dirname(__file__)) / "osrt_warning.txt", "rt") as warning_text:
-            click.secho(warning_text.read(), bold=True, fg="red")
+            click.secho(warning_text.read(), bold=True, fg="red", err=True)
         click.secho("YOU MIGHT BE USING OUTDATED VERSION OF RESERVELIB!\n", bold=True, blink=True, fg="red", err=True)
-        click.echo(f"{reserve.tb_name}: update reservelib to the latest version to get/set reservation.\n", err=True)
+        click.echo(f"{reserve.tb_name}: update reservelib to the latest version to get/set reservation.", err=True)
+        click.echo(
+            f"You are using {current_version}, and the newest used agains {reserve.tb_name} is {newest_version}.\n",
+            err=True,
+        )
 
     if reserve.is_newer_available():
         atexit.register(_old_version_warning)
@@ -239,9 +256,11 @@ if not is_autocomplete():
     from lib_testbed.generic.util.common import threaded
 
     @threaded
-    def get_reservation_task(tb_name: str, json: bool = False, skip_tz_conversion=False):
+    def get_reservation_task(tb_name: str, json: bool = False, skip_tz_conversion: bool = False, owner_id: str = None):
         """Parallel task for getting reservation from given testbed."""
-        reserve = get_reserve_object(tb_name=tb_name, json=json, skip_tz_conversion=skip_tz_conversion)
+        reserve = get_reserve_object(
+            tb_name=tb_name, json=json, skip_tz_conversion=skip_tz_conversion, owner_id=owner_id
+        )
         exit_on_outdated_file(reserve, tb_name)
         check_reservelib_version(reserve)
         return reserve.get_reservation_status()
@@ -254,10 +273,16 @@ if not is_autocomplete():
         message: str = "",
         reservation_time: int = 120,
         skip_tz_conversion: bool = False,
+        owner_id: str = None,
     ):
         """Parallel task for setting reservation for given testbed."""
         reserve = get_reserve_object(
-            tb_name=tb_name, json=json, force=force, message=message, skip_tz_conversion=skip_tz_conversion
+            tb_name=tb_name,
+            json=json,
+            force=force,
+            message=message,
+            skip_tz_conversion=skip_tz_conversion,
+            owner_id=owner_id,
         )
         if reservation_time > reserve.max_reserv_time and not message:
             click.echo(
@@ -278,9 +303,17 @@ if not is_autocomplete():
             return reserve.reserve_test_bed(timeout=reservation_time)
 
     @threaded
-    def free_reservation_task(tb_name: str, json: bool = False, force: bool = False, skip_tz_conversion=False):
+    def free_reservation_task(
+        tb_name: str,
+        json: bool = False,
+        force: bool = False,
+        skip_tz_conversion=False,
+        owner_id: str = None,
+    ):
         """Parallel task for freeing reservation for given testbed."""
-        reserve = get_reserve_object(tb_name=tb_name, json=json, skip_tz_conversion=skip_tz_conversion)
+        reserve = get_reserve_object(
+            tb_name=tb_name, json=json, skip_tz_conversion=skip_tz_conversion, owner_id=owner_id
+        )
         exit_on_outdated_file(reserve, tb_name)
         reserve.tb_config["force"] = force
         return reserve.unreserve()
@@ -307,16 +340,20 @@ if not is_autocomplete():
         return reserve.get_history(days=days)
 
     @threaded
-    def update_reservation(tb_name: str, json: bool = False):
+    def update_reservation(tb_name: str, json: bool = False, skip_tz_conversion: bool = None):
+        if skip_tz_conversion:
+            raise ValueError("The argument skip_timezone conversion doesn't make sense in this context")
         reserve = get_reserve_object(tb_name=tb_name, json=json)
         return reserve.update_old_reservation_format()
 
 
-def reservation_execute_tasks(ctx, testbeds: list[str], task: callable, **kwargs) -> list:
+def reservation_execute_tasks(ctx, testbeds: list[str], task: callable, skip_error_msg: bool = False, **kwargs) -> list:
     """Perform reservation task, return results.
 
     Launches tasks across all testbeds, **kwargs being passed over to the reservation task.
     Collects results and retunrs a list of results.
+
+    If the value of skip_error_msg is True, then atexit error message is not registered.
     """
     reserve_tasks = {}
     kwargs["skip_tz_conversion"] = ctx.obj.get("SKIP_TZ_CONVERSION", False)
@@ -341,29 +378,38 @@ def reservation_execute_tasks(ctx, testbeds: list[str], task: callable, **kwargs
             }
             result = [result] if "history-get" in ctx.command_path else result
             # not possible to easily pass testbed name to atexit call.
-            atexit.register(
-                lambda: click.secho(
-                    "Reservation task finished with an error, add --debug for more information.",
-                    fg="red" if not ctx.obj.get("DISABLE_COLORS") else None,
-                    err=True,
+            if not skip_error_msg:
+                atexit.register(
+                    lambda: click.secho(
+                        "Reservation task finished with an error, increase tool verbosity with -vv for more information.",
+                        fg="red" if not ctx.obj.get("DISABLE_COLORS") else None,
+                        err=True,
+                    )
                 )
-            )
         reservation_results.append(result)
     return reservation_results
 
 
 # the actual command implementation of all commands:
+owner_id_option = click.option(
+    "--owner-id",
+    type=click.STRING,
+    required=False,
+    default="",
+    help="Provide a custom id for reservation owner. This flag is meant to be used by CI jobs.",
+)
 
 
 @click.group(context_settings=dict(help_option_names=["-h", "--help"]))
 @debug_option
 @json_option
+@verbosity_option
 @disable_colors_option
 @click.option(
     "--skip-timezone-conversion", is_flag=True, help="Do not convert timestamps from UTC to machine-local timezone."
 )
 @click.pass_context
-def cli(ctx, debug, json, disable_colors, skip_timezone_conversion):
+def cli(ctx, debug, json, verbosity, disable_colors, skip_timezone_conversion):
     """Testbed reservation tool.
 
     All commands can be executed across multiple testbeds in parallel. The results
@@ -378,12 +424,16 @@ def cli(ctx, debug, json, disable_colors, skip_timezone_conversion):
         ctx.obj["DISABLE_COLORS"] = disable_colors
     if not ctx.obj.get("DEBUG"):
         ctx.obj["DEBUG"] = debug
+    if not ctx.obj.get("VERBOSITY"):
+        ctx.obj["VERBOSITY"] = verbosity
     if not ctx.obj.get("JSON"):
         ctx.obj["JSON"] = json
     if not ctx.obj.get("SKIP_TZ_CONVERSION"):
         ctx.obj["SKIP_TZ_CONVERSION"] = skip_timezone_conversion
     if not is_autocomplete():
-        if ctx.obj["DEBUG"]:
+        if ctx.obj.get("VERBOSITY"):
+            set_log_verbosity(ctx.obj["VERBOSITY"])
+        elif ctx.obj["DEBUG"]:
             prepare_logger(ctx.obj["DEBUG"])
         else:
             set_log_level(logging.ERROR)
@@ -393,15 +443,27 @@ def cli(ctx, debug, json, disable_colors, skip_timezone_conversion):
 @click.option("-f", "--force", is_flag=True, help="Force reservation.")
 @click.option("-m", "--message", type=click.STRING, help="Add message denoting reason for TB reservation.", default="")
 @click.option("--skip-countdown", is_flag=True, help="Skip remaining time countdown mechanism.")
+@click.option(
+    "--wait",
+    is_flag=True,
+    default=False,
+    help=(
+        "Keep trying to reserve testbed. This falg can only be used with a singgle testbed. The command will continue trying to "
+        "set reservation indefinitely unless a successful reservation can be performed, or wait is aborted by the user."
+    ),
+)
+@click.option("--skip-rpower", is_flag=True, help="Skip rpower status check.")
 @testbeds_optional_argument
 @all_columns_option
-@click.argument("reservation_time", type=click.STRING, required=False, default=120)
+@click.argument("reservation_time", type=click.STRING, required=False, default="120")
+@owner_id_option
 @click.pass_context
-def set_(ctx, testbeds, reservation_time, force, message, skip_countdown, all_columns):
+def set_(ctx, testbeds, reservation_time, force, message, skip_countdown, wait, skip_rpower, all_columns, owner_id):
     """Set testbed reservation.
 
     The argument **TESTBEDS** might contain a wildcard, for example `slobox*`.
     Be careful - the **TESTBEDS** wildcard must not match any files in your current working directory.
+    The **TESTBEDS** argument might be a single testbed/location name, or a comma-separated list of locations.
 
     Optionally provide **RESERVATION_TIME** value in minutes (default: 120), or human-readable time-string, e.g.
     `1d1h` (1 day 1 hour) for 25 hour or `1w` (1 week) for 7 days.
@@ -415,19 +477,49 @@ def set_(ctx, testbeds, reservation_time, force, message, skip_countdown, all_co
 
     If reservation time is not given in minutes, then the provided string is parsed using Python library dateparser,
     so the reservation end time can be provided as "in 1 week" or "in a month". In addition, multiple languages are
-    parsed depending on dateparser version installed on your system. A valid reservation request example:
+    parsed depending on dateparser version installed on your system. A valid reservation request examples with a
+    date in the future, an 8-hour-long reservation, and a 3 day reservation:
 
     ```
     reserve set . "20 September 2026"
+    reserve set . 8h
+    reserve set . 3d
     ```
 
-    **NOTE** If the reservation end date falls in the past, the tool is going to try to convert it into a
+    **NOTE!** If the reservation end date falls in the past, the tool is going to try to convert it into a
     valid date, so it will calculate the difference between the parsed date and now, and flip it to be a positive
     timedelta. You have been warned!
     """
     import subprocess
     import dateparser
     from lib_testbed.generic.util.common import CACHE_DIR
+    from osrt_cli_tools.rpower import threaded_rpower_task, print_tasks_output
+
+    try:
+        error_check = int(testbeds[0])
+    except ValueError:
+        error_check = dateparser.parse(testbeds[0])
+
+    if (
+        error_check is not None
+        and reservation_time == "120"
+        and os.environ.get("OPENSYNC_TESTBED")
+        and len(testbeds) == 1
+    ):
+        try:
+            get_reserve_object(tb_name=testbeds[0])
+        except OpenSyncException:
+            click.secho(
+                f"Assuming user intention: 'reserve set . {testbeds[0]}', and executing the command.",
+                err=True,
+                fg="red" if not ctx.obj.get("DISABLE_COLORS") else None,
+            )
+            reservation_time = testbeds[0]
+            testbeds[0] = os.environ.get("OPENSYNC_TESTBED")
+
+    if len(testbeds) > 1 and wait:
+        click.echo("The --wait flag cannot be combined with multiple testbeds.")
+        sys.exit(1)
 
     try:
         reservation_time = int(reservation_time)
@@ -454,18 +546,44 @@ def set_(ctx, testbeds, reservation_time, force, message, skip_countdown, all_co
             err=True,
         )
         sys.exit(1)
-    # to speed things up all commands are launched as tasks in parallel
-    # because they can be executed across multiple testbeds at the same time.
-    reservation_results = reservation_execute_tasks(
-        ctx=ctx,
-        testbeds=testbeds,
-        task=set_reservation_task,
-        json=ctx.obj.get("JSON", False),
-        force=force,
-        message=message,
-        reservation_time=reservation_time,
-    )
-    print_reservation(ctx, reservation_results, all_columns=all_columns)
+    rpower_futures = {}
+    if not skip_rpower:
+        for tb_name in testbeds:
+            rpower_futures[tb_name] = threaded_rpower_task(
+                ctx=ctx, command="status", tb_name=tb_name, devices="all", timeout=5
+            )
+    if wait:
+        reservation_results = [{}]
+        while not reservation_results[0].get("status", False):
+            reservation_results = reservation_execute_tasks(
+                ctx=ctx,
+                testbeds=testbeds,
+                task=set_reservation_task,
+                skip_error_msg=True,
+                json=ctx.obj.get("JSON", False),
+                force=force,
+                message=message,
+                reservation_time=reservation_time,
+                owner_id=owner_id,
+            )
+            print_reservation(ctx, reservation_results, all_columns=all_columns)
+            if not reservation_results[0].get("status"):
+                click.echo("Testbed could not be reserved, waiting 60 seconds before re-trying...", err=True)
+                time.sleep(60)
+    else:
+        # to speed things up all commands are launched as tasks in parallel
+        # because they can be executed across multiple testbeds at the same time.
+        reservation_results = reservation_execute_tasks(
+            ctx=ctx,
+            testbeds=testbeds,
+            task=set_reservation_task,
+            json=ctx.obj.get("JSON", False),
+            force=force,
+            message=message,
+            reservation_time=reservation_time,
+            owner_id=owner_id,
+        )
+        print_reservation(ctx, reservation_results, all_columns=all_columns)
     for row in reservation_results:
         reserve_file = f"{CACHE_DIR}/.reserve_{row.get('name')}"
         if not skip_countdown and row.get("status"):
@@ -474,6 +592,23 @@ def set_(ctx, testbeds, reservation_time, force, message, skip_countdown, all_co
         else:
             log.debug("Reserve result: '%s'. Removing the file %s", row, reserve_file)
             subprocess.run(f"flock -x {reserve_file} rm {reserve_file}", shell=True)
+    if not skip_rpower:
+        rpower_statuses = {}
+        for tb_name in rpower_futures:
+            try:
+                rpower_statuses[tb_name] = rpower_futures[tb_name].result()
+            except Exception as err:
+                err_str = "".join(traceback.format_exception(err))
+                log.debug("Testbed rpower %s status resulted with error:\n%s", tb_name, err_str)
+                rpower_statuses[tb_name] = {"status": [1, "", err_str]}
+        for tb_name in rpower_statuses:
+            tb_status_ok = True
+            for device in rpower_statuses[tb_name]:
+                if "OFF" in rpower_statuses[tb_name][device][1]:
+                    tb_status_ok = False
+            if not tb_status_ok:
+                click.echo(f"WARNING. Some devices for testbed {tb_name} appear to be powered OFF.", err=True)
+                print_tasks_output(ctx, {tb_name: rpower_statuses[tb_name]})
     if not all(state.get("status", False) for state in reservation_results):
         click.secho(
             "Reservation was not successful!", err=True, fg="red" if not ctx.obj.get("DISABLE_COLORS") else None
@@ -490,14 +625,17 @@ def set_(ctx, testbeds, reservation_time, force, message, skip_countdown, all_co
     "or just part of the searched name. This option will also match last owner.",
     default=None,
 )
+@click.option("--available", is_flag=True, help="Only display testbeds that are free or reserved by me.")
 @testbeds_optional_argument
 @all_columns_option
+@owner_id_option
 @click.pass_context
-def get(ctx, testbeds, only_free, owner, all_columns):
+def get(ctx, testbeds, only_free, owner, available, all_columns, owner_id):
     """Get testbed reservation information.
 
     The argument **TESTBEDS** might contain a wildcard, for example `slobox*`.
     Be careful - the **TESTBEDS** wildcard must not match any files in your current working directory.
+    The **TESTBEDS** argument might be a single testbed/location name, or a comma-separated list of locations.
 
     Example:
     ```
@@ -511,12 +649,12 @@ def get(ctx, testbeds, only_free, owner, all_columns):
         sys.exit(1)
 
     reservation_results = reservation_execute_tasks(
-        ctx=ctx, testbeds=testbeds, task=get_reservation_task, json=ctx.obj.get("JSON", False)
+        ctx=ctx, testbeds=testbeds, task=get_reservation_task, json=ctx.obj.get("JSON", False), owner_id=owner_id
     )
 
-    if only_free:
-        reservation_results = [tb for tb in reservation_results if not tb["busy"]]
-    if owner:
+    if only_free or available:
+        reservation_results = [tb for tb in reservation_results if (not tb["busy"]) or (available and tb["busyByMe"])]
+    elif owner:
         if "*" in owner or "?" in owner or "[" in owner or "]" in owner:
             reservation_results = [tb for tb in reservation_results if fnmatch.fnmatch(tb["owner"], owner)]
         else:
@@ -528,19 +666,25 @@ def get(ctx, testbeds, only_free, owner, all_columns):
 @click.option("-f", "--force", is_flag=True, help="Force free reservation.")
 @testbeds_optional_argument
 @all_columns_option
+@owner_id_option
 @click.pass_context
-def free(ctx, testbeds, force, all_columns):
+def free(ctx, testbeds, force, all_columns, owner_id):
     """Free **TESTBEDS**.
 
-    The argument **TESTBEDS** might contain wildcard, for example `slobox*`.
+    The argument **TESTBEDS** might contain a wildcard, for example `slobox*`.
     Be careful - the **TESTBEDS** wildcard must not match any files in your current working directory.
-
+    The **TESTBEDS** argument might be a single testbed/location name, or a comma-separated list of locations.
     """
     import subprocess
     from lib_testbed.generic.util.common import CACHE_DIR
 
     reservation_results = reservation_execute_tasks(
-        ctx=ctx, testbeds=testbeds, task=free_reservation_task, json=ctx.obj.get("JSON", False), force=force
+        ctx=ctx,
+        testbeds=testbeds,
+        task=free_reservation_task,
+        json=ctx.obj.get("JSON", False),
+        force=force,
+        owner_id=owner_id,
     )
     for row in reservation_results:
         if row.get("status"):
@@ -549,6 +693,8 @@ def free(ctx, testbeds, force, all_columns):
             log.debug("Removing local reservation time: %s", reserve_file)
             subprocess.run(f"flock -x {reserve_file} rm {reserve_file}", shell=True)
     print_reservation(ctx, reservation_results, all_columns=all_columns)
+    if not all(state.get("status", False) for state in reservation_results):
+        sys.exit(1)
 
 
 @cli.command("history-clear")
@@ -557,7 +703,13 @@ def free(ctx, testbeds, force, all_columns):
 def hist_clear(ctx, testbeds):
     """Clear reservation history for **TESTBEDS**.
 
-    Removes reservation file from testbed."""
+    Removes reservation file from testbed. The user is prompted to confirm the history removal to avoid
+    accidental history removal.
+
+    The argument **TESTBEDS** might contain a wildcard, for example `slobox*`.
+    Be careful - the **TESTBEDS** wildcard must not match any files in your current working directory.
+    The **TESTBEDS** argument might be a single testbed/location name, or a comma-separated list of locations.
+    """
     affected_testbeds = ", ".join(testbeds)
     if click.confirm(
         f"You are about to clear history for the following testbeds: {affected_testbeds}. Do you want to continue?"
@@ -577,7 +729,12 @@ def hist_clear(ctx, testbeds):
 )
 @click.pass_context
 def stats(ctx, testbeds, time_res):
-    """Display **TESTBEDS** usage statistics."""
+    """Display **TESTBEDS** usage statistics.
+
+    The argument **TESTBEDS** might contain a wildcard, for example `slobox*`.
+    Be careful - the **TESTBEDS** wildcard must not match any files in your current working directory.
+    The **TESTBEDS** argument might be a single testbed/location name, or a comma-separated list of locations.
+    """
     reservation_results = reservation_execute_tasks(
         ctx=ctx, testbeds=testbeds, task=stats_reservation_task, json=ctx.obj.get("JSON", False), time_res=time_res
     )
@@ -596,7 +753,12 @@ def stats(ctx, testbeds, time_res):
 @all_columns_option
 @click.pass_context
 def history_get(ctx, testbeds, days, all_columns):
-    """Display testbed usage history."""
+    """Display testbed usage history.
+
+    The argument **TESTBEDS** might contain a wildcard, for example `slobox*`.
+    Be careful - the **TESTBEDS** wildcard must not match any files in your current working directory.
+    The **TESTBEDS** argument might be a single testbed/location name, or a comma-separated list of locations.
+    """
     reservation_results = reservation_execute_tasks(
         ctx=ctx, testbeds=testbeds, task=history_get_reservation_task, json=ctx.obj.get("JSON", False), days=days
     )
@@ -610,6 +772,10 @@ def file_format_update(ctx, testbeds):
     """Update reservation file format.
 
     Use this command to update reservation file format to the most recent file format specification.
+
+    The argument **TESTBEDS** might contain a wildcard, for example `slobox*`.
+    Be careful - the **TESTBEDS** wildcard must not match any files in your current working directory.
+    The **TESTBEDS** argument might be a single testbed/location name, or a comma-separated list of locations.
     """
     if ctx.obj.get("SKIP_TZ_CONVERSION"):
         click.echo("The flag --skip-timezone-conversion does not make sense in this context, ignoring it.", err=True)

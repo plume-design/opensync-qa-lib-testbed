@@ -1,4 +1,6 @@
 import pytest
+
+from lib_testbed.generic.util.config import load_file
 from lib_testbed.generic.util.object_factory import ObjectFactory
 from lib_testbed.generic.pod.generic.pod_api import PodApi
 from lib_testbed.generic.util.ssh.device_api import DevicesApi
@@ -100,7 +102,15 @@ class Pods(ObjectFactory):
             if exception:
                 raise exception
             else:
-                raise Exception(f"No device found matching requested criteria: {kwargs}")
+                nodes = kwargs.get("config").get("Nodes")
+                if nodes:
+                    # re-load file without extra parsing to improve error message:
+                    location_file = kwargs.get("config").get("location_file")
+                    location_raw_cfg = load_file(location_file)
+                    msg = f"No device found matching requested criteria: {location_raw_cfg.get("Nodes")}"
+                else:
+                    msg = f"No device found matching requested criteria: {kwargs}"
+                raise Exception(msg)
         return DevicesApi(obj_list, **kwargs)
 
     @staticmethod
@@ -132,7 +142,6 @@ class Pods(ObjectFactory):
 
 
 class PodResolver:
-
     def get_device(self, request=None, **kwargs):
         set_device_role(kwargs["config"])
         multi_devices = kwargs.pop("multi_obj", False)

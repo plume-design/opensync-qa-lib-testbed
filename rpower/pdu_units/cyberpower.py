@@ -1,3 +1,4 @@
+from pysnmp.proto.errind import RequestTimedOut
 from pysnmp.hlapi import (
     CommunityData,
     ContextData,
@@ -29,12 +30,18 @@ class PduLib:
     # See snmptranslate -Td CPS-MIB::ePDUOutletControlOutletCommand
 
     def __init__(self, address: str, port: int, username: str, password: str, ipv6: bool, requests_session):
-        # CyberPower uses SNMPv1, meaning unauthenticated access
-        self.engine = SnmpEngine()
-        self.auth = CommunityData("private")
-        transport_class = Udp6TransportTarget if ipv6 else UdpTransportTarget
-        self.transport = transport_class((address, SNMP_PORT))
-        self.context = ContextData()
+        # CyberPower uses SNMPv1, meaning unauthenticated access, always on port 161
+        self.address = address
+        self.ipv6 = ipv6
+
+    def common_snmp_args(self):
+        engine = SnmpEngine()
+        auth = CommunityData("private")
+        transport_class = Udp6TransportTarget if self.ipv6 else UdpTransportTarget
+        # Default timeout is 1 second and 5 retries. We have our own retry loop, so reduce retry count here.
+        transport = transport_class((self.address, SNMP_PORT), timeout=6, retries=1)
+        context = ContextData()
+        return engine, auth, transport, context
 
     def model(self):
         """Get PDU model"""
@@ -84,24 +91,28 @@ class PduLib:
         return response
 
     def send_get(self, oid):
-        command_generator = getCmd(
-            self.engine,
-            self.auth,
-            self.transport,
-            self.context,
-            ObjectType(ObjectIdentity(oid)),
-        )
-        return next(command_generator)
+        for _ in range(20):
+            command_generator = getCmd(
+                *self.common_snmp_args(),
+                ObjectType(ObjectIdentity(oid)),
+            )
+            response = next(command_generator)
+            # When SNMP isn't reachable we don't get any error code, just RequestTimedOut exception
+            if not isinstance(response[0], RequestTimedOut):
+                break
+        return response
 
     def send_set(self, oid, value):
-        command_generator = setCmd(
-            self.engine,
-            self.auth,
-            self.transport,
-            self.context,
-            ObjectType(ObjectIdentity(oid), value),
-        )
-        return next(command_generator)
+        for _ in range(20):
+            command_generator = setCmd(
+                *self.common_snmp_args(),
+                ObjectType(ObjectIdentity(oid), value),
+            )
+            response = next(command_generator)
+            # When SNMP isn't reachable we don't get any error code, just RequestTimedOut exception
+            if not isinstance(response[0], RequestTimedOut):
+                break
+        return response
 
     def response_to_result(self, response):
         error_indication, error_status, error_index, var_binds = response
@@ -109,8 +120,8 @@ class PduLib:
         if var_binds:
             oid, value = var_binds[0]
             stdout = value.prettyPrint()
-        stderr = error_indication if error_indication else ""
-        # When SNMP isn't reachable we don't get any error code, just error message about timeout
+        stderr = str(error_indication) if error_indication else ""
+        # When SNMP isn't reachable we don't get any error code, just RequestTimedOut exception
         if stderr and not stdout and not error_index:
             error_index = 1
         return [error_index, stdout, stderr]

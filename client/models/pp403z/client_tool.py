@@ -7,7 +7,7 @@ class ClientTool(ClientToolGeneric):
         ssid=None,
         psk=None,
         bssid=None,
-        band=None,
+        node_band=None,
         key_mgmt="WPA-PSK",
         timeout=60,
         dhclient=True,
@@ -20,13 +20,13 @@ class ClientTool(ClientToolGeneric):
     ):
         """Connect [pod] client(s) to the network"""
         result = [1, "", "Not started"]
-        bands = [band] if band else ["24g", "5gl", "5gu"]
+        bands = [node_band] if node_band else ["2.4G", "5GL", "5GU"]
         for band in bands:
             result = self.lib.connect(
                 ssid=ssid,
                 psk=psk,
                 bssid=bssid,
-                band=band,
+                node_band=band,
                 key_mgmt=key_mgmt,
                 timeout=timeout,
                 dhclient=dhclient,

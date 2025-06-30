@@ -22,7 +22,7 @@ _sanity_completion() {
 }
 
 _sanity_completion_setup() {
-    complete -o nosort -F _sanity_completion sanity
+    complete -F _sanity_completion sanity
 }
 
 _sanity_completion_setup;

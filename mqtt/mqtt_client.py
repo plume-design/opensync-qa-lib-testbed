@@ -2,6 +2,7 @@
 import re
 import os
 import sys
+import yaml
 import json
 import time
 import zlib
@@ -25,6 +26,10 @@ from lib_testbed.generic.util.common import BASE_DIR
 from lib_testbed.generic.util.request_handler import parse_request
 
 
+LOCAL_MQTT_PORT = 8883
+REMOTE_MQTT_PORT = 1883
+
+
 class MqttClient:
     def __init__(self, config, **_kwargs):
         self.config = config
@@ -42,24 +47,36 @@ class MqttClient:
         self.show_log = True
         self.clean_on_setup_method = config.get("clean_mqtt_on_setup_method", True)
 
+    @property
+    def mqtt_port(self) -> int:
+        return self.config.get("mqtt_port", REMOTE_MQTT_PORT)
+
     def connect(self, hosts, topic, on_message_cb=None, certs=None):
         with self.lock:
             self.terminate = False
         self.clean_messages(show_log=False)
         self.max_messages = None
         current_hosts = self.get_all_hosts()
-        port = self.config.get("mqtt_port", 1883)
-        log.info(f"Mqtt connecting to hosts: {hosts}, port: {port}")
+        log.info(f"Mqtt connecting to hosts: {hosts}, port: {self.mqtt_port}")
         log.info(f"topic: {topic}", indent=1)
         for host in hosts:
             if host in current_hosts:
                 raise Exception(f"Host: {host} already in use")
-            ssl = True if port != 1883 else False
+            ssl = True if self.mqtt_port != REMOTE_MQTT_PORT else False
             client = self.paco_client(ssl=ssl, certs=certs)
             try:
-                client.connect(host, port)
-            except ConnectionRefusedError:
-                log.error(f"Connection refused with {host}. Broker is down. Please contact net-ops team.")
+                client.connect(host, self.mqtt_port)
+            except Exception as e:
+                if self.is_local_broker():
+                    log.error(
+                        f"Unable to establish connection with {host}. Local broker is down. "
+                        f"Please check `mosquitto.service` on the testbed server.\n Reason: {e}"
+                    )
+                else:
+                    log.error(
+                        f"Unable to establish connection with {host}. Broker is down. "
+                        f"Please contact dev-ops team.\n Reason: {e}"
+                    )
                 continue
             client.subscribe(topic)
             client.on_message_cb = on_message_cb
@@ -109,7 +126,7 @@ class MqttClient:
     def collect(self, topic, on_message_cb, timeout, wait=True, max_messages=None, **kwargs):
         # set suitable proto-decoder for topic
         self.report_proto = self.proto_util.get_proto_decoder(topic)
-        hosts = MqttResolver.get_hosts(self.config)
+        hosts = self.resolver.get_hosts(self.config)
         if not hosts:
             raise Exception(f"No found any mqtt hosts for the following topic: {topic} from zookeeper")
         self.connect(hosts, topic, on_message_cb)
@@ -186,6 +203,10 @@ class MqttClient:
 
     def collect_we_qoe_stats(self, device_id, lid, on_message_cb, timeout=5 * 60, wait=True, max_messages=None):
         topic = MqttResolver.get_we_qoe_stats_topic(self.config, device_id, lid)
+        return self.collect(topic, on_message_cb, timeout, wait, max_messages)
+
+    def collect_lan_latency_stats(self, device_id, lid, on_message_cb, timeout=5 * 60, wait=True, max_messages=None):
+        topic = MqttResolver.get_lan_latency_topic(self.config, device_id, lid)
         return self.collect(topic, on_message_cb, timeout, wait, max_messages)
 
     # The callback for when the client receives a CONNACK response from the server.
@@ -272,6 +293,7 @@ class MqttClient:
     @parse_request
     def teardown_class_handler(self, request):
         self.close()
+        self.show_log = True
 
     @staticmethod
     def get_name():
@@ -380,6 +402,10 @@ class MqttClient:
 
         self.clients[0].publish(topic, msg)
 
+    @staticmethod
+    def is_local_broker() -> bool:
+        return False
+
 
 class MqttResolver:
     from string import Template
@@ -427,7 +453,7 @@ class MqttResolver:
         return mqtt_servers
 
     @staticmethod
-    def get_hosts(config):
+    def get_hosts(config) -> list:
         """
         Get mqtt servers from zookeeper
         Args:
@@ -521,6 +547,10 @@ class MqttResolver:
     @staticmethod
     def get_we_qoe_stats_topic(config, device_id, loc_id):
         return f'WE/QOE/{config["deployment_id"]}/{device_id}/{loc_id}'
+
+    @staticmethod
+    def get_lan_latency_topic(config, device_id, loc_id):
+        return f'Latency/{config["deployment_id"]}/{device_id}/{loc_id}'
 
     @staticmethod
     def resolve_mqtt_topic(config, lid, topic_template):
@@ -663,6 +693,7 @@ class MqttFakeStats:
         fake_mqtt = list()
         traffic_generated = False
         for mqtt_message in mqtt_messages:
+            mqtt_message.pop("device", None), mqtt_message.pop("bsReport", None)
             for client in mqtt_message.get("clients", []):
                 for client_list in client["clientList"]:
                     traffic_generated = True
@@ -919,7 +950,8 @@ class MqttProcessing:
         Decode values after receiving a message
         """
         proto_report_name = self.get_proto_report_name()
-        if proto_report_name not in self.process_cfg.keys():
+        # All raw-messages to decode should be in (str) type. Messages in (bytes) type are already decoded.
+        if proto_report_name not in self.process_cfg.keys() or isinstance(raw_msg, bytes):
             return raw_msg
         post_process_topic = self.process_cfg[proto_report_name]
         for item_to_translate, values in post_process_topic.items():
@@ -948,13 +980,13 @@ class MqttProcessing:
 
     @staticmethod
     def load_process_cfg():
-        post_process_path = os.path.join(BASE_DIR, "lib_testbed", "generic", "mqtt", "post_processing.json")
+        post_process_path = os.path.join(BASE_DIR, "lib_testbed", "generic", "mqtt", "post_processing.yaml")
         with open(post_process_path) as post_process_cfg:
-            post_process_cfg = json.load(post_process_cfg)
+            post_process_cfg = yaml.load(post_process_cfg, yaml.SafeLoader)
         return post_process_cfg
 
     def get_proto_report_name(self):
-        return self.mqtt_lib.report_proto.DESCRIPTOR.name
+        return self.mqtt_lib.report_proto.name
 
     @staticmethod
     def translate_mac_address(key_to_translate, raw_msg):
@@ -963,6 +995,8 @@ class MqttProcessing:
             return raw_msg
         for encoded_mac in regex_result:
             base64_mac = bytearray(base64.b64decode(encoded_mac))
+            if len(base64_mac) != 6:
+                return raw_msg
             mac_bytes = [hex(a)[2:].zfill(2) for a in list(base64_mac)]
             mac = ":".join(mac_bytes)
             raw_msg = raw_msg.replace(encoded_mac, f'"{mac}"')
@@ -1023,3 +1057,89 @@ class MqttProcessing:
             decoded_string = "".join([i for i in decoded_string if unicodedata.category(i) != "Cc"])
             raw_msg = raw_msg.replace(encoded_string, f'"{decoded_string}"')
         return raw_msg
+
+
+class MqttClientLocalBroker(MqttClient):
+    def __init__(self, config, **_kwargs):
+        super().__init__(config, **_kwargs)
+        self.resolver = LocalMqttResolver()
+        self.request = None
+        self.stats_redirected, self.stats_restored = False, False
+
+    @parse_request
+    def setup_class_handler(self, request):
+        self.request = request
+        if self.stats_redirected:
+            return
+        self.stats_redirected, self.stats_restored = True, False
+        self.start_local_mqtt_broker()
+
+    @parse_request
+    def teardown_class_handler(self, request):
+        super().teardown_class_handler(request)
+        if self.stats_restored:
+            return
+        self.stats_redirected, self.stats_restored = False, True
+        self.restore_mqtt_settings()
+
+    def collect(self, topic, on_message_cb, timeout, wait=True, max_messages=None, **kwargs) -> list:
+        self.redirect_mqtt_msg(pure_redirect=False)
+        self.redirect_mqtt_msg(pure_redirect=True)
+        return super().collect(topic, on_message_cb, timeout, wait, max_messages, **kwargs)
+
+    def start_local_mqtt_broker(self):
+        testbed_server = self.request.getfixturevalue("_host_object")
+        if not testbed_server.is_mqtt_broker_started():
+            log.info("Starting local mqtt broker on testbed server")
+            testbed_server.start_mqtt_broker()
+
+    def get_pods_mgmt_access(self):
+        pods = self.request.getfixturevalue("_pods_object")
+        mgmt_devices, no_mgmt_devices = pods.group_devices_mgmt_access()
+        if no_mgmt_devices:
+            no_mgmt_dev_names = pods.use_devices(no_mgmt_devices).nickname
+            log.warning("Skip configuring local mqtt broker for devices without mgmt access: %s", no_mgmt_dev_names)
+        assert mgmt_devices, f"None of devices: {pods.nickname} have mgmt access"
+        return pods.use_devices(mgmt_devices)
+
+    def redirect_mqtt_msg(self, pure_redirect: bool):
+        pods = self.get_pods_mgmt_access()
+        if pure_redirect:
+            log.info(f"Updating mqtt_settings in AWLAN table on {', '.join(pods.nickname)} nodes")
+            pods.redirect_stats_to_local_mqtt_broker(pure_redirect=pure_redirect)
+        else:
+            log.info(f"Updating firewall rule and pod certs for local mqtt broker on {', '.join(pods.nickname)} nodes")
+            pods.prepare_dev_to_use_local_mqtt_broker(skip_storage=True)
+
+    def restore_mqtt_settings(self):
+        pods = self.get_pods_mgmt_access()
+        log.info(f"Restoring mqtt settings to the default state for {','.join(pods.nickname)} nodes")
+        if self.request:
+            cloud_admin = self.request.getfixturevalue("_cloud_admin_object")
+            # Resync controller to restore overwritten MQTT settings
+            cloud_admin.resync_controller()
+        pods.set_firewall_mode("on", skip_exception=True)
+
+    @property
+    def mqtt_port(self) -> int:
+        return LOCAL_MQTT_PORT
+
+    @staticmethod
+    def is_local_broker() -> bool:
+        return True
+
+
+class LocalMqttResolver(MqttResolver):
+
+    @staticmethod
+    def get_hosts(config) -> list:
+        """
+        Return local mqtt broker host address.
+        Args:
+            config: (dict) test bed config
+
+        Returns: (list) mqtt_servers
+        """
+        servers = config.get("mqtt_servers", [])
+        servers.append(config["ssh_gateway"]["hostname"])
+        return servers

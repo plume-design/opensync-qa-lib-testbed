@@ -1,13 +1,9 @@
 import random
 import os
 import re
-import json
 import uuid
 import time
 import shutil
-from typing import Literal
-
-import requests
 
 from multiprocessing import Lock
 from distutils.version import StrictVersion
@@ -15,7 +11,11 @@ from distutils.version import StrictVersion
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.client.models.generic.client_lib import ClientLib as ClientLibGeneric
 from lib_testbed.generic.client.models.rpi.client_tool import ClientTool
-from lib_testbed.generic.client.models.generic.client_lib import UPGRADE_DIR, UPGRADE_LOCAL_CACHE_DIR
+from lib_testbed.generic.client.models.generic.client_lib import (
+    UPGRADE_DIR,
+    UPGRADE_LOCAL_CACHE_DIR,
+    TESTBED_IMAGES_PUBLIC_URL,
+)
 
 
 NEW_DHCP_RESERVATION_PATH = "/tools/dhcp/dhcp_reservation.py"
@@ -30,13 +30,6 @@ class ClientLib(ClientLibGeneric):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.tool = ClientTool(lib=self)
-
-    def get_target_version(self, version: Literal["stable", "latest"]) -> str:
-        """Retrieves the actual target version for stable/latest from artifactory.
-        Returns string with version.
-        """
-        debian_upgrade = DebianClientUpgrade(lib=self, restore_cfg=True, download_locally=True, restore_files=None)
-        return debian_upgrade.get_target_version(version=version)
 
     def upgrade(
         self,
@@ -58,8 +51,8 @@ class ClientLib(ClientLibGeneric):
             restore_cfg: (bool) Restore a client configuration (hostname, dhcpd.conf)
             http_address: (str) Start download image directly from provided HTTP server address
             download_locally: (bool) If True download upgrade files to local machine
-            version: (str) version to download from the artifactory (or get latest or stable version)
-            restore_files: (str): Paths of files to restore. eg. restore_files=/home/plume/file1,/etc/file2
+            version: (str) version to download from the S3 (or get latest or stable version)
+            restore_files: (str): Paths of files to restore. e.g. restore_files=/home/plume/file1,/etc/file2
             mirror_url (str): url to mirror with upgrade files
             **kwargs:
 
@@ -90,16 +83,21 @@ class ClientLib(ClientLibGeneric):
 
     def start_mqtt_broker(self, **kwargs):
         log.info("Starting mosquito (mqtt broker) on the %s" % self.get_nickname())
-        self.run_command("sudo /usr/sbin/mosquitto -c /etc/mosquitto/mosquitto.conf -d -v", **kwargs)
-        out = self.run_command("ps aux | grep mosqui", **kwargs)
-        if "mosquitto" in out[1]:
+        self.run_command("sudo systemctl restart mosquitto.service", **kwargs)
+        out = self.is_mqtt_broker_started(**kwargs)
+        if out[0] == 0:
             return [0, "Mosquito started successfully", ""]
         else:
             out = self.run_command("tail -30 /var/log/mosquitto/mosquitto.log", **kwargs)
             return [1, "", out[1]]
 
     def stop_mqtt_broker(self, **kwargs):
-        return self.run_command("sudo killall mosquitto", **kwargs)
+        # Do nothing, local mqtt broker shouldn't be disabled
+        return [0, "", ""]
+
+    def is_mqtt_broker_started(self, **kwargs):
+        out = self.run_command("sudo systemctl status mosquitto.service", **kwargs)
+        return out
 
     def set_tb_nat(self, mode, **kwargs):
         """
@@ -119,7 +117,7 @@ class ClientLib(ClientLibGeneric):
         # override 255 to 0
         out[0] = 0
         # self.wait_available(2 * 60) -> is not working for the rpi server
-        time.sleep(60)
+        time.sleep(2 * 60)
         tayga = self.run_command("sudo service tayga status")
         if mode == "NAT64":
             tayga_state = "Active: active (running)"
@@ -167,14 +165,165 @@ class ClientLib(ClientLibGeneric):
                 return [0, "Limiting TX power was not enabled", ""]
         return out
 
+    def get_tx_power_limit(self, **kwags):
+        """Get Wi-Fi TX power setting."""
+        ret = self.run_command("sudo cat /.tx_power_enable.flag")
+        if ret[0]:
+            return [0, "Limiting is disabled", ""]
+        # if file exists, but it's empty older version of limiting is used and it has fixed value 1
+        tx_limit = ret[1].strip() if ret[1] else 1
+        return [0, f"Limit set to {tx_limit}", ""]
+
+    def set_bandwidth_limit(
+        self,
+        *values: int,
+        duration: int = 30,
+        repeats: int = 10,
+        interface: str | None = None,
+        queue_size: int | None = None,
+        **kwargs,
+    ) -> list[int, str, str]:
+        """
+        Limit bandwidth on testbed server's `interface` to each of the `values` for ˙duration` seconds, `repeats` times.
+
+        Numbers in `values` specify bandwidth limit in megabits per second.
+
+        `duration` is in seconds, each of the limits in `values` will be active for that many seconds.
+
+        The whole cycle of limits in `values` will be repeated `repeats` times.
+
+        `interface` must be one of server's eth0.2xy WAN VLAN uplink interfaces, unless None. If None, WAN VLAN
+        interface to which gateway pod is connected will be used, or eth0.200, if gateway's uplink is unknown.
+
+        If `queue_size` is specified, it will be set to that value, in bytes.
+        """
+        version = self.version()[1]
+        short = self.version(short=True)[1]
+        if "server" not in version:
+            return [2, "", "Bandwidth limiting is supported only on testbed server"]
+        if version.startswith(("debian-server", "perf-server")):
+            if StrictVersion(short) <= StrictVersion("3.0.48"):
+                return [3, "", f"Bandwidth limiting requires testbed server newer than 3.0.48, not {short}"]
+        elif version.startswith("rpi_server"):
+            if StrictVersion(short.replace("-", ".")) <= StrictVersion("2.0.208"):
+                return [3, "", f"Bandwidth limiting requires testbed server newer than 2.0-208, not {short}"]
+        else:
+            return [5, "", f"Unsupported testbed server: {version}"]
+        if interface is None:
+            nodes_config = self.config.get("Nodes", [])
+            if nodes_config:
+                gw_name = nodes_config[0].get("name", "gw")
+            else:
+                gw_name = "gw"
+            vlan_name, vlan_id = self.switch.get_connection_ip_type(gw_name)
+            if not vlan_name:
+                interface = "eth0.200"
+            else:
+                interface = f"eth0.{vlan_id}"
+        assert all(val > 0 for val in values)
+        values = list(values) * repeats
+        ifb_name = interface.replace("eth0.", "ifb.")
+        limit_bandwidth_cmd = (
+            f"sudo tc class {{action}} dev {interface} parent 1: classid 1:10 htb rate {{value}}mbit ceil {{value}}mbit"
+            " && sleep 0.5 && "
+            f"sudo tc class {{action}} dev {ifb_name}  parent 1: classid 1:10 htb rate {{value}}mbit ceil {{value}}mbit"
+        )
+        # Add two seconds for each bandwidth limit change
+        total = len(values) * (duration + 2)
+        enable_bandwidth_limiting_cmd = f"sudo enable-bandwidth-limiting {interface} {total}"
+        result = [0, "bandwidth limiting restored to defaults", ""]
+        action = "add"
+        try:
+            with BackgroundTask(self, enable_bandwidth_limiting_cmd):
+                log.info(f"Bandwidth limiting enabled on '{interface}' testbed server interface for {total} seconds")
+                for value in values:
+                    res = self.run_command(limit_bandwidth_cmd.format(action=action, value=value))
+                    if res[0] != 0:
+                        result = res
+                        break
+                    log.info(f"Bandwidth limit on '{interface}' interface set to {value} Mbps for {duration} seconds")
+                    if queue_size and action == "add":
+                        queue_size_cmd = (
+                            f"sudo tc qdisc replace dev {interface} handle 10: parent 1:10 bfifo limit {queue_size}"
+                            " && sleep 0.5 && "
+                            f"sudo tc qdisc replace dev {ifb_name}  handle 10: parent 1:10 bfifo limit {queue_size}"
+                        )
+                        res = self.run_command(queue_size_cmd)
+                        if res[0] != 0:
+                            result = res
+                            break
+                        log.info(f"Queue size on '{interface}' interface set to {queue_size} bytes")
+                    action = "change"
+                    time.sleep(duration)
+            log.info(f"Bandwidth limiting disabled on '{interface}' testbed server interface")
+        except BackgroundTaskError as err:
+            return err.result
+        return result
+
+
+class BackgroundTaskError(Exception):
+    def __init__(self, result):
+        self.result = result
+
+
+class BackgroundTask:
+    def __init__(self, lib, command):
+        self.lib = lib
+        self.command = command
+        guid = uuid.uuid4()
+        self.stdout = f"/tmp/osrt-background-task-{guid}.stdout"
+        self.stderr = f"/tmp/osrt-background-task-{guid}.stderr"
+        self.pid = None
+
+    @property
+    def sudo(self):
+        return "sudo " if self.command.startswith("sudo ") else ""
+
+    def start(self):
+        result = self.lib.run_command(f"{self.command} > {self.stdout} 2> {self.stderr} & echo $!")
+        if result[0] != 0:
+            raise BackgroundTaskError(
+                [result[0], result[1], f"'{self.command}' background task did not start:\n{result[2]}"]
+            )
+        self.pid = result[1].strip()
+        # Wait a bit, for task setup to finish
+        time.sleep(1)
+        if not self.running():
+            stdout = self.lib.run_command(f"{self.sudo}cat {self.stdout} || true")[1]
+            stderr = self.lib.run_command(f"{self.sudo}cat {self.stderr} || true")[1]
+            raise BackgroundTaskError([2, stdout, f"'{self.command}' background task ended immediately:\n{stderr}"])
+
+    def running(self):
+        if not self.pid:
+            return False
+        if self.command in self.lib.run_command(f"{self.sudo}ps auxq {self.pid}")[1]:
+            return True
+        return False
+
+    def stop(self):
+        for signal in "SIGTERM", "SIGKILL":
+            if self.running():
+                self.lib.run_command(f"{self.sudo}kill -{signal} {self.pid}")
+        self.pid = None
+        stdout = self.lib.run_command(f"{self.sudo}cat {self.stdout} || true")[1]
+        stderr = self.lib.run_command(f"{self.sudo}cat {self.stderr} || true")[1]
+        log.debug("'%s' background task ended with:\nstdout:\n%s\nstderr:\n%s", self.command, stdout, stderr)
+        self.lib.run_command(f"{self.sudo}rm -f {self.stdout}")
+        self.lib.run_command(f"{self.sudo}rm -f {self.stderr}")
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.stop()
+
 
 class DebianClientUpgrade:
     lock = Lock()
     upgrade_script = "upgrade-image"
     compression_type = "tar.xz"
     checksum_type = "sha256"
-    build_name = "build_debian_testbed_images"
-    build_separator = r"\."
     type_version_separator = "_"
     version_pattern = r"(\d+\.\d+\.\d+)"
 
@@ -296,10 +445,8 @@ class DebianClientUpgrade:
                     file_path=f"/{reservation_file}", store_path=store_path, file_name=reservation_file, out_path="/"
                 )
             # store tx_power_flag
-            tx_power_flag = self.lib.get_stdout(
-                self.lib.strip_stdout_result(self.lib.run_command("ls -a /.tx_power_enable.flag")), skip_exception=True
-            )
-            if tx_power_flag:
+            tx_power_flag = ".tx_power_enable.flag"
+            if self.lib.run_command(f"test -f /{tx_power_flag}")[0] == 0:
                 self.get_file(
                     file_path=f"/{tx_power_flag}", store_path=store_path, file_name=tx_power_flag, out_path="/"
                 )
@@ -458,15 +605,6 @@ class DebianClientUpgrade:
         os.makedirs(fw_path, exist_ok=True)
         self.download_image_to_local_machine(fw_path, download_urls, expected_files)
 
-    def get_target_version(self, version: Literal["stable", "latest"]) -> str:
-        """Retrieves the actual target version for stable/latest from artifactory.
-        Returns string with version.
-        """
-        download_urls = self.get_latest_image_urls(self.device_type, version=version)
-        expected_files = [file_name.split("/")[-1] for file_name in download_urls]
-        target_version = re.findall(self.version_pattern, " ".join(expected_files))[0]
-        return target_version
-
     def start_upgrade(self, fw_path=None, force=False, version=None, **kwargs):
         """
         Upgrade raspberry clients to target firmware if fw_path=None download latest build version from artifactory
@@ -499,7 +637,7 @@ class DebianClientUpgrade:
 
         if fw_path is None:
             fw_path = UPGRADE_LOCAL_CACHE_DIR / f"upgrade_{self.device_type}"
-            download_urls = self.get_latest_image_urls(self.device_type, version=version)
+            download_urls = self.get_image_urls(version)
             expected_files = [file_name.split("/")[-1] for file_name in download_urls]
             target_version = re.findall(self.version_pattern, " ".join(expected_files))[0]
 
@@ -515,7 +653,10 @@ class DebianClientUpgrade:
 
             os.makedirs(fw_path, exist_ok=True)
             expected_files = [file_name.split("/")[-1] for file_name in download_urls]
-            self.download_image_to_local_machine(fw_path, download_urls, expected_files)
+            try:
+                self.download_image_to_local_machine(fw_path, download_urls, expected_files)
+            except Exception as e:
+                return [7, "", f"Failed to download image files: {e}"]
             image_name = [
                 file_name
                 for file_name in expected_files
@@ -524,7 +665,7 @@ class DebianClientUpgrade:
             fw_path = os.path.join(fw_path, image_name[0])
 
         if self.compression_type not in fw_path or self.checksum_type in fw_path:
-            return [11, "", "Path should specify path to image"]
+            return [11, "", f"Path should specify path to image, only {self.compression_type} files are supported"]
 
         image_name = os.path.basename(fw_path)
         target_fw_type, _, rest = image_name.removeprefix("upgrade_").partition(self.type_version_separator)
@@ -600,121 +741,26 @@ class DebianClientUpgrade:
 
         return upgrade_result
 
-    def get_latest_image_urls(self, device_type, build_name=None, max_retry=10, version=None) -> list[str]:
+    def get_image_urls(self, version="stable") -> list[str]:
         """
-        Get the latest device image for target device type
+        Get the device image urls for requested version
         Args:
-            device_type: (str) device type, debian-server, perf-client, rpi_server, ...
-            build_name: (str) build name, default: self.build_name
-            max_retry: (int) max attempts to get an image for the target device type
-            version: (str) version to download from the artifactory (or get latest or stable version)
+            version: (str) version to download from the S3 (exact version or 'latest' or 'stable')
 
-        Returns: (list) List of urls for upgrade device, checksum, and image
+        Returns: (list) List of urls for upgrade the device: checksum url, and image url
         """
-        retry = 0
-        headers = {"Content-Type": "application/json"}
-        build_name = build_name if build_name is not None else self.build_name
-        if version is None:
-            version = "latest"
-        if self.mirror_url is None:
-            artifactory_url = self.lib.config["artifactory"]["url"]
-            project_url = os.path.join(artifactory_url, "api", "build", build_name)
-            build_info_url = os.path.join(artifactory_url, "api", "search", "buildArtifacts")
-            if version == "latest":
-                all_builds = requests.get(project_url)
-                all_builds = json.loads(all_builds.text)
-                all_builds = [int(build_number["uri"].strip("/")) for build_number in all_builds["buildsNumbers"]]
-                last_build = max(all_builds)
-            elif version == "stable":
-                last_build = int(
-                    re.split(self.build_separator, self.lib.device.config["capabilities"]["fw_version"])[-1]
-                )
-            else:
-                try:
-                    last_build = int(re.split(self.build_separator, version)[-1])
-                except Exception as e:
-                    log.error(f"Cannot get build number from {version}")
-                    raise e
-
-            data = '{ "buildName":"' + build_name + '", "buildNumber":"' + str(last_build) + '" }'
-
-            build_info = ""
-
-            if self.lib.config.get("artifactory", {}).get("user") and self.lib.config.get("artifactory", {}).get(
-                "password"
-            ):
-                auth = (self.lib.config["artifactory"]["user"], self.lib.config["artifactory"]["password"])
-            else:
-                auth = None
-
-            while max_retry > retry:
-                retry += 1
-                build_info = requests.post(build_info_url, headers=headers, data=data, auth=auth)
-                if device_type in build_info.text:
-                    break
-                last_build = str(int(last_build) - 1)
-                data = '{ "buildName":"' + build_name + '", "buildNumber":"' + last_build + '" }'
-
-            if device_type not in build_info.text:
-                raise ValueError(
-                    f"Can not find suitable upgrade package for {device_type} after checking last {max_retry} builds "
-                    f"from {build_name} project"
-                )
-
-            build_info = json.loads(build_info.text)
-            download_urls = list()
-            for build_url in build_info.get("results", []):
-                download_url = build_url.get("downloadUri", "")
-                if device_type in download_url and self.compression_type in download_url:
-                    download_urls.append(download_url)
-                if len(download_urls) == 2:
-                    break
-            return download_urls
-        log.debug("Querying mirror %s for builds", self.mirror_url)
-        # this comes with the assumption of certain mirror server directory structure:
-        all_builds = requests.get(f"{self.mirror_url}/{self.build_name}", headers=headers).json()
-
-        device_builds = [build for build in all_builds if device_type in build.get("name")]
-
-        # keep a list of tuples with (version, resp) - so that we pick the version number and keep the download URL
-        all_versions = [
-            (re.findall(rf"(\d+[{self.build_separator}]\d+[{self.build_separator}]\d+)", ver.get("name"))[0], ver)
-            for ver in device_builds
+        storage = self.mirror_url if self.mirror_url else TESTBED_IMAGES_PUBLIC_URL
+        if storage.endswith("/"):
+            storage = storage[:-1]
+        version = self.lib.get_target_version(version) if version in ["latest", "stable"] else version
+        if "rpi" in self.device_type:
+            file_name = f"upgrade_{self.device_type}__v{version}"
+        else:
+            file_name = f"{self.device_type}_{version}_upgrade"
+        return [
+            f"{storage}/{file_name}.{self.compression_type}",
+            f"{storage}/{file_name}.{self.compression_type}.{self.checksum_type}.save",
         ]
-        all_versions_on_mirror = [ver[0] for ver in all_versions]
-        log.debug("All versions on mirror: %s", all_versions_on_mirror)
-
-        if version == "latest":
-            last_build = max(all_versions, key=lambda x: StrictVersion(x[0].replace("-", ".")))[0]
-        elif version == "stable":
-            build_id = re.split(self.build_separator, self.lib.device.config["capabilities"]["fw_version"])
-            last_separator = "-" if "-" in self.build_separator else "."
-            last_id = int(build_id[-1])
-            while max_retry > retry:
-                retry += 1
-                last_build = f"{'.'.join(build_id[:-1])}{last_separator}{last_id}".replace("\\", "")
-                if last_build in all_versions_on_mirror:
-                    break
-                last_id -= 1
-            else:
-                raise ValueError(
-                    f"Can not find suitable upgrade package for {device_type} after checking last {max_retry} builds "
-                    f"from {build_name} project"
-                )
-
-        log.debug("Build to download: %s", last_build)
-
-        if last_build not in all_versions_on_mirror:
-            raise ValueError(f"Version {last_build} not available in: {all_versions_on_mirror}")
-
-        last_versions = [ver[1] for ver in all_versions if ver[0] == last_build]
-        log.debug("Got releases on mirror: %s", last_versions)
-        if len(last_versions) != 2:
-            raise ValueError(
-                f"Incorrect number of releases matching the expected version {last_build} found: {last_versions}"
-            )
-
-        return [f"{self.mirror_url}/{self.build_name}/{ver.get('name')}" for ver in last_versions]
 
     @staticmethod
     def parse_upgrade_output(upgrade_result):

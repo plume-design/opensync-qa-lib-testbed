@@ -1,0 +1,68 @@
+{
+  "short-name": "BARCA",
+  "s3-bucket": "Barca",
+  "build-profile": "dev-debug",
+  "master": {
+    "proj-name": "build_barca_master",
+    "fn-prefix": "qcaBARCA_QSDK12_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "6.2.0": {
+    "proj-name": "build_barca_v6.2.0",
+    "fn-prefix": "qcaBARCA_QSDK12_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "6.4.0": {
+    "proj-name": "build_barca_v6.4.0",
+    "fn-prefix": "qcaBARCA_QSDK12_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "6.4.1": {
+    "proj-name": "build_barca_v6.4.1",
+    "fn-prefix": "qcaBARCA_QSDK12_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "6.6.0": {
+    "proj-name": "build_barca_v6.6.0",
+    "fn-prefix": "qcaBARCA_QSDK12_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "7.0.0": {
+    "proj-name": "build_barca_v7.0.0",
+    "fn-prefix": "qcaBARCA_QSDK12_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "build_device_featurebranch": {
+    "proj-name": "build_device_featurebranch/barca",
+    "fn-prefix": "qcaBARCA_QSDK12_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "build_device_featurebranch_sdk13": {
+    "proj-name": "build_device_featurebranch/barca",
+    "fn-prefix": "qcaBARCA_QSDK13_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "fbb": {
+    "proj-name": "build_device_featurebranch/barca",
+    "fn-prefix": "qcaBARCA_QSDK12_fit-norplusnand",
+    "encryption": true,
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  }
+}

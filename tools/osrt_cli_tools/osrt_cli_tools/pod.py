@@ -2,11 +2,14 @@ import time
 import traceback
 import sys
 import fnmatch
+import logging
 from pathlib import Path
 
 import osrt_cli_tools.utils
 from lib_testbed.generic.util.common import threaded
 from lib_testbed.generic.util.logger import log
+from lib_testbed.generic.util.artifactory_lib import get_map
+from lib_testbed.generic.util.object_resolver import ObjectResolver
 from osrt_cli_tools import tb_config_parser
 
 if osrt_cli_tools.utils.is_autocomplete():
@@ -93,6 +96,23 @@ def complete_defined_pod_names(ctx, param, incomplete):
         return incomplete
 
 
+def complete_upgrade_image(ctx, param, incomplete):
+    """Autocomplete image names as defined in build_map.json.
+    The autocomplete values are fetched from the very first pod in the config file.
+
+    Unfortunately, this function is very slow, as it loads multiple files from the file system
+    """
+    with osrt_cli_tools.utils.log_level(logging.CRITICAL):
+        from lib_testbed.generic.util.artifactory_lib import get_map
+
+        all_nodes = process_nodes_arg(ctx, param, value="all")
+        all_pods = get_pods_object(all_nodes)
+
+        build_map = get_map(all_pods.obj_list[0].model)
+        versions = [v for v in build_map if v not in ["short-name", "s3-bucket", "build-profile", "fn-regex"]]
+        return [v for v in versions if v.startswith(incomplete)]
+
+
 all_nodes_argument = click.argument(
     "nodes", default="all", callback=process_nodes_arg, shell_complete=complete_all_pods, required=False
 )
@@ -111,21 +131,25 @@ def get_pods_object(nicknames, tb_name: str = None):
         tb_name = osrt_cli_tools.utils.get_testbed_name()
     config = load_tb_config(tb_name, skip_deployment=True)
     pods_obj = Pods()
+    if nicknames == "all":
+        nicknames = [x.get("name") for x in config["Nodes"]]
     return pods_obj.resolve_obj(config=config, multi_obj=True, nicknames=nicknames)
 
 
 @click.group(context_settings=dict(help_option_names=["-h", "--help"]))
 @osrt_cli_tools.utils.debug_option
 @osrt_cli_tools.utils.json_option
+@osrt_cli_tools.utils.verbosity_option
 @osrt_cli_tools.utils.disable_colors_option
 @osrt_cli_tools.utils.timeout_option
 @click.pass_context
-def cli(ctx, debug, json, disable_colors, timeout):
+def cli(ctx, debug, json, verbosity, disable_colors, timeout):
     """Pod tool: control testbed nodes.
 
     **NODES** are the pods/nodes to run the command against. Can be one of the following:
-    [<pod_name>[,...] | all | gateway | leaves].
+    `[<pod_name>[,...] | all | gateway | leaves]`.
     All commands are executed against all available nodes by default.
+    The **NODES** argument can either be the name of a node, or a comma-separated list of node names.
     """
     log.debug("Invoking pod tool context")
     ctx.ensure_object(dict)
@@ -135,12 +159,17 @@ def cli(ctx, debug, json, disable_colors, timeout):
         ctx.obj["DEBUG"] = debug
     if not ctx.obj.get("JSON"):
         ctx.obj["JSON"] = json
+    if not ctx.obj.get("VERBOSITY"):
+        ctx.obj["VERBOSITY"] = verbosity
     if not ctx.obj.get("TIMEOUT"):
         ctx.obj["TIMEOUT"] = timeout
     if not ctx.obj.get("DISABLE_COLORS"):
         ctx.obj["DISABLE_COLORS"] = disable_colors
     if not osrt_cli_tools.utils.is_autocomplete():
-        osrt_cli_tools.utils.prepare_logger(ctx.obj.get("DEBUG", False))
+        if ctx.obj.get("VERBOSITY"):
+            osrt_cli_tools.utils.set_log_verbosity(ctx.obj["VERBOSITY"])
+        else:
+            osrt_cli_tools.utils.prepare_logger(ctx.obj.get("DEBUG", False))
 
 
 def _get_tb_cfg(tb_name):
@@ -250,8 +279,67 @@ def _pods_ret_to_results_table(pods, ret: list) -> dict:
     return results_dict
 
 
+@threaded
+def _version_list_task(nodes, tb_name):
+    """Task getting version map for specified testbed."""
+    pods = get_pods_object(nodes, tb_name)
+    results_table = {}
+    for pod in pods.obj_list:
+        build_map = get_map(pod.model)
+        versions = [v for v in build_map if v not in ["short-name", "s3-bucket"]]
+        results_table[pod.nickname] = ["0", ", ".join(versions), ""]
+
+    return results_table
+
+
+@threaded
+def _check_latest_task(nodes, tb_name, image):
+    results_table = {}
+    pods = get_pods_object(nodes, tb_name)
+    for pod in pods.obj_list:
+        build_map = get_map(pod.model)
+        branch_details = build_map.get(image)
+        if not branch_details:
+            results_table[pod.nickname] = [
+                "1",
+                "",
+                f"Unknown FW branch: {image} for {pod.model} model. "
+                f"Check allowed FW branches with use: `pod upgrade --version-list`",
+            ]
+            continue
+        status, branch_builds = pod.lib.artifactory.get_list_of_files(version=None, final_version=image)
+        if status:
+            results_table[pod.nickname] = [status, "", f"Artifactory API request failed with: {status} status code"]
+            continue
+        branch_builds = branch_builds[-1:]
+        # From new to old one
+        fw_builds_to_print = [fw_name.lstrip("/") for fw_name in branch_builds[::-1]]
+        results_table[pod.nickname] = ["0", "\n".join(fw_builds_to_print[-5:]), ""]
+
+    return results_table
+
+
+@threaded
+def _pod_upgrade_task(nodes, tb_name, image, args):
+    """Pod upgrade task."""
+    pods = get_pods_object(nodes, tb_name)
+    ret = pods.lib.tool.upgrade(image, *args)
+    for i, pod_ret in enumerate(ret):
+        if isinstance(pod_ret, (KeyError, AttributeError)):  # likely could not determine version location
+            obj_resolver = ObjectResolver()
+            build_map = obj_resolver.resolve_model_path_file(file_name="build_map.json", model=pods.obj_list[i].model)
+            ret[i] = [
+                1,
+                "",
+                f"The image '{image}' interpreted as a file was not found, and trying to parse it as a version string "
+                f"failed as well. Check if the file {build_map} is up to date.",
+            ]
+    results_table = _pods_ret_to_results_table(pods, ret)
+    return results_table
+
+
 @cli.command(name="upgrade")
-@click.argument("image", required=False)
+@click.argument("image", required=False, shell_complete=complete_upgrade_image)
 @click.option("-p", help="Encryption key")
 @click.option("-e", is_flag=True, help="Erase certificates")
 @click.option("-n", is_flag=True, help="Skip version check")
@@ -262,91 +350,76 @@ def _pods_ret_to_results_table(pods, ret: list) -> dict:
 def upgrade(ctx, image, nodes, p, e, n, version_list, check_latest):
     """Upload image/firmware to specified pod/pods. Image/version needs to be specified.
     The **IMAGE** argument is mandatory, unless the command is called with `--version-list` flag
-    which only displays available versions for each node.
+    which only displays available versions for each node. Use TAB for the autocomplete to list possible branches.
 
     The newest image version:
 
-    `osrt pod upgrade <version|native-version|master> <optional>  <gw|l1|l2|all> `
+    `pod upgrade <version|native_version|master> <optional>  <gw|l1|l2|all> `
 
 
     Example commands:
 
     ```
     osrt pod upgrade master gw
-    osrt pod upgrade native-master gw
-    osrt pod upgrade legacy-native-master gw
+    osrt pod upgrade native_master gw
+    osrt pod upgrade legacy_native_master gw
     osrt pod upgrade 4.2.0 all
-    osrt pod upgrade native-5.8.0 gw
-    osrt pod upgrade 6.2.0 gw -> Note missing "native" prefix
+    osrt pod upgrade native_5.8.0 gw
     ```
 
 
     Requested image build:
 
-    `osrt pod upgrade <version|native-version|master|fbb>-<build_num> <optional> <gw|l1|l2|all>`
+    `pod upgrade <version|native_version|master>-<build_num> <optional> <gw|l1|l2|all>`
 
 
     Example commands:
 
     ```
-    osrt pod upgrade master-1777 all
-    osrt pod upgrade native-master-1777 all
-    osrt pod upgrade legacy-master-1777 all
-    osrt pod upgrade 4.2.0-15 l1
-    osrt pod upgrade fbb-13422 gw
-    osrt pod upgrade native-fbb-13422 gw
-    osrt pod upgrade native-5.8.0-12 gw
-    osrt pod upgrade 6.2.0-3 gw
+    pod upgrade master-1777 all
+    pod upgrade native_master-1777 all
+    pod upgrade 4.2.0-15 l1
+    pod upgrade build_device_featurebranch-1777 gw
+    pod upgrade fbb-1777 gw
+    pod upgrade native_5.8.0-12 gw
     ```
-    -> Note missing "native" prefix in the last example
+
+    **WARNING!** Tab-completion of **IMAGE** is very slow! It requires parsing multiple config files, and it all
+    takes time.
     """
     if ctx.obj.get("TESTBEDS"):
-        click.secho(
-            "Executing upgrade against multiple testbeds is currently not supported",
-            fg="red" if not ctx.obj.get("DISABLE_COLORS") else None,
-            err=True,
-        )
-        sys.exit(1)
-    from lib_testbed.generic.util.artifactory_lib import get_map
+        testbeds = ctx.obj.get("TESTBEDS")
+    else:
+        testbeds = [osrt_cli_tools.utils.get_testbed_name()]
 
-    pods = get_pods_object(nodes)
     if version_list:
-        results_table = {}
-        for pod in pods.obj_list:
-            build_map = get_map(pod.model)
-            versions = [v for v in build_map if v not in ["short-name", "s3-bucket"]]
-            results_table[pod.nickname] = ["0", ", ".join(versions), ""]
-        osrt_cli_tools.utils.print_command_output(ctx, results_table)
+        version_futures, version_results = {}, {}
+        for tb_name in testbeds:
+            version_futures[tb_name] = _version_list_task(nodes, tb_name)
+
+        for tb_name in version_futures:
+            version_results[tb_name] = version_futures[tb_name].result()
+
+        for tb_name in version_results:
+            osrt_cli_tools.utils.print_command_output(ctx, version_results[tb_name], title=tb_name)
         return
 
     if check_latest:
-        results_table = {}
-        for pod in pods.obj_list:
-            build_map = get_map(pod.model)
-            branch_details = build_map.get(image)
-            if not branch_details:
-                results_table[pod.nickname] = [
-                    "1",
-                    "",
-                    f"Unknown FW branch: {image} for {pod.model} model. "
-                    f"Check allowed FW branches with use: `osrt pod upgrade --version-list`",
-                ]
-                continue
-            status, branch_builds = pod.lib.artifactory.get_list_of_files(version=None, final_version=image)
-            if status:
-                results_table[pod.nickname] = [status, "", f"Artifactory API request failed with: {status} status code"]
-                continue
-            branch_builds = branch_builds[-1:]
-            # From new to old one
-            fw_builds_to_print = [fw_name.lstrip("/") for fw_name in branch_builds[::-1]]
-            results_table[pod.nickname] = ["0", "\n".join(fw_builds_to_print[-5:]), ""]
-        osrt_cli_tools.utils.print_command_output(ctx, results_table)
+        check_futures, results_table = {}, {}
+        for tb_name in testbeds:
+            check_futures[tb_name] = _check_latest_task(nodes, tb_name, image)
+
+        for tb_name in check_futures:
+            results_table[tb_name] = check_futures[tb_name].result()
+
+        for tb_name in results_table:
+            osrt_cli_tools.utils.print_command_output(ctx, results_table[tb_name], title=tb_name)
         return
 
     if not image:
         raise ValueError("**IMAGE** is a mandatory argument for upgrade")
 
-    if not ctx.obj.get("DEBUG"):
+    if not ctx.obj.get("DEBUG") or not ctx.obj.get("VERBOSITY"):
         import logging
         from osrt_cli_tools.utils import set_log_level
 
@@ -360,12 +433,15 @@ def upgrade(ctx, image, nodes, p, e, n, version_list, check_latest):
     if n:
         args.append("-n")
 
-    ret = pods.lib.tool.upgrade(image, *args)
-    for i, pod_ret in enumerate(ret):
-        if isinstance(pod_ret, KeyError):  # likely could not determine version location
-            ret[i] = [1, "", f"Cloud not determine version location for: {image}. Is the build_map up to date?"]
-    results_table = _pods_ret_to_results_table(pods, ret)
-    osrt_cli_tools.utils.print_command_output(ctx, results_table)
+    upgrade_futures, upgrade_results = {}, {}
+    for tb_name in testbeds:
+        upgrade_futures[tb_name] = _pod_upgrade_task(nodes, tb_name, image, args)
+
+    for tb_name in upgrade_futures:
+        upgrade_results[tb_name] = upgrade_futures[tb_name].result()
+
+    for tb_name in upgrade_results:
+        osrt_cli_tools.utils.print_command_output(ctx, upgrade_results[tb_name], title=tb_name)
 
 
 @threaded
@@ -441,15 +517,20 @@ def _lib_tool_cmd_action_parallel(ctx, nodes, action, *args, **kwargs):
             if dry_run:
                 click.secho(f"DRY-RUN: Reserving testbed {tb_name}")
             else:
-                log.debug("Reserving testbed %s", tb_name)
-                reservation_status = reservation_obj.reserve_test_bed()
-                if not reservation_status["status"]:
-                    click.secho(
-                        f"Could not obtain reservation for testbed {tb_name}.",
-                        err=True,
-                        fg="red" if not ctx.obj.get("DISABLE_COLORS") else None,
-                    )
-                    reserved = False
+                current_reservation_status = reservation_obj.get_reservation_status()
+                if current_reservation_status.get("busyByMe"):
+                    # no need to unreserve testbed, status is reserved already
+                    skip_reservation, reserved = True, True
+                else:
+                    log.debug("Reserving testbed %s", tb_name)
+                    reservation_status = reservation_obj.reserve_test_bed()
+                    if not reservation_status["status"]:
+                        click.secho(
+                            f"Could not obtain reservation for testbed {tb_name}.",
+                            err=True,
+                            fg="red" if not ctx.obj.get("DISABLE_COLORS") else None,
+                        )
+                        reserved = False
         else:
             click.secho(
                 f"Skipping reservation for testbed {tb_name}",
@@ -487,7 +568,7 @@ def _lib_tool_cmd_action_parallel(ctx, nodes, action, *args, **kwargs):
         except Exception as err:
             results[tb_name] = {}
             click.secho(
-                f"Command {action} failed on testbed {tb_name}. Use --debug for more output.",
+                f"Command {action} failed on testbed {tb_name}. Increase tool verbosity with -vv for more information.",
                 fg="red" if not ctx.obj.get("DISABLE_COLORS") else None,
                 err=True,
             )
@@ -709,10 +790,10 @@ def eth_connect(ctx, pod_name, node):
 
     Connect **NODE** to **POD_NAME**, pay attention to the order of arguments.
 
-    Also note that **NODE** needs to be power cycled before the command takes effect.
+    **NODE** and **POD_NAME** will be power cycled for changes to take effect.
 
     Example usage:
-    `osrt-pod eth-connect l2 l1` -> connect l1 to l2 pods with Ethernet.
+    `pod eth-connect l2 l1` -> connect l1 to l2 pods with Ethernet.
     """
 
     pods = get_pods_object([node])
@@ -721,13 +802,11 @@ def eth_connect(ctx, pod_name, node):
 
 
 @cli.command("eth-disconnect")
-@single_node_argument
+@all_nodes_argument
 @click.pass_context
-def eth_disconnect(ctx, node):
-    """Disconnect all Ethernet ports from pod."""
-    pods = get_pods_object([node])
-    ret = pods.lib.tool.eth_disconnect()
-    osrt_cli_tools.utils.print_command_output(ctx, {node: ret[0]})
+def eth_disconnect(ctx, nodes):
+    """Disconnect **NODES** from any wired backhauls."""
+    _lib_tool_cmd_action(ctx, nodes, "eth_disconnect")
 
 
 @cli.command("serial")
@@ -813,7 +892,8 @@ def get_region(ctx, nodes):
 
 @cli.command("region-set")
 @click.argument(
-    "region", type=click.Choice(choices=["EU", "US", "UK", "AU", "CA", "HK", "IL","JP", "KR", "KW", "MA", "NZ", "PH", "SG"])
+    "region",
+    type=click.Choice(choices=["EU", "US", "UK", "AU", "CA", "HK", "IL", "JP", "KR", "KW", "MA", "NZ", "PH", "SG"]),
 )
 @all_nodes_argument
 @click.pass_context
@@ -825,11 +905,23 @@ def set_region(ctx, region, nodes):
 
 
 @cli.command("radar-trigger")
+@click.option(
+    "--band",
+    type=click.Choice(choices=["5G", "5GL", "5GU", "all"]),
+    default="all",
+    help="Limit radar event to a selected band.",
+    show_default=True,
+)
 @all_nodes_argument
 @click.pass_context
-def trigger_radar(ctx, nodes):
-    """Trigger radar event."""
-    _lib_tool_cmd_action(ctx, nodes, "trigger_radar")
+def trigger_radar(ctx, band, nodes):
+    """Trigger radar event.
+
+    Radar event may be limited to a selected band if more than one 5G radio is available.
+    """
+    if band == "all":
+        band = ""
+    _lib_tool_cmd_action(ctx, nodes, "trigger_radar", freq_band=band)
 
 
 @cli.command("clients-simulate")
@@ -873,15 +965,15 @@ def set_wano_config(ctx, config, nodes):
 def list_builds(ctx, requested_version, nodes):
     """List builds for REQUESTED_VERSION.
 
-    `osrt-pod builds-list <version|master|native-version> <gw|l1|l2|all>`
+    `pod builds-list <version|master|native_version> <gw|l1|l2|all>`
 
     Example usage:
 
-    `pod list-builds 4.2.0 gw`
-
-    `pod list-builds master l1`
-
-    `pod list-builds native-5.8.0 l1`
+    ```
+    pod list-builds 4.2.0 gw
+    pod list-builds master l1
+    pod list-builds native_5.8.0 l1
+    ```
     """
     _lib_tool_cmd_action(ctx, nodes, "list_builds", requested_version=requested_version)
 
@@ -903,7 +995,7 @@ def fused(ctx, nodes):
 def boot_partition_switch(ctx, nodes):
     """**IT'S DANGEROUS!** Switch boot partition for specified **NODES** [defaults to all].
 
-    This action is acomplished by power cycling selected nodes 15 times.
+    This action is accomplished by power cycling selected nodes 15 times.
     **THIS ACTION CAN ONLY BE PERFORMED 1 TIME, AND PODS CANNOT BE RECOVERED WITHOUT ADDITIONAL WORK!**
 
     **THIS COMMAND CANNOT BE COMBINED WITH LAB TOOL**
@@ -922,6 +1014,23 @@ def boot_partition_switch(ctx, nodes):
 def radio_temperatures_get(ctx, nodes):
     """Get all radio temperatures."""
     _lib_tool_cmd_action(ctx, nodes, "get_radio_temperatures")
+
+
+@cli.command("tx-power-limit-set")
+@click.argument("limit", type=click.INT, required=True)
+@all_nodes_argument
+@click.pass_context
+def tx_power_limit_set(ctx, limit, nodes):
+    """Limit tx power on testbed node with start.d script. 0 disables limiting"""
+    _lib_tool_cmd_action(ctx, nodes, "set_tx_power_limit", tx_power=limit)
+
+
+@cli.command("tx-power-limit-get")
+@all_nodes_argument
+@click.pass_context
+def tx_power_limit_get(ctx, nodes):
+    """Get tx power limit on testbed node from the start.d script"""
+    _lib_tool_cmd_action(ctx, nodes, "get_tx_power_limit")
 
 
 for cmd in ["all", "gw", "l1", "l2"]:

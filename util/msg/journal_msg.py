@@ -14,7 +14,7 @@ class JournalMsg:
         from_cursor_str = ""
 
         if process:
-            service_str = f" -t {process}"
+            service_str = " ".join(f" -t {proc}" for proc in process.split(","))
         if last_lines:
             last_lines_str = f" -n {last_lines}"
         since = None

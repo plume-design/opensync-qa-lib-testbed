@@ -1,6 +1,7 @@
 import functools
 import re
 import os
+import pydantic
 import itertools
 import json
 import time
@@ -11,13 +12,14 @@ import tempfile
 import datetime
 import distutils
 import subprocess
-from typing import Union
+from typing import Literal, Union
 from uuid import UUID, uuid4
 
 from lib_testbed.generic.pod.generic.pod_tool import PodTool
 from lib_testbed.generic.rpower.rpowerlib import PowerControllerApi
 from lib_testbed.generic.switch.switch_api_resolver import SwitchApiResolver
 from lib_testbed.generic.util.base_lib import Iface
+from lib_testbed.generic.util.common import get_digits_value_from_text
 from lib_testbed.generic.util.msg.msg import Msg
 from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from lib_testbed.generic.util.logger import log
@@ -27,7 +29,7 @@ from lib_testbed.generic.pod.pod_base import PodBase
 from lib_testbed.generic.pod.generic.capabilities import Capabilities
 from lib_testbed.generic.pod.generic.artifactory_reader import ArtifactoryReader
 from lib_testbed.generic.util.object_resolver import ObjectResolver
-from lib_testbed.generic.util.common import compare_fw_versions
+from lib_testbed.generic.util.common import compare_fw_versions, POD_CRASH_PLACES
 
 # Regex pattern to parse conntrack entries:
 # src=192.168.40.237 dst=192.168.201.1 sport=55818 dport=5706 packets=16821 bytes=874737
@@ -57,6 +59,8 @@ class PodLib(PodBase):
         "PH": "0x8260",
         "MA": "0x81F8",
     }
+    # Which value needs to be used with iw <dev> set txpower to reset it to default value
+    TX_POWER_RESET_VALUE = "auto"
 
     def __init__(self, **kwargs):
         pods = kwargs["config"].get("Nodes")
@@ -127,7 +131,7 @@ class PodLib(PodBase):
     def version(self, **kwargs):
         """Display firmware version of node(s).
 
-        Returns "native-<version>" for native platforms, which happens when ovs version cannot be determined.
+        Returns "native_<version>" for native platforms, which happens when ovs version cannot be determined.
         """
         fw_version = self.ovsdb.get_raw(table="AWLAN_Node", select="firmware_version", **kwargs)
         # FW above 6.0.0 are always native
@@ -135,8 +139,8 @@ class PodLib(PodBase):
             self.strip_stdout_result(fw_version)[1], "6.0.0", ">"
         ):
             return self.strip_stdout_result(fw_version)
-        if fw_version[1] and "N/A" in self.ovs_version()[1]:
-            fw_version[1] = "native-" + fw_version[1]
+        if fw_version[1] and "N/A" in self.ovs_version(skip_exception=True)[1]:
+            fw_version[1] = "native_" + fw_version[1]
         return self.strip_stdout_result(fw_version)
 
     def platform_version(self, **kwargs):
@@ -155,12 +159,8 @@ class PodLib(PodBase):
         else:
             return [1, "", "Opensync version not defined in AWLAN_Node"]
 
-    def uptime(self, timeout=20, **kwargs):
+    def uptime(self, timeout=20, out_format: str = "user", **kwargs):
         """Display uptime of node(s)"""
-        out_format = "user"
-        if kwargs.get("out_format"):
-            out_format = kwargs.get("out_format")
-            del kwargs["out_format"]
         assert out_format in ["user", "timestamp"], f"Unsupported format {out_format}"
         if out_format == "user":
             result = self.run_command("uptime", timeout=timeout, **kwargs)
@@ -196,7 +196,7 @@ class PodLib(PodBase):
 
     def healthcheck_stop(self, **kwargs):
         """Stop healthcheck on pod"""
-        if self.capabilities.get_device_type() == "residential_gateway":
+        if self.capabilities.is_wan_link_selection_enabled() is False:
             return [0, "Nothing to stop", ""]
         out = self.run_command("/etc/init.d/healthcheck stop")
         # stopping always returns 1 even if successful, to change it to 0
@@ -206,7 +206,7 @@ class PodLib(PodBase):
 
     def healthcheck_start(self, **kwargs):
         """Start healthcheck on pod"""
-        if self.capabilities.get_device_type() == "residential_gateway":
+        if self.capabilities.is_wan_link_selection_enabled() is False:
             return [0, "Nothing to start", ""]
         return self.run_command("/etc/init.d/healthcheck start")
 
@@ -215,7 +215,7 @@ class PodLib(PodBase):
         remote_dir = self.get_node_deploy_path()
         resp = self.run_command(f"mkdir -p {remote_dir}", **kwargs)
         if not self.result_ok(resp):
-            raise Exception(f"Can't create directory: {remote_dir}\n{resp}")
+            raise OSError(f"Can't create directory: {remote_dir}\n{resp}")
         # hint: copy first parent class files, then from model
         deploy_dir = (
             ObjectResolver.resolve_model_path_file(
@@ -305,6 +305,33 @@ class PodLib(PodBase):
             where.extend([f"bridge=={self.iface.get_native_br_home()}", "vif_radio_idx==2"])
         result = self.ovsdb.get_raw(table="Wifi_VIF_State", select="mac", where=where, **kwargs)
         return self.strip_stdout_result(result)
+
+    def get_bssids(self, ssid: str, **kwargs) -> list:
+        """
+        Return BSSIDs of all node's VIFs that are using `ssid` SSID, keyed by radio band.
+
+        Return JSON dump of radio band -> BSSID mapping in stdout on success.
+        """
+        vif_bands = {}
+        for radio in self.ovsdb.get_json_table("Wifi_Radio_State", select=["freq_band", "vif_states"], **kwargs):
+            # {"freq_band": "2.4G", "vif_states": ["set", [["uuid", "331~7f0"], ...]]}
+            band = radio["freq_band"]
+            vif_states = radio["vif_states"]
+            if isinstance(vif_states[1], list):
+                # For cases where there are multiple UUIDs associated with the band
+                for uuid in vif_states[1]:
+                    vif_bands[uuid[1]] = band
+            else:
+                # For cases where there is only one UUID associated with the band
+                vif_bands[vif_states[1]] = band
+        band_bssids = {}
+        for vif in self.ovsdb.get_json_table(
+            "Wifi_VIF_State", where=f"ssid=={ssid}", select=["_uuid", "mac"], return_list=True, **kwargs
+        ):
+            # {"_uuid": ["uuid", "4a9~449"], "mac": "22:0c:7a:3c:d1:25"}
+            band = vif_bands[vif["_uuid"][1]]
+            band_bssids[band] = vif["mac"]
+        return [0, json.dumps(band_bssids, indent=2), ""]
 
     def get_serial_number(self, **kwargs):
         """Get node(s) serial number"""
@@ -402,30 +429,6 @@ class PodLib(PodBase):
             log_file = [result[0], "", result[2]]
         return log_file
 
-    def erase_certificates(self):
-        """Erase partition and install DEVELOPMENT certificates"""
-        # get certs from lab-server
-        dev_null = open(os.devnull, "w")
-        # 10.100.1.2 -> lab-server.sf.wildfire.exchange
-        subprocess.check_call(
-            ["scp", "plume@10.100.1.2:/home/plume/piranha_unencrypted_certs/*", "/tmp/"], stdout=dev_null
-        )
-        # copy them to nodes
-        for cert in ["/tmp/ca.pem", "/tmp/client.pem", "/tmp/client_dec.key"]:
-            put_output = self.put_file(cert, "/tmp")
-
-        # Check output from def put_file()
-        self.get_stdout(put_output)
-
-        # erase partition
-        self.get_stdout(self.run_command("mtd erase /dev/mtd14"))
-
-        # install certs
-        install_crets = "cd /tmp; certwrite ca.pem; certwrite client.pem; certwrite client_dec.key"
-
-        # Raise exception if failed
-        self.get_stdout(self.run_command(install_crets))
-
     def upgrade(self, image: str, *args, **kwargs):
         """Upgrade node firmware, Optional: -p=<encyp_key>, -e-> erase certificates, -n->skip version check"""
         if os.path.exists(image):
@@ -435,11 +438,13 @@ class PodLib(PodBase):
 
         return output
 
-    def upgrade_from_artifactory(self, image: str, use_build_map_suffix: bool = False, *args, **kwargs):
-        filename = self.artifactory.download_proper_version(image, use_build_map_suffix=use_build_map_suffix)
+    def upgrade_from_artifactory(self, image: str, *args, **kwargs):
+        filename, fw_key = self.artifactory.download_proper_version(image)
         if not filename:
             return [5, "", "Cannot upgrade as filename is unknown"]
         filepath = os.path.join(self.artifactory.tmp_dir, filename)
+        if fw_key:
+            args = ("-p=%s" % fw_key,)
         return self.upgrade_from_local_file(filepath, *args, **kwargs)
 
     def upgrade_from_local_file(self, image: str, *args, **kwargs):
@@ -461,35 +466,28 @@ class PodLib(PodBase):
             if "-e" in args:
                 erase_certs = True
 
-        if dec_passwd and image[-3:] != "eim":
-            raise Exception("Use eim file for encrypted image")
-        if not dec_passwd and image[-3:] != "img":
-            raise Exception("Use img file for unencrypted image")
+        image_extension = os.path.splitext(image)[-1].lstrip(".")
+        encrypted_suffixes, unencrypted_suffixes = self.get_upgrade_image_suffixes()
+        if dec_passwd and image_extension not in encrypted_suffixes:
+            raise ValueError(f"Use {'/'.join(encrypted_suffixes)} file for encrypted image")
+        if not dec_passwd and image_extension not in unencrypted_suffixes:
+            raise ValueError(f"Use {'/'.join(unencrypted_suffixes)} file for unencrypted image")
 
         fw_device_dir = "/tmp/pfirmware"
         self.run_command(f"mkdir -p {fw_device_dir}", **kwargs)
-        log.info(f"Putting {image} to {fw_device_dir} directory")
-        self.put_file(image, fw_device_dir)
-        remote_md5sum = self.run_command(f'md5sum /tmp/pfirmware/{image_file} | cut -d" " -f1', **kwargs)
-        remote_md5sum = self.get_stdout(remote_md5sum)
-        local_md5sum = os.popen(f'md5sum {image} | cut -d" " -f1').read().strip()
-
-        md5sum = remote_md5sum.strip()
-        if md5sum != local_md5sum:
-            return [1, "", f"Failed MD5sum image: {local_md5sum} node: {md5sum} "]
-
-        log.info("Upgrading with %s", image)
-        # determine which command should be used for upgrade
-        if dec_passwd:
-            upg_comm = f"safeupdate  -u {target_file_name} -P {dec_passwd}"
-        else:
-            upg_comm = f"safeupdate  -u {target_file_name}"
-        log.debug("Upgrade command: %s", upg_comm)
+        log.info(f"SCP {image} to {fw_device_dir} directory")
+        scp_response = self.put_file(image, fw_device_dir)
+        if scp_response[0]:
+            scp_response[2] = f"SCP failed while uploading the image file\n{scp_response[2]}"
+            return scp_response
 
         if erase_certs:
             self.erase_certificates()
 
-        result = self.run_command(upg_comm, timeout=5 * 60, **kwargs)
+        log.info("Upgrading with %s", image)
+        result = self.trigger_upgrade(target_file_name, dec_passwd)
+        if result[0]:
+            return result
 
         # wait for nodes to start rebooting
         time.sleep(30)
@@ -504,6 +502,39 @@ class PodLib(PodBase):
         log.info("Checking version")
         check_version = self.version(**kwargs)
         return self.merge_result([result[0], "", result[2]], check_version)
+
+    def trigger_upgrade(self, image_path: str, dec_passwd: str, **kwargs) -> [int, str, str]:
+        """
+        Trigger upgrade on the device.
+        Args:
+            image_path: (str) Path to the image for upgrade trigger
+            dec_passwd: (str) Decrypted password for encrypted images
+            **kwargs:
+
+        Returns: [int, str, str]
+
+        """
+        if dec_passwd:
+            upg_comm = f"safeupdate  -u {image_path} -P {dec_passwd}"
+        else:
+            upg_comm = f"safeupdate  -u {image_path}"
+        log.debug("Upgrade command: %s", upg_comm)
+        return self.run_command(upg_comm, timeout=5 * 60, **kwargs)
+
+    def get_upgrade_image_suffixes(self) -> tuple[list, list]:
+        """Get all allowed upgrade-image suffixes based on model build_map.json"""
+        encrypted_suffixes = ["eim", "eospkg"]  # default encrypted suffix
+        unencrypted_suffixes = ["img", "ospkg", "pkgtb"]  # default unencrypted suffix
+        for build_details in self.artifactory.build_map.values():
+            if not isinstance(build_details, dict):
+                continue
+            encrypted_suffix = build_details.get("enc-suffix")
+            if encrypted_suffix and encrypted_suffix not in encrypted_suffixes:
+                encrypted_suffixes.append(encrypted_suffix)
+            unencrypted_suffix = build_details.get("img-suffix")
+            if unencrypted_suffix and unencrypted_suffix not in unencrypted_suffixes:
+                unencrypted_suffixes.append(unencrypted_suffix)
+        return encrypted_suffixes, unencrypted_suffixes
 
     def sanity(self, *args):
         """run sanity on selected pods, add arg --nocolor for simple output"""
@@ -563,8 +594,13 @@ class PodLib(PodBase):
         """
         status = {"ret": False}
         log.info(f"[{self.get_name()}] Waiting for sanity to {'pass' if expect else 'fail'} {int(timeout / 60)} min")
+        ssh_recovered = False
         timeout = time.time() + timeout
         while time.time() < timeout:
+            if not ssh_recovered and self.wait_available(timeout=10)[0]:
+                log.info("There is no mgmt access, trying to recover")
+                self.recover()
+                ssh_recovered = True
             status = self.sanity("--lib", *args)
             if status["ret"] is expect:
                 break
@@ -605,16 +641,20 @@ class PodLib(PodBase):
             if not item:
                 continue
             self.run_command(f"rm tmp/{item}", **kwargs)
-        self.run_command("rm /usr/plume/log_archive/crash/*; rm /sys/fs/pstore/*; rm /var/log/lm/crash/*", **kwargs)
+
+        clear_crashes_cmd = ""
+        for i, crash_place in enumerate(POD_CRASH_PLACES):
+            clear_crashes_cmd += f"rm {crash_place}*"
+            if len(POD_CRASH_PLACES) > (i + 1):
+                clear_crashes_cmd += "; "
+
+        self.run_command(clear_crashes_cmd, **kwargs)
         return [0, "", ""]
 
     def get_crash(self, **kwargs):
         """get crash log file from node"""
         serial = self.get_serial_number()[1].strip()
         name = self.get_nickname()
-        # /usr/plume/log_archive/crash/ < 3.0.0
-        # /usr/opensync/log_archive/crash/ links to the /var/log/lm/crash/
-        crash_places = ["/usr/plume/log_archive/crash/", "/sys/fs/pstore/", "/var/log/lm/crash/"]
         crash_exist = False
         crash_saved = False
         crash_response = ""
@@ -630,7 +670,7 @@ class PodLib(PodBase):
             self.get_file("/tmp/" + item, lpdir)
             self.run_command("rm " + "/tmp/" + item)
 
-        for remote_path in crash_places:
+        for remote_path in POD_CRASH_PLACES:
             grep = " | grep -v console-ramoops-0 | grep -v pmsg-ramoops-0" if remote_path == "/sys/fs/pstore/" else ""
             out = self.get_stdout(self.run_command(f"ls {remote_path}{grep}", **kwargs), skip_exception=True)
             if not out:
@@ -656,18 +696,23 @@ class PodLib(PodBase):
             time.sleep(30)
         return [int(not crash_saved), crash_response, crash_no_crash]
 
-    def remove_crash(self, **kwargs):
+    def get_crash_files_list(self, **kwargs):
         """
-        Remove crashes from device
+        Get crash files list from the node.
         Args:
             **kwargs:
 
-        Returns: list [retval, stdout, stderr]
+        Returns: List of crash files
 
         """
-        return self.run_command(
-            "rm /usr/plume/log_archive/crash/*; rm /sys/fs/pstore/*; rm /var/log/lm/crash/*", **kwargs
-        )
+        crash_files = []
+        for crash_place in POD_CRASH_PLACES:
+            grep = " | grep -v console-ramoops-0 | grep -v pmsg-ramoops-0" if crash_place == "/sys/fs/pstore/" else ""
+            out = self.get_stdout(self.run_command(f"ls {crash_place}{grep}", **kwargs), skip_exception=True)
+            if not out:
+                continue
+            crash_files.extend(out.splitlines())
+        return crash_files
 
     def get_log_level(self, manager_name, **kwargs):
         """
@@ -785,7 +830,7 @@ class PodLib(PodBase):
     def cache_pods_info(self):
         ub = self.get_userbase()
         if not ub:
-            raise Exception("No userbase object found. Ensure that a test includes opensync_cloud mark")
+            raise RuntimeError("No userbase object found. Ensure that a test includes opensync_cloud mark")
         log.console("Discovering nodes: ", show_file=False, end="")
         serial = self.get_stdout(self.get_serial_number(), skip_exception=True)
         serial = serial.strip()
@@ -855,40 +900,53 @@ class PodLib(PodBase):
         log.console(",  ".join(nodes_log), show_file=False)
         self.pod_info = [pod_info for pod_info in pods_info if pod_info["name"] == name]
 
-    def eth_connect(self, pod_name):
+    def eth_connect(self, pod_name: str):
         """
-        Connect Specified pod to Ethernet pod.
+        Connect this pod to specified pod using wired backhaul.
 
         Args:
-            pod_name: (pod_api) pod object to connect to
+            pod_name: (str) pod to connect to
         Returns: None
         """
+        my_port, target_port, target_backhaul = self.switch.set_daisy_chain_connection(self.get_nickname(), pod_name)
 
-        target_port, target_backhaul = self.switch.get_no_wan_port(self.switch.get_all_switch_aliases(pod_name))
-        unused_port = self.switch.get_unused_pod_ports(self.get_nickname())[0]
+        result = self._power_cycle_and_wait_awailable(additional_pod=pod_name)
+        if result[0]:
+            return result
 
-        if not unused_port:
-            return [4, "", f"pod '{self.get_nickname()}' has no free ports left"]
-
-        self.eth_disconnect()
-        self.switch.switch_ctrl.vlan_set(unused_port, target_backhaul, "untagged")
-
-        # Disabling isolations
-        all_ports = self.switch.get_list_of_all_port_names()
-        self.switch.switch_ctrl.disable_port_isolation(all_ports)
-
-        self.rpower.cycle(self.get_nickname())
-
-        return [0, f"'{self.get_nickname()}' connected to '{pod_name}' by backhaul: '{target_backhaul}'", ""]
+        return [
+            0,
+            f"{self.get_nickname()} pod's '{my_port}' port connected to "
+            f"{pod_name} pod's '{target_port}' port using {target_backhaul} backhaul VLAN",
+            "",
+        ]
 
     def eth_disconnect(self, **kwargs):
         """Disconnect pod from Ethernet ports."""
-        pods_connection_type = self.switch.get_devices_connection_type().get(self.get_nickname())
+        recovered_ports = self.switch.clear_daisy_chain_connection(self.get_nickname())
 
-        if pods_connection_type == "daisy_chain":
-            self.switch.recovery_switch_configuration(pod_names=self.get_nickname(), force=True)
+        if recovered_ports:
+            result = self._power_cycle_and_wait_awailable()
+            if result[0]:
+                return result
 
-        return [0, "Disconnected pod from Ethernet ports", ""]
+            return [0, f"Disconnected {self.get_nickname()} pod from wired backhauls on {recovered_ports} ports", ""]
+
+        return [0, f"{self.get_nickname()} pod not connected to any wired backhaul", ""]
+
+    def _power_cycle_and_wait_awailable(self, additional_pod=None):
+        """
+        Power cycle pod and wait up to 3 minutes to regain SSH management access to it.
+
+        if `additional_pod` is specified, it will also be power cycled, but not checked for management access.
+        """
+        pod_names = [self.get_nickname()]
+        if additional_pod:
+            pod_names.append(additional_pod)
+        log.info(f"power cycling {pod_names} pods")
+        self.rpower.cycle(pod_names)
+        self.wait_unavailable()
+        return self.wait_available(180)
 
     def get_radio_temperatures(self, radio: Union[int, str, list] = None, retries=2, **kwargs):
         """
@@ -929,14 +987,15 @@ class PodLib(PodBase):
 
     def get_tx_power(self, interface, **kwargs):
         """
-        Get current Tx power in dBm
+        Get current Tx power in dBm. Make sure interface is up, otherwise returned value is incorrect.
         Args:
             interface: (str) Wireless interface
 
-        Returns: raw output [(int) ret, (std) std_out, (str) str_err]
+        Returns: raw output [(int) ret, (str) std_out, (str) str_err]
 
         """
-        raise NotImplementedError
+        cmd = "iw %s info | grep txpower | awk '{print $2}'" % interface
+        return self.strip_stdout_result(self.run_command(cmd, **kwargs))
 
     def decrease_tx_power_on_all_ifaces(self, percent_ratio, **kwargs):
         """
@@ -944,10 +1003,20 @@ class PodLib(PodBase):
         Args:
             percent_ratio: (int) Percent ratio from 0 to 100
 
-        Returns: raw output [(int) ret, (std) std_out, (str) str_err]
+        Returns: raw output [(int) ret, (str) std_out, (str) str_err]
 
         """
-        raise NotImplementedError
+        percent_ratio = percent_ratio / 100
+        all_interfaces = self.iface.get_all_home_bhaul_ifaces()
+        cmds = []
+        for interface in all_interfaces:
+            current_tx_power = float(self.get_stdout(self.get_tx_power(interface)))
+            expect_tx_power = int(current_tx_power - (current_tx_power * percent_ratio))
+            if expect_tx_power < 1:
+                expect_tx_power = 1
+            # iw sets txpower in mBm, so we need to multiply returned dBm by 100
+            cmds.append(f"iw {interface} set txpower fixed {expect_tx_power * 100}")
+        return self.run_command(" && ".join(cmds), **kwargs)
 
     def increase_tx_power_on_all_ifaces(self, percent_ratio, **kwargs):
         """
@@ -955,10 +1024,18 @@ class PodLib(PodBase):
         Args:
             percent_ratio: (int) Percent ratio from 0 to 100
 
-        Returns: raw output [(int) ret, (std) std_out, (str) str_err]
+        Returns: raw output [(int) ret, (str) std_out, (str) str_err]
 
         """
-        raise NotImplementedError
+        percent_ratio = percent_ratio / 100
+        all_interfaces = self.iface.get_all_home_bhaul_ifaces()
+        cmds = []
+        for interface in all_interfaces:
+            current_tx_power = float(self.get_stdout(self.get_tx_power(interface)))
+            expect_tx_power = int(current_tx_power + (current_tx_power * percent_ratio))
+            # iw sets txpower in mBm, so we need to multiply returned dBm by 100
+            cmds.append(f"iw {interface} set txpower fixed {expect_tx_power * 100}")
+        return self.run_command(" && ".join(cmds), **kwargs)
 
     def set_tx_power(self, tx_power, interfaces=None, **kwargs):
         """
@@ -967,10 +1044,66 @@ class PodLib(PodBase):
             interfaces: (str) or (list) Name of wireless interfaces
             tx_power: (int) Tx power in dBm.
 
-        Returns: raw output [(int) ret, (std) std_out, (str) str_err]
+        Returns: raw output [(int) ret, (str) std_out, (str) str_err]
 
         """
-        raise NotImplementedError
+        # PodApi uses -1 as reset tx-power to default
+        if tx_power <= 0:
+            tx_power = self.TX_POWER_RESET_VALUE
+        else:
+            # iw sets txpower in mBm, so we need to multiply dBm by 100
+            tx_power = f"fixed {tx_power * 100}"
+        if not interfaces:
+            interfaces = self.iface.get_all_home_bhaul_ifaces()
+        if isinstance(interfaces, str):
+            interfaces = [interfaces]
+        cmds = []
+        for interface in interfaces:
+            cmds.append(f"iw {interface} set txpower {tx_power}")
+        return self.run_command(" && ".join(cmds), **kwargs)
+
+    def set_tx_power_limit(self, tx_power, **kwargs):
+        """
+        Creates a start.d script on the node to limit tx power to the given value. 0 disables limiting
+        Args:
+            tx_power: (int) Tx power in dBm.
+
+        Returns: raw output [(int) ret, (str) std_out, (str) str_err]
+
+        """
+        opensync_path = self.get_opensync_path()[1]
+        if tx_power:
+            return self.run_command(
+                f"echo '{os.path.join(opensync_path, 'tools/ovsh')} u Wifi_Radio_Config tx_power:={tx_power} || true' > {opensync_path}/scripts/start.d/89_txpower.sh",
+                **kwargs,
+            )
+        else:
+            return self.run_command(
+                f"rm -f {opensync_path}/scripts/start.d/89_txpower.sh",
+                **kwargs,
+            )
+
+    def get_tx_power_limit(self, **kwargs):
+        """
+        Check if tx power limiting script is present on the node and read its value
+        Args:
+            **kwargs:
+
+        Returns: raw output [(int) ret, (str) std_out, (str) str_err]
+
+        """
+        # Check if the script is present
+        opensync_path = self.get_opensync_path()[1]
+        tx_power_script = self.run_command(f"cat {opensync_path}/scripts/start.d/89_txpower.sh", **kwargs)
+        if tx_power_script[0] != 0:
+            # If the script is not present, return default value
+            if "No such file or directory" in tx_power_script[2]:
+                return [tx_power_script[0], "", "Tx power limiting script not found"]
+            return [1, "", f"Error reading tx power limiting script: {tx_power_script[2]}"]
+
+        # Read the value from the script
+        tx_value = get_digits_value_from_text("tx_power:=", tx_power_script[1])
+        return [0, tx_value, ""]
 
     def get_driver_data_rate(self, ifname, mac_address, **kwargs):
         raise NotImplementedError
@@ -1149,8 +1282,21 @@ class PodLib(PodBase):
         return self.strip_stdout_result(result)
 
     def get_macs(self, **kwargs):
+        """
+        Retrieves the list of MAC addresses for enabled Wi-Fi Virtual Interface States
+        that have SSID broadcast enabled. This method interacts with the OVSDB to
+        fetch relevant data based on the specified query.
+
+        Args:
+            **kwargs: Optional additional arguments, not directly used in
+                the query but can be passed if required.
+
+        Returns:
+            Any: The result of the OVSDB query representing MAC addresses for Wi-Fi VIF
+                states that meet the specified conditions.
+        """
         return self.ovsdb.get_str(
-            table="Wifi_VIF_State", select="mac", where=["enabled==true", "ssid_broadcast==enabled"]
+            table="Wifi_VIF_State", select="mac", where=["enabled==true", "ssid_broadcast==enabled"], **kwargs
         )
 
     def recover(self, **kwargs):
@@ -1429,13 +1575,16 @@ class PodLib(PodBase):
             return [1, "", "Cannot get region"]
         valid_cc = cc_codes[0].strip()
         # workaround for BRCM Country Code for 2.4G radio
-        if override_region and valid_cc in ["E0", "UK", "GB", "CH"]:
+        if override_region and valid_cc in ["E0", "UK", "GB", "CH", "DE"]:
             valid_cc = "EU"
+        # Morocco region is set only for 2.4G and 5GL radios, so ignore different region for 5GU
+        if valid_cc == "MA":
+            return [0, valid_cc, ""]
         for cc_code in cc_codes:
             if not cc_code:
                 log.warning("Missing county code for a radio")
                 continue
-            cc_code = "EU" if cc_code.strip() in ["E0", "UK", "GB", "CH"] else cc_code.strip()
+            cc_code = "EU" if cc_code.strip() in ["E0", "UK", "GB", "CH", "DE"] else cc_code.strip()
             if cc_code != valid_cc:
                 return [2, "", f"Different regions for different radios: {cc_codes}"]
         return [0, valid_cc, ""]
@@ -1462,33 +1611,41 @@ class PodLib(PodBase):
                 certs = self.run_command(f"cat {ca_path}", **kwargs)[1].strip()
                 assert ca_cert in certs
 
-    def redirect_stats_to_local_mqtt_broker(self, skip_storage=False, **kwargs):
-        pure_redirect = kwargs.pop("pure_redirect", False)
-        if not pure_redirect:
-            # stop firewall on the res GW devices - not a common code, so ignoring the output
-            self.run_command("firewall-cli filter -m nat", **kwargs)
-            # redirect mqtt from the test_node to local mqtt broker
-            if not skip_storage:
+    def prepare_dev_to_use_local_mqtt_broker(self, skip_storage: bool = False, **kwargs):
+        """Set firewall rule for local mqtt broker and update pod certs.
+        Additionally store mqtt-settings for restoring purposes."""
+        # stop firewall on the res GW devices - not a common code, so ignoring the output
+        self.set_firewall_mode("nat", **kwargs)
+
+        # redirect mqtt from the test_node to local mqtt broker
+        if not skip_storage:
+            self.storage["mqtt_settings"] = self.ovsdb.get_map("AWLAN_Node", "mqtt_settings", **kwargs)
+            if not self.storage["mqtt_settings"].get("broker"):
+                log.warning("Mqtt setting are gone, restarting managers...")
+                self.restart()
+                time.sleep(120)
+                self.wait_available(timeout=120)
+                timeout = time.time() + 5 * 60
+                while time.time() < timeout:
+                    log.info("Waiting till node connect with controller and gets mqtt settings")
+                    cur_map = self.ovsdb.get_map("AWLAN_Node", "mqtt_settings")
+                    if cur_map.get("topics", ""):
+                        break
+                    time.sleep(5)
+                else:
+                    return [2, "", "Pod does not have any mqtt settings"]
                 self.storage["mqtt_settings"] = self.ovsdb.get_map("AWLAN_Node", "mqtt_settings", **kwargs)
                 if not self.storage["mqtt_settings"].get("broker"):
-                    log.warning("Mqtt setting are gone, restarting managers...")
-                    self.restart()
-                    time.sleep(120)
-                    self.wait_available(timeout=120)
-                    timeout = time.time() + 5 * 60
-                    while time.time() < timeout:
-                        log.info("Waiting till node connect with controller and gets mqtt settings")
-                        cur_map = self.ovsdb.get_map("AWLAN_Node", "mqtt_settings")
-                        if cur_map.get("topics", ""):
-                            break
-                        time.sleep(5)
-                    else:
-                        return [2, "", "Pod does not have any mqtt settings"]
-                    self.storage["mqtt_settings"] = self.ovsdb.get_map("AWLAN_Node", "mqtt_settings", **kwargs)
-                    if not self.storage["mqtt_settings"].get("broker"):
-                        return [1, "", f"Cannot get mqtt setting from the {self.get_nickname()}"]
-            # append ca.crt to /var/certs/ca.pem if needed
-            self._update_pod_ca_file(**kwargs)
+                    return [1, "", f"Cannot get mqtt setting from the {self.get_nickname()}"]
+        # append ca.crt to /var/certs/ca.pem if needed
+        self._update_pod_ca_file(**kwargs)
+        return [0, "", ""]
+
+    def redirect_stats_to_local_mqtt_broker(self, skip_storage: bool = False, pure_redirect: bool = False, **kwargs):
+        if not pure_redirect:
+            out = self.prepare_dev_to_use_local_mqtt_broker(skip_storage=skip_storage, **kwargs)
+            if out[0]:
+                return out
 
         self.ovsdb.mutate("AWLAN_Node", "mqtt_settings", "del", '["port", "compress", "broker"]', **kwargs)
         self.ovsdb.mutate(
@@ -1510,10 +1667,11 @@ class PodLib(PodBase):
             ]
 
     def restore_stats_mqtt_settings(self, **kwargs):
-        # restore firewall
-        self.run_command("firewall-cli filter -m on")
         if "mqtt_settings" not in self.storage:
             return [10, "", "There is no cached information about mqtt settings"]
+        # restore firewall
+        self.set_firewall_mode("on", **kwargs)
+
         self.ovsdb.mutate("AWLAN_Node", "mqtt_settings", "del", '["port", "compress", "broker"]', **kwargs)
         self.ovsdb.mutate(
             "AWLAN_Node",
@@ -1535,19 +1693,24 @@ class PodLib(PodBase):
                 f" {self.storage['mqtt_settings']['broker']} but got: {cur_sett.get('broker', '')}",
             ]
 
+    def set_firewall_mode(self, mode: Literal["on", "nat"], **kwargs):
+        return self.run_command(f"firewall-cli filter -m {mode}", **kwargs)
+
     def enter_factory_mode(self, **kwargs):
         log.info("Entering factory mode")
         assert self.run_command("pmf -e", **kwargs)[0] == 0
         time.sleep(10)
         self.device.config["host"]["org_pass"] = self.device.config["host"].get("pass", "")
         self.device.config["host"]["pass"] = "plume"
-        assert self.wait_available(timeout=2 * 60, **kwargs)[0] == 0
+        assert self.wait_available(timeout=5 * 60, **kwargs)[0] == 0
 
     def exit_factory_mode(self, **kwargs):
         log.info("Exiting factory mode")
         timeout = time.time() + 20
         while time.time() < timeout:
-            if self.run_command("pmf -q", **kwargs)[0] == 0:
+            result = self.run_command("pmf -q", **kwargs)
+            # reboot can happen before pmf -q exits, in which case we get exit code 255
+            if result[0] == 0 or result[0] == 255:
                 break
             time.sleep(3)
         else:
@@ -1555,7 +1718,7 @@ class PodLib(PodBase):
         time.sleep(10)
         if org_pass := self.device.config["host"].pop("org_pass", ""):
             self.device.config["host"]["pass"] = org_pass
-        self.wait_available(timeout=2 * 60, **kwargs)
+        self.wait_available(timeout=5 * 60, **kwargs)
 
     def simulate_clients(self, count=1, **kwargs):
         if len(self.capabilities.get_lan_ifaces()) == 1:
@@ -1708,6 +1871,11 @@ class PodLib(PodBase):
             [
                 ("vlan_id", "VLAN", int),
             ],
+        ),
+        "dhcp": (
+            "dhcp",
+            {},
+            [],
         ),
     }
 
@@ -1888,16 +2056,24 @@ class PodLib(PodBase):
     def get_wifi_associated_clients(self, **kwargs):
         """Get all connected WiFi Clients"""
         # TODO: refactor to use ovsdb object
-        raw_table = self.get_stdout(self.get_ovsh_table("Wifi_Associated_Clients mac"), **kwargs)
+        raw_table = self.get_stdout(self.get_ovsh_table("Wifi_Associated_Clients"), **kwargs)
         if not raw_table:
             return [1, "", "No entries in Wifi_Associated_Clients"]
         table = json.loads(raw_table)
         mac_list = []
         for entry in table:
+            mld_addr = str(entry.get("mld_addr", "None"))
             mac = entry.get("mac")
-            mac_format = re.compile(r"(?:[0-9a-fA-F]:?){12}")
-            mac_address = re.findall(mac_format, mac)[0]
-            mac_list.append(mac_address)
+            mac_format = re.compile(r"(?!00:00:00:00:00:00)(?:[0-9a-fA-F]:?){12}")
+            mld_address = re.findall(mac_format, mld_addr)
+            mac_address = re.findall(mac_format, mac)
+            if mld_address:
+                mac_address = mld_address[0]
+                log.info(f"MLD address discovered: {mac_address}")
+            elif mac_address:
+                mac_address = mac_address[0]
+            if mac_address:
+                mac_list.append(mac_address)
         return [0, mac_list, ""]
 
     def get_sta_wifi_vif_mac(self, **kwargs):
@@ -2020,7 +2196,7 @@ class PodLib(PodBase):
 
     def get_pid_by_cmd(self, cmd: str, **kwargs) -> list[int, str, str]:
         """Get pid by provided cmd string"""
-        grep_cmd = f'sh -c \'ps | grep "{cmd}"\' | grep -v "grep"'
+        grep_cmd = f'sh -c \'COLUMNS=500 ps | grep "{cmd}"\' | grep -v "grep"'
         response = self.run_command(grep_cmd + " | awk '{print $1}'", **kwargs)
         if response[0] or not response[1]:
             return response
@@ -2126,6 +2302,14 @@ class PodLib(PodBase):
 
     def set_sub_channel_marking(self, ifname: str, state: int, **kwargs):
         """Set sub channel marking on specified interface."""
+        raise NotImplementedError
+
+    def get_dfs_preferred_channel(self, phy_radio_name: str, **kwargs):
+        """Get DFS preferred channel"""
+        raise NotImplementedError
+
+    def erase_certificates(self):
+        """Erase partition and install DEVELOPMENT certificates"""
         raise NotImplementedError
 
 
@@ -2331,10 +2515,21 @@ class PodIface(Iface):
         allowed_channels = [str(allowed_channel) for allowed_channel in allowed_channels]
         return allowed_channels
 
+    def get_channel_states(self, band_type: Literal["2.4G", "5G", "5GL", "5GU", "6G"]) -> dict[int, str]:
+        device_channel_states = self.lib.ovsdb.get_map(
+            table="Wifi_Radio_State", select="channels", where=[f"freq_band=={band_type}"], return_list=False
+        )
+        if not device_channel_states:
+            return {}
+        return {int(k): json.loads(v)["state"] for k, v in device_channel_states.items()}
+
     def get_allowed_channels(self, band_type):
         allowed_channels = self.lib.ovsdb.get_map(
-            table="Wifi_Radio_State", select="channels", where=[f"freq_band=={band_type}"], return_list=True
+            table="Wifi_Radio_State", select="channels", where=[f"freq_band=={band_type}"], return_list=False
         )
+        # in case of nothing, return empty tab
+        if not allowed_channels:
+            return []
         allowed_channels = [
             int(allowed_channel) for allowed_channel, state in allowed_channels.items() if "allowed" in state
         ]
@@ -2485,9 +2680,6 @@ class PodIface(Iface):
         ) + self.lib.capabilities.get_home_ap_ifnames(return_type=list)
         return all_interfaces
 
-    def get_all_assoc_clients_mac(self):
-        return self.lib.ovsdb.get_str(table="Wifi_Associated_Clients", select="mac", return_list=True)
-
     def get_all_mac_addresses(self):
         wifi_vif_state = self.lib.ovsdb.get_json_table("Wifi_VIF_State")
         return [row["mac"].upper() for row in wifi_vif_state if row.get("mac")]
@@ -2589,8 +2781,8 @@ class Ovsdb:
         else:
             raise ValueError
 
-    def parse_raw(  # noqa: C901
-        self, value_type, output, skip_exception=False, return_list=False  # noqa C901
+    def parse_raw(
+        self, value_type, output, skip_exception=False, return_list=False
     ) -> Union[int, bool, str, dict, list, UUID]:
         result = list()
 
@@ -2832,7 +3024,7 @@ class Ovsdb:
 
         return self.lib.run_command(cmd, skip_exception=skip_exception, timeout=timeout, **kwargs)
 
-    def generate_values_str(self, values: dict, skip_exception: bool = False, operator: str = None) -> str:
+    def generate_values_str(self, values: dict, skip_exception: bool = False, operator: str = None, **kwargs) -> str:
         """Generate getter/setter argument for ovsh based on the values dict.
         Depending on context this might mean a ``k==v``, ``k~=v``, or ``k:=v`` for ``ovsh`` call.
         """
@@ -2845,11 +3037,37 @@ class Ovsdb:
         )
 
     @staticmethod
-    def python_list_to_ovsdb_set(value):
+    def python_list_to_ovsdb_set(value: list) -> str:
+        """
+        Parse python list() to ovsdb set with below rules:
+        * string types like interface names etc. should be inside double quotes,
+        * force var to string type for str.join(iterable), which requires concatenation of the strings in iterable.
+        Args:
+            value: list()
+
+        Returns: str()
+
+        """
         if not isinstance(value, list):
             raise ValueError
 
-        return f'\'["set",[{",".join(value)}]]\''
+        values_to_set = list()
+        for val in value:
+            if not isinstance(val, str):
+                values_to_set.append(str(val))
+            else:
+                types_to_check = [int, float, bool]
+                for var_type in types_to_check:
+                    try:
+                        pydantic.TypeAdapter(var_type).validate_python(val)
+                        break
+                    except pydantic.ValidationError:
+                        ...
+                else:
+                    val = '"%s"' % val
+                values_to_set.append(val)
+
+        return f'\'["set",[{",".join(values_to_set)}]]\''
 
     @staticmethod
     def ovsdb_map_to_python_dict(value):

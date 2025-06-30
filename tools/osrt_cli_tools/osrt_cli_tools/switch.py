@@ -1,9 +1,11 @@
 import sys
 import fnmatch
+import traceback
 from pathlib import Path
 
 
 from lib_testbed.generic import WAN_VLAN
+
 from lib_testbed.generic.util.logger import log
 from osrt_cli_tools import tb_config_parser
 from osrt_cli_tools.pod import single_node_argument, all_nodes_argument, process_nodes_arg, complete_all_pods
@@ -11,21 +13,30 @@ from osrt_cli_tools.client import single_eth_client_argument
 from osrt_cli_tools.utils import (
     json_option,
     debug_option,
+    verbosity_option,
     print_command_output,
     bool_choices_to_bool,
     prepare_logger,
+    set_log_verbosity,
     get_testbed_name,
     is_autocomplete,
     disable_colors_option,
 )
 
 if is_autocomplete():
+    # speed up auto-complete
     import click
+
+    def threaded(f):
+        return f
+
 else:
     import rich_click as click
 
     click.rich_click.SHOW_ARGUMENTS = True
     click.rich_click.USE_MARKDOWN = True
+
+    from lib_testbed.generic.util.common import threaded
 
 
 def get_switch_object(config: dict = None):
@@ -43,7 +54,10 @@ def process_ports_arg(ctx, param, value):
     """Helper function to process ports."""
     from lib_testbed.generic.util.config import load_tb_config
 
-    testbed_name = get_testbed_name()
+    testbed_name = get_testbed_name(no_tb_ok=True)
+    if testbed_name is None:
+        # fallback to the example config in case port names cannot be determined:
+        testbed_name = "example"
     config = load_tb_config(testbed_name, skip_deployment=True)
     names = _get_all_port_names(config)
     value = value.lstrip(",").rstrip(",").split(",")
@@ -57,7 +71,8 @@ def process_ports_arg(ctx, param, value):
             if matched_list := fnmatch.filter(names, val):
                 new_ports.extend(matched_list)
     if not new_ports:
-        return names
+        click.secho(f"The value '{value}' did not match any port names", fg="red")
+        sys.exit(1)
     return new_ports
 
 
@@ -88,9 +103,10 @@ all_ports_argument = click.argument(
 @click.group(context_settings=dict(help_option_names=["-h", "--help"]))
 @debug_option
 @json_option
+@verbosity_option
 @disable_colors_option
 @click.pass_context
-def cli(ctx, debug, json, disable_colors):
+def cli(ctx, debug, json, verbosity, disable_colors):
     """Network switch control tool."""
     log.debug("Entering switch tool context")
     if not sys.stdout.isatty():
@@ -100,18 +116,116 @@ def cli(ctx, debug, json, disable_colors):
         ctx.obj["DEBUG"] = debug
     if not ctx.obj.get("JSON"):
         ctx.obj["JSON"] = json
+    if not ctx.obj.get("VERBOSITY"):
+        ctx.obj["VERBOSITY"] = verbosity
     if not ctx.obj.get("DISABLE_COLORS"):
         ctx.obj["DISABLE_COLORS"] = disable_colors
     if not is_autocomplete():
-        prepare_logger(ctx.obj["DEBUG"])
+        if ctx.obj.get("VERBOSITY"):
+            set_log_verbosity(ctx.obj["VERBOSITY"])
+        else:
+            prepare_logger(ctx.obj["DEBUG"])
+
+
+@threaded
+def _reserve_and_execute_against_tb(ctx, tb_name: str, command: str, *args, **kwargs) -> tuple[str, dict]:
+    """Reserve testbed, execute command, unreserve testbed."""
+    from lib_testbed.generic.util.config import load_tb_config
+    from osrt_cli_tools import reserve
+
+    tb_config = load_tb_config(tb_name, skip_deployment=True)
+
+    reservation_obj = reserve.get_reserve_object(tb_name, json=ctx.obj.get("JSON", False))
+    dry_run, skip_reservation = ctx.obj.get("DRY_RUN", False), ctx.obj.get("SKIP_RESERVATION", False)
+    result, reservation_status, reserved = None, None, True
+    if not skip_reservation:
+        if not dry_run:
+            current_reservation_status = reservation_obj.get_reservation_status()
+            if current_reservation_status.get("busyByMe"):
+                # no need to unreserve testbed, status is reserved already
+                skip_reservation, reserved = True, True
+            else:
+                log.debug("Reserving testbed %s", tb_name)
+                reservation_status = reservation_obj.reserve_test_bed()
+                if not reservation_status["status"]:
+                    click.secho(
+                        f"Could not obtain reservation for testbed {tb_name}.",
+                        err=True,
+                        fg="red" if not ctx.obj.get("DISABLE_COLORS") else None,
+                    )
+                    reserved = False
+        else:
+            click.secho(f"DRY-RUN: Reserving testbed {tb_name}")
+            reserved = True
+    else:
+        click.secho(
+            f"Skipping reservation for testbed {tb_name}",
+            fg="red" if not ctx.obj.get("DISABLE_COLORS") else None,
+            err=True,
+        )
+
+    if reserved:
+        try:
+            if not dry_run:
+                log.info("Testbed %s reserved successfully", tb_name)
+                log.debug("Reservation status: %s", reservation_status)
+                switch = get_switch_object(tb_config)
+                meth = getattr(switch, command)
+                log.info("Executing switch command against testbed %s [args=%s, kwargs=%s]", command, args, kwargs)
+                result = meth(*args, **kwargs)
+            else:
+                click.secho(
+                    f"DRY-RUN: executing switch command {command} with {args} {kwargs} on testbed {tb_name}", bold=True
+                )
+                result = {"dry-run": [0, "completed successfully", ""]}
+        finally:
+            if not skip_reservation and reserved:
+                if not dry_run:
+                    log.info("Unreserving testbed %s", tb_name)
+                    unreserve_status = reservation_obj.unreserve()
+                    log.debug("Unreserve status: %s", unreserve_status)
+                else:
+                    click.secho(f"DRY-RUN: Unreserving testbed {tb_name}")
+            return tb_name, result
+    return tb_name, {}
+
+
+def _execute_tool_command_parallel(ctx, command: str, *args, show_names=True, **kwargs):
+    """Schedule tasks for each testbed and gather results."""
+
+    testbeds = ctx.obj.get("TESTBEDS")
+    tb_tasks = []
+    results = []
+    for tb_name in testbeds:
+        log.info("Starting work on testbed %s", tb_name)
+        tb_tasks.append(_reserve_and_execute_against_tb(ctx=ctx, tb_name=tb_name, command=command, *args, **kwargs))
+    for task in tb_tasks:
+        try:
+            results.append(task.result())
+        except Exception as e:
+            results.append(["EXECUTION ERROR", {"CLIENTS": [1, "", "".join(traceback.format_exception(e))]}])
+    if ctx.obj.get("JSON", False):
+        click.echo("[")
+    for tb_name, result in results[:-1]:
+        print_command_output(ctx, output=result, show_names=show_names, title=tb_name)
+        if ctx.obj.get("JSON", False):
+            click.echo(",")
+    # the last element must not end with a comma to get a valid json, so we iterate over [:-1] first, and only then
+    # print out the last remaining element without the trailing comma:
+    print_command_output(ctx, output=results[-1][1], show_names=show_names, title=results[-1][0])
+    if ctx.obj.get("JSON", False):
+        click.echo("]")
 
 
 def _execute_switch_command(ctx, command: str, *args, **kwargs):
     """Wrapper for executing and printing out switch command result."""
-    switch = get_switch_object()
-    meth = getattr(switch, command)
-    result = meth(*args, **kwargs)
-    print_command_output(ctx, result)
+    if ctx.obj.get("TESTBEDS"):
+        _execute_tool_command_parallel(ctx, command, *args, **kwargs)
+    else:
+        switch = get_switch_object()
+        meth = getattr(switch, command)
+        result = meth(*args, **kwargs)
+        print_command_output(ctx, result)
 
 
 @cli.command
@@ -151,7 +265,7 @@ def restore_config(ctx):
 def list_(ctx):
     """List all ports configured.
 
-    The output format is kept for backwards compatibility.
+    The output format is kept for backwards compatibility. This command is not compatible with osrt lab.
     """
     switch = get_switch_object()
     ret = switch.switch_interface_list()
@@ -219,7 +333,7 @@ def vlan_set(ctx, vlan, vlan_type, ports):
 
 @cli.command("vlan-delete")
 @click.argument("vlan", type=click.INT)
-@all_ports_optional_argument
+@all_ports_argument
 @click.pass_context
 def vlan_delete(ctx, vlan, ports):
     """Delete **VLAN** for **PORTS**."""
@@ -227,7 +341,9 @@ def vlan_delete(ctx, vlan, ports):
 
 
 @cli.command("ip-type-set")
-@click.argument("addressing", type=click.Choice(choices=[vlan.lower() for vlan in WAN_VLAN.__members__.keys()]))
+@click.argument(
+    "addressing", type=click.Choice(choices=[vlan.lower() for vlan in WAN_VLAN.__members__.keys()] + ["blackhole"])
+)
 @click.argument("nodes", callback=process_nodes_arg, shell_complete=complete_all_pods, required=True)
 @click.pass_context
 def set_ip_type(ctx, nodes, addressing):
@@ -338,6 +454,32 @@ def set_link_speed(ctx, speed, port, duplex):
 def set_daisy_chain(ctx, connect_to_device, target_device):
     """Set daisy chain connection between two pods **CONNECT_TO_DEVICE** <--eth--> **TARGET_DEVICE**"""
     _execute_switch_command(ctx, "set_daisy_chain_connection", target_device, connect_to_device)
+
+
+@cli.command("bandwidth-limit-set")
+@click.pass_context
+@click.argument("ingress_rate", type=click.IntRange(min=0, max=1000000), default=0)
+@click.argument("egress_rate", type=click.IntRange(min=0, max=1000000), default=0)
+@click.argument("port", default=None, type=click.STRING)
+def set_bw_limit(ctx, ingress_rate, egress_rate, port):
+    """Set PORT bandwidth limit.
+
+
+    ingress_rate - Specify the upper rate limit for receiving packets from 1 to 1000000 kbps,
+    if 0 then disable the limit
+
+    egress-rate  - Specify the upper rate limit for sending packets from 1 to 1000000 kbps,
+    if 0 then disable the limit
+    """
+    _execute_switch_command(ctx, "set_bw_limit", port, ingress_rate, egress_rate)
+
+
+@cli.command("bandwidth-limit-get")
+@all_ports_optional_argument
+@click.pass_context
+def get_bw_limit(ctx, ports):
+    """Get PORTS bandwidth limit."""
+    _execute_switch_command(ctx, "get_bw_limit", ports)
 
 
 def get_bash_complete() -> Path:

@@ -22,7 +22,7 @@ _client_completion() {
 }
 
 _client_completion_setup() {
-    complete -o nosort -F _client_completion client
+    complete -F _client_completion client
 }
 
 _client_completion_setup;

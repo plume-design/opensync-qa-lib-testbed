@@ -1,12 +1,4 @@
-import tempfile
 import marshal
-import pytest
-
-
-@pytest.fixture(scope="function")
-def custom_temp_dir(tmp_path, monkeypatch):
-    """Patch python's tempdir to use pytest's temporary directory."""
-    monkeypatch.setattr(tempfile, "gettempdir", lambda: tmp_path)
 
 
 def test_completions_dir_creted(custom_temp_dir, tmp_path):

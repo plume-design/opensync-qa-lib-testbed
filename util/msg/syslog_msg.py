@@ -105,7 +105,7 @@ class SyslogMsg:
         else:
             # list or other sequence
             modules = set(module)
-        cmd = f"{self._cmd} | grep {process} -i" if process else self._cmd
+        cmd = f'{self._cmd} | grep -i -E "{process.replace(",", "|")}"' if process else self._cmd
         cmd += f" | tail -n {last_lines}"
         result = self.pod.run_command(cmd, timeout=timeout, retry=False)
         messages = []
@@ -120,7 +120,7 @@ class SyslogMsg:
             message = parse_syslog_message(line)
             if not message:
                 continue
-            if process and message["process"] != process:
+            if process and message["process"] not in process.split(","):
                 continue
             if modules and message["module"] not in modules:
                 continue

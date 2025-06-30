@@ -5,8 +5,7 @@ from lib_testbed.generic.util.ssh.device_api import DevicesApi
 from lib_testbed.generic.util.ssh.device_discovery import DeviceDiscovery
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.object_resolver import ObjectResolver
-from lib_testbed.generic.util.config import FIXED_HOST_CLIENTS
-
+from lib_testbed.generic.util.config import FIXED_HOST_CLIENTS, load_file
 
 DIRECTORY_TYPE = "generic"
 
@@ -117,7 +116,15 @@ class Clients(ObjectFactory):
                 continue
             obj_list.append(class_obj)
         if not obj_list:
-            raise Exception(f"No client available for: {kwargs}")
+            clients_info = kwargs.get("config").get("Clients")
+            if clients_info:
+                # re-load file without extra parsing to improve error message:
+                location_file = kwargs.get("config").get("location_file")
+                location_raw_cfg = load_file(location_file)
+                msg = f"No client available for: {location_raw_cfg.get("Clients")}"
+            else:
+                msg = f"No client available for: {kwargs}"
+            raise Exception(msg)
         return DevicesApi(obj_list, **kwargs)
 
     @staticmethod

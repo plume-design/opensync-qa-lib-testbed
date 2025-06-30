@@ -1,0 +1,60 @@
+{
+  "short-name": "FILOGIC880-BE19000",
+  "s3-bucket": "",
+  "6.6.0.1": {
+    "proj-name": "build_filogic880_be19000_v6.6.0",
+    "fn-prefix": "mtkFILOGIC880-BE19000-dsa-10g-spim-nand-squashfs",
+    "use-build-map-build-profile": "opensync-dev-debug",
+    "encryption": false,
+    "use-build-map-suffix": true,
+    "img-suffix": "bin"
+  },
+  "6.6.0": {
+    "proj-name": "build_filogic880_be19000_v6.6.0",
+    "fn-prefix": "mtkFILOGIC880-BE19000-dsa-10g-spim-nand-squashfs",
+    "use-build-map-build-profile": "opensync-dev-debug",
+    "encryption": false,
+    "use-build-map-suffix": true,
+    "img-suffix": "bin"
+  },
+  "7.0.0": {
+    "proj-name": "build_filogic880_be19000_v7.0.0",
+    "fn-prefix": "mtkFILOGIC880-BE19000-dsa-10g-spim-nand-squashfs",
+    "use-build-map-build-profile": "opensync-dev-debug",
+    "encryption": false,
+    "use-build-map-suffix": true,
+    "img-suffix": "bin",
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "master": {
+    "proj-name": "build_filogic880_be19000_master",
+    "fn-prefix": "mtkFILOGIC880-BE19000-dsa-10g-spim-nand-squashfs",
+    "use-build-map-build-profile": "opensync-dev-debug",
+    "encryption": false,
+    "use-build-map-suffix": true,
+    "img-suffix": "bin",
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "build_device_featurebranch": {
+    "proj-name": "build_device_featurebranch",
+    "fn-prefix": "mtkFILOGIC880-BE19000-dsa-10g-spim-nand-squashfs",
+    "use-build-map-build-profile": "opensync-dev-debug",
+    "encryption": false,
+    "use-build-map-suffix": true,
+    "img-suffix": "bin",
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  },
+  "fbb": {
+    "proj-name": "build_device_featurebranch",
+    "fn-prefix": "mtkFILOGIC880-BE19000-dsa-10g-spim-nand-squashfs",
+    "use-build-map-build-profile": "opensync-dev-debug",
+    "encryption": false,
+    "use-build-map-suffix": true,
+    "img-suffix": "bin",
+    "enc-suffix": "eim",
+    "key-suffix": "key"
+  }
+}

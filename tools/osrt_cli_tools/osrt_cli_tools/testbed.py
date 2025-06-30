@@ -12,7 +12,9 @@ from lib_testbed.generic.util.opensyncexception import OpenSyncException
 from osrt_cli_tools.utils import (
     print_table,
     debug_option,
+    verbosity_option,
     prepare_logger,
+    set_log_verbosity,
     complete_testbeds,
     get_testbed_name,
     is_autocomplete,
@@ -31,18 +33,24 @@ else:
 
 @click.group(context_settings=dict(help_option_names=["-h", "--help"]))
 @debug_option
+@verbosity_option
 @disable_colors_option
 @click.pass_context
-def cli(ctx, debug, disable_colors):
+def cli(ctx, debug, verbosity, disable_colors):
     """Testbed recovery and information tool."""
     log.debug("Entering testbed tool context")
     ctx.ensure_object(dict)
     if not ctx.obj.get("DEBUG"):
         ctx.obj["DEBUG"] = debug
+    if not ctx.obj.get("VERBOSITY"):
+        ctx.obj["VERBOSITY"] = verbosity
     if not ctx.obj.get("DISABLE_COLORS"):
         ctx.obj["DISABLE_COLORS"] = disable_colors
     if not is_autocomplete():
-        prepare_logger(ctx.obj["DEBUG"])
+        if ctx.obj.get("VERBOSITY"):
+            set_log_verbosity(ctx.obj["VERBOSITY"])
+        else:
+            prepare_logger(ctx.obj["DEBUG"])
 
 
 @cli.command
@@ -166,9 +174,8 @@ def recover(ctx, name):
 
 def wait_for_server_availability(reboot_timeout: int, level: int):
     """Wait for server availability with reboot_timeout (in minutes) and log level."""
-    from lib_testbed.generic.util.logger import log
+    from lib_testbed.generic.util.logger import log, log_level
     from osrt_cli_tools.client import get_client_object
-    from osrt_cli_tools.utils import log_level
 
     now = time.time()
     while time.time() < now + 60 * reboot_timeout:

@@ -16,12 +16,11 @@ from lib_testbed.generic.util.opensyncexception import OpenSyncException
 class SwitchApiGeneric:
     def __init__(self, config, switch_unit_cfg):
         self.config = config
-        self.init_ports_info_to_cfg()
         self.init_fixed_vlans()
         self.switch_ctrl = SwitchController(tb_config=self.config, switch_unit_cfg=switch_unit_cfg, switch_api=True)
         self.switch_unit = self.switch_ctrl.switch_units[0]
         self.min_required_version = "1.7.5"
-        self.ports_isolation_cfg = dict()
+        self._stored_ports_info = dict()
 
     @parse_request
     def setup_class_handler(self, request):
@@ -34,7 +33,7 @@ class SwitchApiGeneric:
 
         version = self.version(skip_exception=True)
         self.config["switch_version"] = version
-        AllureUtil(request.config).add_environment(f"switch_{self.switch_unit.ip}_version", version, "_error")
+        AllureUtil(request.config).cache_testbed_value(f"switch_{self.switch_unit.ip}_version", version)
         assert compare_fw_versions(version, self.min_required_version, ">="), (
             f"Config on the {self.switch_unit.ip} switch is older than {self.min_required_version}, "
             f"please upgrade to the latest"
@@ -45,21 +44,23 @@ class SwitchApiGeneric:
         """Return switch aliases defined in test-config."""
         return self.switch_unit.aliases
 
+    @property
+    def stored_ports_info(self) -> dict:
+        # Store ports info to reduce number of calls to switch
+        if not self._stored_ports_info:
+            return self.get_ports_info([port_name for port_name in self.switch_aliases])
+        return self._stored_ports_info
+
+    @stored_ports_info.setter
+    def stored_ports_info(self, ports_info):
+        self._stored_ports_info.update({port_name: port_info[1] for port_name, port_info in ports_info.items()})
+
     @functools.cached_property
     def switch_isolation(self) -> dict:
         """Return port isolation config based on switch cfg from rpi-server."""
         return self.get_port_isolation_cfg()
 
     def init_fixed_vlans(self): ...
-
-    def init_ports_info_to_cfg(self):
-        if self.config.get("ports_info"):
-            return
-        self.config["ports_info"] = dict()
-
-    def dump_ports_info(self, ports_info: dict):
-        # Dump ports info to reduce number of calls to switch
-        self.config["ports_info"].update({port_name: port_info[1] for port_name, port_info in ports_info.items()})
 
     # TODO Update all functions to return stdout. Consider update all calls to functions.
     @staticmethod
@@ -142,10 +143,10 @@ class SwitchApiGeneric:
         """
         if isinstance(vlan_port_names, str):
             port_info = self.switch_ctrl.switch_info(vlan_port_names)
-            self.dump_ports_info(ports_info=port_info)
+            self.stored_ports_info = port_info
             return port_info[vlan_port_names][1]
         ports_info = self.switch_ctrl.switch_info(vlan_port_names)
-        self.dump_ports_info(ports_info=ports_info)
+        self.stored_ports_info = ports_info
         return ports_info
 
     def get_port_info(self, vlan_port_name: str) -> str:
@@ -158,7 +159,7 @@ class SwitchApiGeneric:
 
         """
         response = self.switch_ctrl.switch_info(vlan_port_name)
-        self.dump_ports_info(ports_info=response)
+        self.stored_ports_info = response
         return self.get_stdout_port_requests(response)[vlan_port_name]
 
     def get_ports_info(self, vlan_port_names: list) -> dict:
@@ -171,7 +172,7 @@ class SwitchApiGeneric:
 
         """
         response = self.switch_ctrl.switch_info(vlan_port_names)
-        self.dump_ports_info(ports_info=response)
+        self.stored_ports_info = response
         return response
 
     def version(self, **kwargs):
@@ -370,6 +371,9 @@ class SwitchApiGeneric:
                 break
 
         if not old_wan_port_name:
+            if vlan_type == "untagged":
+                log.info(f"Not found WAN VLAN for {pod_name} device. Restoring default configuration")
+                self.recovery_switch_configuration(pod_names=[pod_name], force=False, set_default_wan=True)
             if ignore_missing:
                 return False
             assert False, f"Not found wan vlan\n{ports_info}"
@@ -504,7 +508,7 @@ class SwitchApiGeneric:
         client_blackhole_vlan = str(client_blackhole_vlan)
         all_alias_infos = self.get_all_switch_aliases("")
         port_names = [info[0] for info in all_alias_infos]
-        port_infos = self.switch_ctrl.switch_info_parsed(port_names)
+        port_infos = self.get_parsed_ports_info(port_names)
         disconencted_aliases = []
         for alias_info in all_alias_infos:
             port_name, _, port_blackhole_vlan = alias_info
@@ -527,7 +531,7 @@ class SwitchApiGeneric:
         pod_alias_infos = self.get_all_switch_aliases(pod_name)
         port_names = [info[0] for info in pod_alias_infos]
         raw_infos = self.get_ports_info(port_names)
-        port_infos = self.switch_ctrl.switch_info_parsed(port_names)
+        port_infos = self.get_parsed_ports_info(port_names)
         unused = []
         for port_name, _, port_blackhole_vlan in pod_alias_infos:
             # Uplink might be arriving via tagged or untagged VLAN, so check for 2xx WAN VLAN IDs first.
@@ -566,27 +570,40 @@ class SwitchApiGeneric:
         wan_port = 0
         for port_info in ports_info:
             for port_alias in port_info:
-                vlan_name = port_alias[0]
-                vlan_name_list.append(vlan_name)
-                default_blackhole = port_alias[2]
-                if self.ports_isolation_cfg.get(vlan_name):
-                    self.set_forward_ports_isolation(vlan_name, self.ports_isolation_cfg.get(vlan_name))
-                switch_info = self.switch_info(vlan_name)
-                if not force and self.get_wan_vlan_number(switch_info) and wan_port == 0:
+                # By default, skip recovering only first port with WAN uplink
+                vlan_name = self.recover_port_configuration(port_alias, recover_wan_port=force or wan_port != 0)
+                if vlan_name is None:
                     wan_port += 1
-                    continue
-                if str(default_blackhole) not in switch_info:
-                    log.info(f"Setting default configuration on {vlan_name}")
-                    self.change_untagged_vlan(vlan_name, default_blackhole)
-                # Specific case for residential gw with mgmt over the eth-dongle
-                if "gw" in vlan_name:
-                    self.restore_rpi_dongle_vlan(device_port=vlan_name, pod_name="gw")
+                else:
+                    vlan_name_list.append(vlan_name)
             self.disable_no_used_ports(device_aliases=port_info)
         # If force is set to True skip recover wan port
         # Force arg should set only default switch configuration from cfg not more
         if not wan_port and not force:
             self.recover_wan_port(ports_info, default_wan_vlan=default_wan_vlan)
         return vlan_name_list
+
+    def recover_port_configuration(self, port_alias: tuple[str, int, int], recover_wan_port: bool) -> str | None:
+        """
+        Set default configuration on switch port from test bed config and return its name.
+
+        If port is WAN port and `recover_wan_port` is False, don't recover its settings and return None.
+        """
+        port_name = port_alias[0]
+        port_number = str(port_alias[1])
+        port_blackhole = port_alias[2]
+        port_info = self.get_port_info(port_name)
+        if self.get_wan_vlan_number(port_info) and not recover_wan_port:
+            return None
+        if port_number in self.switch_isolation:
+            self.set_forward_ports_isolation(port_name, self.switch_isolation[port_number])
+        if str(port_blackhole) not in port_info:
+            log.info(f"Setting default configuration on {port_name}")
+            self.change_untagged_vlan(port_name, port_blackhole)
+        # Specific case for residential gw with mgmt over the eth-dongle
+        if "gw" in port_name:
+            self.restore_rpi_dongle_vlan(device_port=port_name, pod_name="gw")
+        return port_name
 
     def recover_wan_port(self, ports_info, default_wan_vlan):
         port_uplink = self.get_uplink_port(ports_info)
@@ -616,17 +633,20 @@ class SwitchApiGeneric:
 
         """
         ports_aliases = self.get_all_switch_aliases(pod_name)
-        ports_name = [port_alias[0] for port_alias in ports_aliases]
+        # port_name -> port's blackhole vlan
+        ports_name = {port_alias[0]: port_alias[2] for port_alias in ports_aliases}
         target_port = [port_name for port_name in ports_name if self.get_wan_vlan_number(self.switch_info(port_name))]
-        target_port = target_port[0] if target_port else ports_name[0]
+        target_port = target_port[0] if target_port else ports_aliases[0][0]
+        blackhole_vlan = ports_name[target_port]
         vlan_map = {vlan_name.lower(): vlan for vlan_name, vlan in WAN_VLAN.__members__.items()}
+        vlan_map["blackhole"] = blackhole_vlan
         target_vlan = ip_type if isinstance(ip_type, int) else vlan_map.get(ip_type.lower())
 
         # Make sure port-forwarding is enabled between target port and tb-server
-        switch_isolation_cfg = self.switch_isolation[str(self.switch_aliases[target_port]["port"])]
+        switch_isolation_cfg = self.get_forward_ports_isolation(target_port)
         if "1/0/2" not in switch_isolation_cfg:
             switch_isolation_cfg += ",1/0/2"
-            self.switch_ctrl.issue_port_action(target_port, port_action=switch_isolation_cfg)
+            self.set_forward_ports_isolation(target_port, switch_isolation_cfg)
 
         response = self.change_untagged_vlan(
             port_name=target_port, target_vlan=int(target_vlan), enable_port=enable_port
@@ -712,7 +732,7 @@ class SwitchApiGeneric:
         assert port_name and default_backhaul, f"Not found no-wan-port for: {switch_aliases}"
         return port_name, default_backhaul
 
-    def set_daisy_chain_connection(self, target_device, connect_to_device):
+    def set_daisy_chain_connection(self, target_device: str, connect_to_device: str) -> tuple[str, str, int]:
         """
         Set daisy chain connection between two pods connect_to_device <--eth--> target_device
         Args:
@@ -720,39 +740,56 @@ class SwitchApiGeneric:
             connect_to_device: (str) Name of device where target device can be connected
 
         Returns:
-
+            target_device's port name, connect_to_device's port name and backhaul VLAN used for connection
         """
-        devices_connection_type = self.get_devices_connection_type()
-        if devices_connection_type[connect_to_device] == "daisy_chain":
-            all_ports_info = {
-                port_name: port_data[1]
-                for port_name, port_data in self.switch_info(self.get_list_of_all_port_names()).items()
-            }
-            for port_name, port_number, default_backhaul in self.get_all_switch_aliases(connect_to_device):
-                if not self.is_daisy_chain_connection(all_ports_info, port_name):
-                    target_port, target_backhaul = port_name, default_backhaul
-                    break
-            else:
-                raise OpenSyncException(
-                    f"Can not find any unused port to set daisy chain connection between "
-                    f"{target_device} <--> {connect_to_device} devices"
-                )
-        else:
-            target_port, target_backhaul = self.get_no_wan_port(self.get_all_switch_aliases(connect_to_device))
-        self.enable_port(target_port)
-        device_port_name, port_number, *_ = self.get_switch_alias(target_device)
+        target_candidates = self.get_unused_pod_ports(target_device)
+        if not target_candidates:
+            return [4, "", f"{target_device} pod has no free ports left"]
+        target_name = target_candidates[0]
+        target_port = self.switch_aliases[target_name]["port"]
 
-        # Set port-forwarding between used ports
-        port_to_update = [
-            (self.switch_aliases[device_port_name], self.switch_aliases[target_port]["port"]),
-            (self.switch_aliases[target_port], port_number),
-        ]
-        for switch_alias, port_to_forward in port_to_update:
-            port_isolation_cfg = self.switch_isolation[str(switch_alias["port"])]
-            port_isolation_cfg += f",1/0/{port_to_forward}"
-            self.switch_ctrl.issue_port_action(switch_alias["name"], port_action=port_isolation_cfg)
+        connect_to_candidates = self.get_unused_pod_ports(connect_to_device)
+        if not connect_to_candidates:
+            return [4, "", f"{connect_to_device} pod has no free ports left"]
+        connect_to_name = connect_to_candidates[0]
+        connect_to_backhaul = self.switch_aliases[connect_to_name]["backhaul"]
+        connect_to_port = self.switch_aliases[connect_to_name]["port"]
 
-        return self.change_untagged_vlan(device_port_name, target_vlan=target_backhaul)
+        log.info(f"Disabling port isolation between {target_name} and {connect_to_name} switch ports")
+        target_allowed = self.get_forward_ports_isolation(target_name)
+        target_allowed = f"{target_allowed},1/0/{connect_to_port}"
+        self.set_forward_ports_isolation(target_name, target_allowed)
+
+        connect_to_allowed = self.get_forward_ports_isolation(connect_to_name)
+        connect_to_allowed = f"{connect_to_allowed},1/0/{target_port}"
+        self.set_forward_ports_isolation(connect_to_name, connect_to_allowed)
+
+        # Target's port gets enabled by change_untagged_vlan() below
+        self.enable_port(connect_to_name)
+
+        log.info(f"Connecting {target_name} to {connect_to_name} by setting its untagged VLAN to {connect_to_backhaul}")
+        self.change_untagged_vlan(target_name, target_vlan=connect_to_backhaul)
+        return target_name, connect_to_name, connect_to_backhaul
+
+    def clear_daisy_chain_connection(self, target_device: str) -> list[str]:
+        """
+        Clean up all daisy chain switch port connection settings found on `target_device` pod.
+
+        Return list of device's switch port names where settings were restored.
+        """
+        # Get only stdout from port_info
+        all_ports_info = {
+            port_name: port_data[1]
+            for port_name, port_data in self.get_ports_info(self.get_list_of_all_port_names()).items()
+        }
+        recovered_aliases = []
+        for port_alias in self.get_all_switch_aliases(target_device):
+            if self.is_daisy_chain_connection(all_ports_info, port_alias[0]):
+                self.recover_port_configuration(port_alias, recover_wan_port=False)
+                recovered_aliases.append(port_alias)
+        if recovered_aliases:
+            self.disable_no_used_ports(device_aliases=recovered_aliases)
+        return [port_alias[0] for port_alias in recovered_aliases]
 
     def get_devices_connection_type(self):
         devices_name = [node["name"] for node in self.config["Nodes"] if node.get("switch")]
@@ -814,10 +851,13 @@ class SwitchApiGeneric:
                 break
         return is_connected
 
-    @staticmethod
-    def is_daisy_chain_connection(all_ports_info, target_port_name):
+    def is_daisy_chain_connection(self, all_ports_info, target_port_name):
         daisy_chain_connection = False
         target_port_info = all_ports_info.get(target_port_name)
+        # Refresh port-info data if the target-port info is missing
+        if not target_port_info:
+            target_port_info = self.get_port_info(target_port_name)
+            all_ports_info.update({target_port_name: target_port_info})
         assert target_port_info, f'"all_ports_info" variable does not contain any data about: {target_port_name}'
         target_port_pvid = re.search("3[0-9][0-9]", target_port_info)
         # port pvid is out of 300-399 scope
@@ -854,6 +894,81 @@ class SwitchApiGeneric:
                 continue
             return port_alias["backhaul"]
         raise Exception(f"Not found any default vlan number for: {port_name} port name")
+
+    def get_parsed_port_info(self, vlan_port_name: str) -> dict:
+        """
+        Get parsed port info
+        Args:
+            vlan_port_name: str() Name of port E.g. gw_eth0, gw_eth1 etc.
+
+        Returns: dict()
+        {
+            'pvid': <PVID (712)>,
+            'tagged': [<Tagged VLAN ID (4)>],
+            'untagged': [<Untagged VLAN ID (712)>],
+            'vlans': {<VLAN ID (4)>: <VLAN name (Management)>}
+        }
+        """
+        port_info = self.get_port_info(vlan_port_name)
+        return self.interface_info_parser(port_info)
+
+    def get_parsed_ports_info(self, vlan_port_names: list) -> dict:
+        """
+        Get parsed port info
+        Args:
+            vlan_port_names: list() Name of ports E.g. gw_eth0, gw_eth1 etc.
+
+        Returns: dict()
+        {
+        "gw_eth0":
+            {
+                'pvid': <PVID (712)>,
+                'tagged': [<Tagged VLAN ID (4)>],
+                'untagged': [<Untagged VLAN ID (712)>],
+                'vlans': {<VLAN ID (4)>: <VLAN name (Management)>}
+            },
+         "gw_eth1":
+            {
+                'pvid': <PVID (712)>,
+                'tagged': [<Tagged VLAN ID (4)>],
+                'untagged': [<Untagged VLAN ID (712)>],
+                'vlans': {<VLAN ID (4)>: <VLAN name (Management)>}
+            },
+        }
+        """
+        parsed_ports_info = dict()
+        ports_info = self.get_stdout_port_requests(self.get_ports_info(vlan_port_names))
+        for port_name, port_info in ports_info.items():
+            parsed_ports_info[port_name] = self.interface_info_parser(port_info)
+        return parsed_ports_info
+
+    @staticmethod
+    def interface_info_parser(port_info: str) -> dict:
+        """
+        Parse return value of get_port_info() method.
+        Args:
+            port_info: str() Return value of get_port_info() method.
+
+        Returns: dict()
+        {
+            'pvid': <PVID (712)>,
+            'tagged': [<Tagged VLAN ID (4)>],
+            'untagged': [<Untagged VLAN ID (712)>],
+            'vlans': {<VLAN ID (4)>: <VLAN name (Management)>}
+        }
+        """
+        parsed = {"pvid": None, "tagged": [], "untagged": [], "vlans": {}}
+        for line in port_info.splitlines():
+            s = line.split()
+            if "PVID" in line:
+                parsed["pvid"] = s[1]
+            elif "Tagged" in line:
+                parsed["tagged"].append(s[1])
+                parsed["vlans"][s[1]] = s[2]
+            elif "Untagged" in line:
+                parsed["untagged"].append(s[1])
+                parsed["vlans"][s[1]] = s[2]
+        return parsed
 
     def change_untagged_vlan(self, port_name, target_vlan, enable_port=True):
         """
@@ -944,4 +1059,30 @@ class SwitchApiGeneric:
 
     def set_port_forwarding_between_gws(self):
         """Set port forwarding between gateway devices."""
+        raise NotImplementedError
+
+    def set_bw_limit(self, port_name: str, ingress_rate: int, egress_rate: int):
+        """
+        Set PORT bandwidth limit.
+        Args:
+            port_name: (str) Name of port
+            ingress_rate: (int) Specify the upper rate limit for receiving packets from 1 to 1000000 kbps,
+            if 0 then disable the limit
+            egress_rate: (int) Specify the upper rate limit for sending packets from 1 to 1000000 kbps,
+            if 0 then disable the limit
+
+        Returns: dict(port_name: stdout)
+
+        """
+        raise NotImplementedError
+
+    def get_bw_limit(self, port_names: str | list[str]):
+        """
+        Get PORTS bandwidth limit
+        Args:
+            port_names: (str) Name of port OR (list) Name of ports
+
+        Returns: dict(port_name: stdout)
+
+        """
         raise NotImplementedError

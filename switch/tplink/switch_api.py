@@ -1,5 +1,6 @@
 import re
 import time
+
 from lib_testbed.generic.util.logger import log
 from lib_testbed.generic.util.common import DeviceCommon
 from lib_testbed.generic.util.opensyncexception import OpenSyncException
@@ -8,7 +9,7 @@ from lib_testbed.generic.switch.util import get_switch_config_path
 
 PORT_15_NAME = "rpi_dongle"
 PORT_15_CONF = {"name": PORT_15_NAME, "port": 15, "backhaul": 309}
-FIXED_VLANS = [PORT_15_CONF]
+FIXED_16_PORT_SWITCH_VLANS = [PORT_15_CONF]
 
 
 class SwitchApi(SwitchApiGeneric):
@@ -17,7 +18,14 @@ class SwitchApi(SwitchApiGeneric):
 
     def init_fixed_vlans(self):
         for switch in self.config.get("Switch", []):
-            switch["alias"] += FIXED_VLANS
+            if not self.is_16_port_switch(switch):
+                continue
+            switch["alias"] += FIXED_16_PORT_SWITCH_VLANS
+
+    @staticmethod
+    def is_16_port_switch(switch_config: dict) -> bool:
+        switch_ports = [switch_alias["port"] for switch_alias in switch_config["alias"]]
+        return True if max(switch_ports) > 8 else False
 
     def change_untagged_vlan(self, port_name, target_vlan, enable_port=True):
         """
@@ -76,7 +84,7 @@ class SwitchApi(SwitchApiGeneric):
             if enable_port:
                 log.info(f"Enabling {port_name}")
                 self.switch_ctrl.interface_up(port_name)
-            port_info = self.switch_ctrl.switch_info_parsed(port_name)[port_name]
+            port_info = self.get_parsed_port_info(port_name)
             if target_vlan in port_info["tagged"]:
                 break
             log.error(f"Current {port_name} port info: {port_info}, target vlan: {target_vlan}")
@@ -109,7 +117,7 @@ class SwitchApi(SwitchApiGeneric):
             if enable_port:
                 log.info(f"Enabling {port_name}")
                 self.switch_ctrl.interface_up(port_name)
-            port_info = self.switch_ctrl.switch_info_parsed(port_name)[port_name]
+            port_info = self.get_parsed_port_info(port_name)
             if target_vlan not in port_info["tagged"]:
                 break
             if res[0]:
@@ -203,12 +211,6 @@ class SwitchApi(SwitchApiGeneric):
         response = self.switch_ctrl.disable_port_isolation(vlan_port_names)
         return self.get_stdout_port_requests(response)
 
-    def dump_ports_isolation(self, port_names):
-        port_names = port_names if isinstance(port_names, list) else [port_names]
-        for port_name in port_names:
-            port_isolation_cfg = self.get_forward_ports_isolation(port_name)
-            self.ports_isolation_cfg[port_name] = port_isolation_cfg
-
     def get_port_isolation_cfg(self) -> dict:
         """Get port isolation config based on switch cfg from rpi-server."""
         # Determine switch type
@@ -257,7 +259,7 @@ class SwitchApi(SwitchApiGeneric):
             if not default_port_isolation:
                 log.warning(f"Can not describe isolation config for {port_name} and port number: {port_number}")
                 continue
-            self.switch_ctrl.issue_port_action(port_name, port_action=default_port_isolation)
+            self.set_forward_ports_isolation(port_name, default_port_isolation)
 
     @staticmethod
     def parse_port_isolation_from_switch_cfg(switch_cfg):
@@ -274,13 +276,15 @@ class SwitchApi(SwitchApiGeneric):
                     continue
                 # parse "interface gigabitEthernet x/x/x" line to get port number only
                 port_number = re.search(r"([^\/]+$)", line).group()
-                isolation_config[port_number] = interface_cfg_line.lstrip()
+                # Keep only the comma separated list of forward ports from a line like this:
+                # port isolation gi-forward-list 1/0/1,1/0/3-11,1/0/16
+                isolation_config[port_number] = interface_cfg_line.strip().split()[-1]
                 break
         return isolation_config
 
     def is_rpi_dongle_used(self, device_port, pod_name):
         # Consider residential-gw only
-        if DeviceCommon.get_gw_dev_type(config=self.config) != "residential_gateway":
+        if DeviceCommon.get_gw_wan_link_selection_enabled(config=self.config) is True:
             return False
         # Skip if port is not used for mgmt access
         if "mn" not in self.get_role_of_port(device_port):
@@ -326,3 +330,31 @@ class SwitchApi(SwitchApiGeneric):
                 port_to_forward = self.switch_aliases[wan_port_to_forward]["port"]
                 port_isolation_to_update += f",1/0/{port_to_forward}"
                 self.switch_ctrl.set_forward_port_isolation(wan_port, forward_ports=port_isolation_to_update)
+
+    def set_bw_limit(self, port_name: str, ingress_rate: int, egress_rate: int):
+        """
+        Set PORT bandwidth limit.
+        Args:
+            port_name: (str) Name of port
+            ingress_rate: (int) Specify the upper rate limit for receiving packets from 1 to 1000000 kbps,
+            if 0 then disable the limit
+            egress_rate: (int) Specify the upper rate limit for sending packets from 1 to 1000000 kbps,
+            if 0 then disable the limit
+
+        Returns: dict(port_name: stdout)
+
+        """
+        response = self.switch_ctrl.set_bw_limit(port_name, ingress_rate, egress_rate)
+        return self.get_stdout_port_requests(response)
+
+    def get_bw_limit(self, port_names: str | list[str]):
+        """
+        Get PORTS bandwidth limit
+        Args:
+            port_names: (str) Name of port OR (list) Name of ports
+
+        Returns: dict(port_name: stdout)
+
+        """
+        response = self.switch_ctrl.get_bw_limit(port_names)
+        return self.get_stdout_port_requests(response)

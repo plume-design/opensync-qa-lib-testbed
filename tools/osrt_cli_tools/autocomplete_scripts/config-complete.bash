@@ -22,7 +22,7 @@ _config_completion() {
 }
 
 _config_completion_setup() {
-    complete -o nosort -F _config_completion config
+    complete -F _config_completion config
 }
 
 _config_completion_setup;

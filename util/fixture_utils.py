@@ -1,7 +1,6 @@
 import sys
-
-from lib_testbed.generic.util.logger import log, LogCatcher
-from pytest import CollectReport, StashKey
+from lib_testbed.generic.util.logger import log
+from pytest import CollectReport, StashKey, FixtureLookupError
 
 phase_report_key = StashKey[dict[str, CollectReport]]()
 """ This variable holds the item stash key, to be imported and used within fixtures.
@@ -33,6 +32,7 @@ class safe_setup:
         # forcing obj._request name to indicate that if this attribute should not be used
         # whenever possible:
         self.request = self.main_obj._request = request
+        self.log_catcher_fixture = self.get_log_catcher_fixture()
 
     def __enter__(self):
         self.obj.setup(self.scope, self.request)
@@ -58,13 +58,15 @@ class safe_setup:
             except Exception:
                 log.exception("Failed to check whether test has steps!")
                 has_steps = False
-            LogCatcher.attach_logs(
-                opensync_obj=[self.main_obj],
-                configuration_name=nickname,
-                failed=failed,
-                has_steps=has_steps,
-                scope=self.scope,
-            )
+
+            if self.log_catcher_fixture:
+                self.log_catcher_fixture(
+                    opensync_obj=self.main_obj,
+                    configuration_name=nickname,
+                    failed=failed,
+                    has_steps=has_steps,
+                    scope=self.scope,
+                )
 
     @staticmethod
     def is_failed(scope, request, setup_exception, teardown_exception):
@@ -107,6 +109,14 @@ class safe_setup:
                 return False
             return False
         return False
+
+    def get_log_catcher_fixture(self):
+        log_catcher_fixture = None
+        try:
+            log_catcher_fixture = self.request.getfixturevalue(f"log_catcher_{self.scope}")
+        except (FixtureLookupError, Exception) as err:
+            log.exception(err)
+        return log_catcher_fixture
 
 
 class OSRTFixtureTestObject:

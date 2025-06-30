@@ -32,18 +32,18 @@ def add_model(cfg, matrix, cmodel, module=None, https=True, **kwargs):
         m_prerequisite_versions = []
         if len(cmodel) > 3:
             m_prerequisite_versions = cmodel[3]
-        regex = r"((?P<prefix>[a-zA-Z-]*))?(?P<branch>\d.\d.\d)-(?P<build>\d*)-(?P<sha>\w+)-(?P<profile>.*)"
+        regex = r"((?P<prefix>[a-zA-Z_]*))?(?P<branch>\d.\d.\d)-(?P<build>\d*)-(?P<sha>\w+)-(?P<profile>.*)"
         fw_match = re.match(regex, m_fw_version)
         if not fw_match:
             log.error("Cannot parse %s" % m_fw_version)
-            prefix = "native-" if "native" in m_fw_version else ""
-            m_fw_version = m_fw_version.replace("native-", "")
+            prefix = "native_" if "native" in m_fw_version else ""
+            m_fw_version = m_fw_version.replace("native_", "")
             version = m_fw_version.split("-")[0]
             img_profile = "-".join(m_fw_version.split("-")[3:])
         else:
             fw_parts = fw_match.groupdict()
             version = fw_parts["branch"]
-            prefix = fw_parts["prefix"].lower()
+            prefix = fw_parts["prefix"].lower().replace("_", "")
             m_fw_version = f"{fw_parts['branch']}-{fw_parts['build']}-{fw_parts['sha']}-{fw_parts['profile']}"
             img_profile = fw_parts["profile"]
 
@@ -52,12 +52,21 @@ def add_model(cfg, matrix, cmodel, module=None, https=True, **kwargs):
             log.error(f"!! Model {m_model} not supported.")
             sys.exit(23)
 
-        if prefix + version not in model_map:
+        if prefix in model_map:
+            build_data = model_map[prefix]
+        elif prefix + version in model_map:
+            build_data = model_map[prefix + version]
+        elif prefix + "_" + version in model_map:
+            build_data = model_map[prefix + "_" + version]
+        elif version in model_map:
+            build_data = model_map[version]
+        else:
             log.warning(f"Cannot find proper branch for {version} for {m_model}. Trying master branch")
-            version = "master"
+            build_data = model_map["master"]
 
-        build_data = model_map[prefix + version]
         bucket = build_data["s3-bucket"] if "s3-bucket" in build_data else model_map["s3-bucket"]
+        if build_data["fn-prefix"][-1] == "-":
+            build_data["fn-prefix"] = build_data["fn-prefix"][:-1]
         base_name = f"{build_data['fn-prefix']}-{m_fw_version}"
 
         # for downloadUrl add the first fw version that supports encrypted upgrade
@@ -84,12 +93,12 @@ def add_model(cfg, matrix, cmodel, module=None, https=True, **kwargs):
         s3_url = cfg["artifactory"]["s3_url"]
         if not https:
             s3_url = s3_url.replace("https://", "http://")
-        img_url = f"{s3_url}/{bucket}/{img_name}"
-
+        img_url = f"{s3_url}/device-fbb/{img_name}" if prefix == "fbb" else f"{s3_url}/{bucket}/{img_name}"
+        enc_url = None
         if build_data["encryption"]:
             enc_name = f'{base_name}.{build_data["enc-suffix"]}'
             key_name = f'{enc_name}.{build_data["key-suffix"]}'
-            enc_url = f"{s3_url}/{bucket}/{enc_name}"
+            enc_url = f"{s3_url}/device-fbb/{enc_name}" if prefix == "fbb" else f"{s3_url}/{bucket}/{enc_name}"
             key_url = f'{cfg["artifactory"]["url"]}/{build_data["proj-name"]}/{key_name}'
 
         model = dict()
@@ -112,10 +121,14 @@ def add_model(cfg, matrix, cmodel, module=None, https=True, **kwargs):
         if test_url(img_url, **kwargs):
             model["downloadUrl"] = img_url
 
-        if build_data["encryption"] and test_url(enc_url, **kwargs):
+        if build_data["encryption"]:
             key = get_enc_key(key_url)
-            model["encryptedDownloadUrl"] = enc_url
             model["firmwareEncryptionKey"] = key
+            if test_url(enc_url, **kwargs):
+                model["encryptedDownloadUrl"] = enc_url
+
+        if not model.get("downloadUrl") and not model.get("encryptedDownloadUrl"):
+            raise KeyError("There is no url working")
 
         if module:
             model["modules"] = [
@@ -156,60 +169,56 @@ def test_url(url, **kwargs):
             raise Exception(f"URL test failed: {err}")
 
 
+def query_artifactory_search(cfg, build_name, build_number):
+    """Query artifactory API search endpoint for all artifacts list. Retrun response object"""
+    artif_url = cfg["artifactory"]["url"] + "/api/search/buildArtifacts"
+    headers = {"Content-Type": "application/json"}
+
+    data = '{"buildName": "' + build_name + '", "buildNumber": "' + build_number + '"}'
+    log.debug("Artifactory request data for list of all artifacts: %s", data)
+
+    return requests.post(artif_url, headers=headers, data=data, timeout=300)
+
+
 def query_artifactory_for_artifact_list(cfg, build_name, build_number):
     """Query artifactory API for a list of all artifacts."""
-    artif_url = cfg["artifactory"]["url"] + "/api/search/buildArtifacts"
-    headers = {
-        "Content-Type": "application/json",
-    }
-
-    data = '{ "buildName":"' + build_name + '", "buildNumber":"' + build_number + '" }'
-    log.debug(data)
     fwjson = {}
     try:
-        fwresp = requests.post(artif_url, headers=headers, data=data)
+        fwresp = query_artifactory_search(cfg, build_name, build_number)
         fwjson = fwresp.json()
+        log.debug("Artifactory json response: %s", fwjson)
     except Exception as e:
-        traceback.print_exc()
+        log.error("Captured error: %s", "".join(traceback.format_exception(e)))
         log.error(str(e))
+
     if fwjson.get("errors"):
         errors = fwjson.get("errors")[0]
-        log.error(f'Status={errors.get("status")}: {errors.get("message")}')
+        log.error(f'Status {errors.get("status")}: {errors.get("message")}')
         return []
     else:
         log.debug(fwjson)
         return fwjson
 
 
-def get_artifactory_fw_url(cfg, fw_ver, model, map_type="build_map.json", use_build_map_suffix=False):
+def get_artifactory_fw_url(
+    cfg: dict, fw_ver: str, model: str, map_type: str = "build_map.json", build_map: dict = None
+):
     fw_ver = fw_ver.split("-")
-    legacy = ""
-    if "legacy" in fw_ver:
-        legacy = "legacy-"
-        fw_ver.remove("legacy")
-    native = ""
-    if "native" in fw_ver:
-        native = "native-"
-        fw_ver.remove("native")
-    fw_map_full = get_map(model, map_type)
-    fw_map = fw_map_full[legacy + native + fw_ver[0]]
+    fw_map_full = get_map(model, map_type) if not build_map else build_map
+    fw_map = fw_map_full[fw_ver[0]]
     fw_regex = fw_map.get("fn-regex", fw_map_full.get("fn-regex"))
-    # TODO please suggest an alternative to get tar.bz2 from img-suffix in here for "pod gw upgrade" command -
-    #  why not simply use img-suffix, enc-suffix when they're provided?
-    use_build_map_suffix = fw_map.get("use-build-map-suffix", use_build_map_suffix)
 
     # TODO how to override this for some res GW which is not using this - overriding this at deployment file level
     #  seems wrong
     build_profile = fw_map.get("use-build-map-build-profile", cfg.get("build_profile", "dev-debug"))
     build_name = fw_map["proj-name"].split("/")[0]
     build_number = fw_ver[1]
-    if use_build_map_suffix:
-        if fw_map["encryption"]:
-            suffix = fw_map["enc-suffix"]
-        else:
-            suffix = fw_map["img-suffix"]
-    else:
-        suffix = "img"
+    suffix = fw_map["enc-suffix"] if fw_map["encryption"] else fw_map.get("img-suffix", "")
+    if not suffix:
+        log.warning(
+            "Image file suffix not configured in build_map.json. Add 'img-suffix' or 'enc-suffix' for encrypted images."
+        )
+
     # Get raw data from artifactory
     fwjson = query_artifactory_for_artifact_list(cfg, build_name, build_number)
     # If the query result is empty, return None
@@ -218,7 +227,6 @@ def get_artifactory_fw_url(cfg, fw_ver, model, map_type="build_map.json", use_bu
     all_urls = [url["downloadUri"] for url in fwjson["results"]]
     filter_urls = []
     fw_artifacts = []
-
     # Filter out only the correct build_profile and suffix
     for url in all_urls:
         if build_profile in url and url.endswith(suffix):
@@ -243,15 +251,10 @@ def get_artifactory_fw_url(cfg, fw_ver, model, map_type="build_map.json", use_bu
     return fw_artifacts[0]
 
 
-def generate_artifactory_fw_url(cfg, fw_ver, model, map_type="build_map.json", use_build_map_suffix=False):
+def generate_artifactory_fw_url(cfg, fw_ver, model, map_type="build_map.json", suffix=None):
     fw_map = get_map(model, map_type)[fw_ver.split("-")[0]]
-    if use_build_map_suffix:
-        if fw_map["encryption"]:
-            suffix = fw_map["enc-suffix"]
-        else:
-            suffix = fw_map["img-suffix"]
-    else:
-        suffix = "img"
+    if not suffix:
+        suffix = fw_map["enc-suffix"] if fw_map["encryption"] else fw_map["img-suffix"]
     return f'{cfg["artifactory"]["url"]}/{fw_map["proj-name"]}/{fw_map["fn-prefix"]}-{fw_ver}.{suffix}'
 
 
@@ -266,7 +269,7 @@ def search_artifact_by_name(cfg, regex):
     try:
         rest_response = requests.get(artif_url, headers=headers)
     except Exception as exception:
-        traceback.print_exc()
+        log.error("Captured error: %s", "".join(traceback.format_exception(exception)))
         raise exception
 
     resp_json = rest_response.json()

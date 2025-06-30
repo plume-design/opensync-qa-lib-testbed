@@ -1,13 +1,12 @@
 import sys
 import os
-import logging
 import time
 from lib_testbed.generic.util.ssh.sshexception import SshException
 from lib_testbed.generic.util.ssh import parallelssh
 from lib_testbed.generic.util.ssh.device_log_catcher import DeviceLogCatcher
-from lib_testbed.generic.util.logger import log
+from lib_testbed.generic.util.logger import log, log_level
 
-MOCK_RESPONSES_LOGS = True
+MOCK_RESPONSES_LOGS = False
 
 
 class SshExecute:
@@ -65,9 +64,12 @@ class SshExecute:
         """Run ssh command on device
         :return: list of [ret_value, stdout, stderr]"""
         skip_remote = kwargs.get("skip_remote")
+        log.debug("Executing command: '%s' against '%s'", command, self.name)
         if self.ext_path and not skip_remote:
             command = f"PATH=$PATH:{self.ext_path}; {command}"
-        return self.execute(command, *args, **kwargs)
+        results = self.execute(command, *args, **kwargs)
+        log.debug("Command returned exit code=%s, stdout='%s', stderr='%s'", results[0], results[1].strip(), results[2])
+        return results
 
     def recover(self):
         raise NotImplementedError
@@ -195,7 +197,7 @@ class SshExecute:
             result_dict = self.execute_cmd(remote_command_dict, **new_kwargs)
         if not skip_logging:
             self.log_catcher.add(command, remote_command_dict, result_dict, self.device, start_time)
-            if log.isEnabledFor(logging.DEBUG):
+            if MOCK_RESPONSES_LOGS:
                 self.log_catcher.add_mock(command, result_dict, self.device.name)
         return result_dict[self.device.name]
 
@@ -233,24 +235,27 @@ class SshCmd(SshExecute):
             ret[1] += os.path.join(location, os.path.basename(remote_file))
         return ret
 
-    def wait_available(self, timeout=5, **kwargs):
+    def wait_available(self, timeout=5, skip_ns: bool = False, **kwargs):
         """Wait for device(s) to become available"""
-        kwargs.pop("skip_logging", True)
         kwargs.pop("retry", True)
         _timeout = time.time() + timeout
         result = [1, "", "Check not started"]
+        log.debug("Waiting for '%s's for '%s' to become available", timeout, self.name)
         while time.time() < _timeout:
             time_left = _timeout - time.time()
-            command = self.device.get_remote_cmd("ls").replace("-o", f"-o ConnectTimeout={int(time_left)} -o", 1)
-            result = self.run_command(
-                command, timeout=time_left, skip_remote=True, skip_logging=True, retry=False, **kwargs
+            remote_command = self.device.get_remote_cmd("ls", skip_ns=skip_ns).replace(
+                "-o", f"-o ConnectTimeout={int(time_left)} -o", 1
             )
+            with log_level(log.INFO):
+                result = self.run_command(remote_command, timeout=time_left, skip_remote=True, retry=False, **kwargs)
             if result[0] == 0:
                 result[1] = "Ready"
                 break
             time.sleep(0.5)
         if result[0]:
             result[2] = f"SSH not available after {timeout} sec"
+        else:
+            log.debug("Device '%s' available after '%s's.", self.name, timeout - time_left)
         return result
 
     def wait_unavailable(self, timeout=5, **kwargs):
@@ -258,52 +263,59 @@ class SshCmd(SshExecute):
         Wait for device(s) to become unavailable. Arguments are ``timeout`` - command timeout, the time after which the
         function does not check connectivity and returns.
         Optional kwargs available:
-          * ``skip_logging`` (bool, optional, default=True) Skip logging for internal commands used to determine connectivity.
           * ``retry`` (bool, optional, default=False) Retry the internal command used to determine connectivity if it fails.
           * ``ssh_timeout`` (int, optional, default=5) Timeout the internal command used to determine connectivity.
 
         Returns: (list) [ ``exit code`` (int), ``stdout`` (str), ``stderr`` (str)]
         """
-        skip_logging = kwargs.pop("skip_logging", True)
         retry = kwargs.pop("retry", False)
         ssh_timeout = kwargs.pop("ssh_timeout", 5)
         _timeout = time.time() + timeout
         result = [1, "", "Check not started"]
-        command = self.device.get_remote_cmd("ls").replace("-o", f"-o ConnectTimeout={ssh_timeout} -o", 1)
+        remote_command = self.device.get_remote_cmd("ls").replace("-o", f"-o ConnectTimeout={ssh_timeout} -o", 1)
+        log.debug("Waiting for '%s's for '%s' to become unavailable", timeout, self.name)
         while time.time() < _timeout:
-            result = self.run_command(
-                command, timeout=ssh_timeout, skip_remote=True, skip_logging=skip_logging, retry=retry, **kwargs
-            )
+            with log_level(log.INFO):
+                result = self.run_command(remote_command, timeout=ssh_timeout, skip_remote=True, retry=retry, **kwargs)
             if result[0] != 0:
                 break
             time.sleep(0.5)
         if result[0]:
             result[1] = f"Success - device unavailable after {_timeout - time.time()} sec"
+            log.debug(result[1])
         else:
             result[2] = f"SSH available after {timeout} sec"
+            log.debug(result[2])
         # Invert result
         result[0] = int(not result[0])
         return result
 
     def put_file(self, file_name, location, timeout=10 * 60, **kwargs):
         """Copy a file onto device(s)"""
+        log.debug("Putting file '%s' to '%s' location '%s'", file_name, self.name, location)
         command = self.device.scp_cmd(file_name, f"{{DEST}}:{location}")
-        return self.run_command(command, **kwargs, timeout=timeout, skip_remote=True)
+        with log_level(log.INFO):
+            result = self.run_command(command, **kwargs, timeout=timeout, skip_remote=True)
+        log.debug("Command returned exit code=%s, stdout='%s', stderr='%s'", result[0], result[1].strip(), result[2])
+        return result
 
-    def put_dir(self, directory, location, **kwargs):
+    def put_dir(self, directory, location, timeout=5 * 60, **kwargs):
         """
-        Put for on client(s)
+        Put directory in location onto device
         Args:
-            directory: (str) local path on computer
-            location: (str) remote path on client
-            **kwargs:
+            directory: (str) path to local directory
+            location: (str) path to remote directory
 
         Returns: (list) [[(int) ret, (str) stdout, (str) stderr]]
-
         """
-        command = (
+        as_sudo = "sudo " if kwargs.pop("as_sudo", False) else ""
+        log.debug("Putting dir '%s' to path '%s' on '%s'", directory, location, self.name)
+        remote_command = (
             f"cd {directory}; tar -cf - *  |"
-            + self.device.get_remote_cmd(f"mkdir -p {location}; cd {location}; tar -xof -")
+            + self.device.get_remote_cmd(f"{as_sudo}mkdir -p {location}; cd {location}; {as_sudo}tar -xof -")
             + " 2>/dev/null"
         )
-        return self.run_command(command, **kwargs, timeout=5 * 60, skip_remote=True)
+        with log_level(log.INFO):
+            result = self.run_command(remote_command, **kwargs, timeout=timeout, skip_remote=True)
+        log.debug("Command returned exit code=%s, stdout='%s', stderr='%s'", result[0], result[1].strip(), result[2])
+        return result

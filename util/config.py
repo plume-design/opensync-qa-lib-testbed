@@ -197,7 +197,6 @@ def get_deployment(config, default_deployment=None):
 
     """
     deployment_name = config.get(TBCFG_PROFILE)
-    serial = config["Nodes"][0]["id"]
     if not deployment_name:
         raise OpenSyncException("Missing profile setting in config file")
     if deployment_name == "auto":
@@ -208,6 +207,7 @@ def get_deployment(config, default_deployment=None):
                 "Inventory API does not exist", "Change auto profile in location config to deployment name"
             )
         if local_storage.inv_available:
+            serial = config["Nodes"][0]["id"]
             if serial in local_storage.node_deployment_cache:
                 deployment_name = local_storage.node_deployment_cache[serial]
             else:
@@ -226,7 +226,9 @@ def get_deployment(config, default_deployment=None):
             if default_deployment:
                 deployment_name = default_deployment
             else:
-                raise OpenSyncException("Deployment name is set to auto and cannot be discovered from Inventory")
+                raise OpenSyncException(
+                    "Deployment name is set to auto and cannot be discovered from Inventory, try to use --deployment param"
+                )
         if deployment_name == "dog1":
             deployment_name = "dogfood"
     return deployment_name
@@ -663,7 +665,7 @@ def get_model_capabilities(model, device_type="node"):
                 capab["interfaces"][iface_group][band] = re.sub(r"\(|\)|\?|\*", "", mode)
 
     # if device does not support DFS, remove DFS channels from its capabilities
-    if capab["dfs"]:
+    if "DFS" in capab["features"]:
         return capab
     warn_printed = False
     for band, channels in capab["interfaces"]["radio_channels"].items():
